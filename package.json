@@ -1,0 +1,28 @@
+{
+  "name": "gpui-telegram-web",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Full-featured hexagonal TypeScript web edition of bhrum/gpui-telegram with Telegram Web A/K parity",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "packages/protocol",
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@gpui-telegram/protocol && npm run build --workspace=@gpui-telegram/server && npm run build --workspace=@gpui-telegram/web",
+    "dev": "npm run build --workspace=@gpui-telegram/protocol && npm run dev --workspace=@gpui-telegram/web",
+    "start": "node apps/server/dist/index.js",
+    "typecheck": "npm run build --workspace=@gpui-telegram/protocol && npm run build --workspace=@gpui-telegram/server && tsc -p packages/protocol/tsconfig.json --noEmit && tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit && tsc -p tsconfig.base.json --noEmit",
+    "test:unit": "vitest run --maxWorkers=2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}

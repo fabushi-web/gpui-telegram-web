@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": [
+    "playwright.config.ts",
+    "helpers/**/*.ts",
+    "tier1/**/*.ts",
+    "tier2/**/*.ts",
+    "tier3/**/*.ts",
+    "tier4/**/*.ts",
+    "tier5/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".e2e-data",
+    "test-results",
+    "playwright-report"
+  ]
+}
