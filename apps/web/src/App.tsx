@@ -1,100 +1,310 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { DOM_IDS } from '@gpui-telegram/protocol';
+import { getClientAdapter } from './adapters';
+import {
+  BrowserControlWorkspace,
+  ComputerWorkbench,
+  HermesStudioPanel,
+  McpToolsDock,
+  TalkModeOrb,
+  TaskCenterWorkspace,
+  WalletStarsModal,
+} from './components/ai';
+import { AuthScreen, PasscodeLockScreen } from './components/auth';
+import { CallOverlay } from './components/calls';
+import { MainShell } from './components/layout';
+import { LeftColumn } from './components/left';
+import {
+  InstantViewModal,
+  LightboxViewer,
+  MediaEditorModal,
+} from './components/media';
+import { MiddleColumn } from './components/middle';
+import { MiniAppCatalogModal, MiniAppModal } from './components/miniapps';
+import { ModalHost } from './components/modals';
+import { RightColumn } from './components/right';
+import { SettingsPanel } from './components/settings';
+import { browserControlAgent } from './services/browserControlAgent';
+import {
+  useAuthStore,
+  useChatStore,
+  useSettingsStore,
+  useUiStore,
+  type ModalId,
+} from './store';
 
-interface HealthInfo {
-  ok: boolean;
-  version: string;
-  status?: string;
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return target.isContentEditable;
 }
 
-export function App(): React.JSX.Element {
-  const [health, setHealth] = useState<HealthInfo | null>(null);
+const ToastStack: React.FC = () => {
+  const toasts = useUiStore((s) => s.toasts);
+  const dismissToast = useUiStore((s) => s.dismissToast);
 
+  if (toasts.length === 0) return null;
+
+  return (
+    <div
+      className="tg-toast-stack"
+      role="status"
+      aria-live="polite"
+      style={{
+        position: 'fixed',
+        right: '18px',
+        bottom: '18px',
+        zIndex: 'var(--tg-z-toast, 950)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        maxWidth: 'min(380px, calc(100vw - 36px))',
+        pointerEvents: 'none',
+      }}
+    >
+      {toasts.map((toast) => {
+        const borderColor =
+          toast.kind === 'error'
+            ? 'var(--tg-danger)'
+            : toast.kind === 'success'
+              ? 'var(--tg-success)'
+              : toast.kind === 'warning'
+                ? 'var(--tg-warning)'
+                : 'var(--tg-accent)';
+        return (
+          <div
+            key={toast.id}
+            data-testid="toast-notification"
+            data-toast-kind={toast.kind}
+            onClick={() => dismissToast(toast.id)}
+            style={{
+              pointerEvents: 'auto',
+              cursor: 'pointer',
+              padding: '10px 14px',
+              borderRadius: '10px',
+              backgroundColor: 'var(--tg-bg-elevated)',
+              color: 'var(--tg-text-primary)',
+              border: '1px solid var(--tg-border)',
+              borderLeft: `3px solid ${borderColor}`,
+              boxShadow: 'var(--tg-shadow-lg)',
+              fontSize: '13px',
+              lineHeight: 1.45,
+            }}
+          >
+            {toast.message}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+export function App(): React.JSX.Element {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAddingAccount = useAuthStore((s) => s.isAddingAccount);
+  const isLocked = useAuthStore((s) => s.isLocked);
+  const adapterMode = useAuthStore((s) => s.adapterMode);
+
+  const theme = useSettingsStore((s) => s.theme);
+  const language = useSettingsStore((s) => s.language);
+
+  const activeNavDest = useUiStore((s) => s.activeNavDest);
+  const openSettings = useUiStore((s) => s.openSettings);
+  const toggleRightSidebar = useUiStore((s) => s.toggleRightSidebar);
+  const setInChatSearchOpen = useUiStore((s) => s.setInChatSearchOpen);
+  const setActiveNavDest = useUiStore((s) => s.setActiveNavDest);
+  const openModal = useUiStore((s) => s.openModal);
+
+  const activeChatId = useChatStore((s) => s.activeChatId);
+  const chatsById = useChatStore((s) => s.chatsById);
+
+  // Hydrate persisted settings and session accounts on initial mount
   useEffect(() => {
-    let active = true;
-    fetch('/api/v1/health')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: HealthInfo | null) => {
-        if (active && data) {
-          setHealth(data);
-        }
-      })
-      .catch(() => {
-        // Standalone mode fallback handled by client adapters in M1B+
+    useSettingsStore.getState().hydrateSettings();
+    void useAuthStore.getState().hydrateAuth();
+  }, []);
+
+  // Bridge custom shortcut modal events across LeftColumn / SettingsPanel / ModalHost
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onOpenShortcuts = (): void => {
+      useUiStore.setState({
+        activeModal: 'shortcuts' as unknown as ModalId,
+        modalPayload: { source: 'menu' },
       });
+    };
+    window.addEventListener('gpui:open-shortcuts-modal', onOpenShortcuts);
     return () => {
-      active = false;
+      window.removeEventListener('gpui:open-shortcuts-modal', onOpenShortcuts);
     };
   }, []);
 
+  // Keep document title & F17 live browser bridge metadata synchronized
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const activeChat = activeChatId !== null ? chatsById[activeChatId] : undefined;
+    const titlePrefix = activeChat?.title ? `${activeChat.title} · ` : '';
+    document.title = `${titlePrefix}GPUI Telegram Web`;
+    document.documentElement.lang = language === 'zh-CN' ? 'zh-CN' : 'en';
+
+    if (!isAuthenticated || isLocked) return;
+
+    const timer = setTimeout(() => {
+      const statePayload = browserControlAgent.buildStateReportPayload();
+      void getClientAdapter(adapterMode)
+        .reportBrowserState({
+          ...statePayload,
+          theme,
+          active_chat_id: activeChatId,
+          active_nav_dest: activeNavDest,
+        })
+        .catch(() => {
+          // Non-fatal if tab not yet registered over REST
+        });
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [
+    isAuthenticated,
+    isLocked,
+    adapterMode,
+    activeChatId,
+    activeNavDest,
+    theme,
+    language,
+    chatsById,
+  ]);
+
+  // Supplemental global keyboard shortcuts when authenticated & unlocked
+  useEffect(() => {
+    if (!isAuthenticated || isAddingAccount || isLocked || typeof window === 'undefined') {
+      return;
+    }
+
+    const onKeyDown = (ev: KeyboardEvent): void => {
+      if (ev.defaultPrevented) return;
+      const mod = ev.ctrlKey || ev.metaKey;
+      const lowerKey = ev.key.toLowerCase();
+
+      // Ctrl/Cmd + , -> Open Settings
+      if (mod && !ev.shiftKey && !ev.altKey && ev.key === ',') {
+        ev.preventDefault();
+        openSettings('root');
+        return;
+      }
+
+      // Ctrl/Cmd + F -> Open In-Chat Search when a chat is active
+      if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'f') {
+        const cid = useChatStore.getState().activeChatId;
+        if (cid !== null) {
+          ev.preventDefault();
+          setInChatSearchOpen(true);
+          window.requestAnimationFrame(() => {
+            const input = document.getElementById(DOM_IDS.IN_CHAT_SEARCH_INPUT);
+            if (input instanceof HTMLInputElement) {
+              input.focus();
+              input.select();
+            }
+          });
+          return;
+        }
+      }
+
+      // Ctrl/Cmd + I -> Toggle Right Inspector (only outside editable composer so *italic* works!)
+      if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'i' && !isEditableElement(ev.target)) {
+        ev.preventDefault();
+        toggleRightSidebar();
+        return;
+      }
+
+      // Ctrl/Cmd + J -> Toggle Hermes AI Studio workspace
+      if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'j') {
+        ev.preventDefault();
+        const cur = useUiStore.getState().activeNavDest;
+        setActiveNavDest(cur === 'hermes' ? 'chats' : 'hermes');
+        return;
+      }
+
+      // Ctrl/Cmd + Shift + N -> Create Channel modal
+      if (mod && ev.shiftKey && !ev.altKey && lowerKey === 'n') {
+        ev.preventDefault();
+        openModal('create_channel');
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    isAuthenticated,
+    isAddingAccount,
+    isLocked,
+    openSettings,
+    setInChatSearchOpen,
+    toggleRightSidebar,
+    setActiveNavDest,
+    openModal,
+  ]);
+
+  const activeWorkspaceOverlay = useMemo<React.ReactNode>(() => {
+    switch (activeNavDest) {
+      case 'hermes':
+        return <HermesStudioPanel />;
+      case 'tasks':
+        return <TaskCenterWorkspace />;
+      case 'mcp':
+        return <McpToolsDock />;
+      case 'talk':
+        return <TalkModeOrb />;
+      case 'computers':
+        return <ComputerWorkbench />;
+      case 'browser_control':
+        return <BrowserControlWorkspace />;
+      default:
+        return null;
+    }
+  }, [activeNavDest]);
+
+  // Gate 1: Unauthenticated or adding a secondary account -> AuthScreen only (no #app-shell)
+  if (!isAuthenticated || isAddingAccount) {
+    return (
+      <>
+        <AuthScreen />
+        <ToastStack />
+      </>
+    );
+  }
+
+  // Gate 2: Passcode Lock active -> PasscodeLockScreen ONLY (strictly never mount #app-shell while locked!)
+  if (isLocked) {
+    return (
+      <>
+        <PasscodeLockScreen />
+        <ToastStack />
+      </>
+    );
+  }
+
+  // Gate 3: Full Authenticated 4-Breakpoint Shell + All Domain Overlays
   return (
-    <main
-      id={DOM_IDS.APP_SHELL}
-      style={{
-        minHeight: '100dvh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: '#0E1621',
-        color: '#F5F5F5',
-        padding: '24px',
-        boxSizing: 'border-box',
-      }}
+    <MainShell
+      leftSlot={<LeftColumn />}
+      middleSlot={<MiddleColumn />}
+      rightSlot={<RightColumn />}
+      workspaceOverlaySlot={activeWorkspaceOverlay}
     >
-      <section
-        style={{
-          maxWidth: '520px',
-          width: '100%',
-          backgroundColor: '#17212B',
-          border: '1px solid #242F3D',
-          borderRadius: '14px',
-          padding: '28px',
-          boxShadow: '0 12px 32px rgba(0, 0, 0, 0.36)',
-        }}
-      >
-        <h1
-          style={{
-            margin: '0 0 8px 0',
-            fontSize: '22px',
-            fontWeight: 600,
-            letterSpacing: '-0.01em',
-            color: '#F5F5F5',
-          }}
-        >
-          GPUI Telegram Web
-        </h1>
-        <p
-          style={{
-            margin: '0 0 18px 0',
-            fontSize: '14px',
-            lineHeight: 1.5,
-            color: '#7F91A4',
-          }}
-        >
-          Hexagonal TypeScript Web Client &amp; Full-Stack Engine (v1.2.0)
-        </p>
-        <div
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '8px',
-            padding: '6px 12px',
-            borderRadius: '8px',
-            backgroundColor: '#2B5278',
-            color: '#F5F5F5',
-            fontSize: '13px',
-            fontWeight: 500,
-          }}
-        >
-          <span>
-            {health?.ok
-              ? `Connected · Server v${health.version}`
-              : 'Initializing Telegram Web Shell…'}
-          </span>
-        </div>
-      </section>
-    </main>
+      <SettingsPanel />
+      <ModalHost />
+      <MiniAppCatalogModal />
+      <WalletStarsModal />
+      <MiniAppModal />
+      <LightboxViewer />
+      <MediaEditorModal />
+      <InstantViewModal />
+      <CallOverlay />
+      <ToastStack />
+    </MainShell>
   );
 }
 

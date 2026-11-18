@@ -184,3 +184,29 @@ Strict exclusive write ownership across tracks and parallel milestones:
         ├── tier3/                              # [E2E Track] >= 16 Cross-Feature Pairwise tests
         └── tier4/                              # [E2E Track] >= 8 Real-World End-to-End Application Scenarios
 ```
+
+---
+
+## F17 — Desktop-to-Browser Control Bridge & Standalone Parity Summary
+
+### 1. Zero Native Binary Dependency
+All desktop capabilities of `bhrum/gpui-telegram` (`v1.2.0`) are implemented natively in TypeScript across `packages/protocol`, `apps/server`, and `apps/web` with **zero runtime or build-time dependency on the Rust/GPUI desktop binary**:
+- **`server` mode**: Full Node.js 24 (`node:http` + `node:sqlite` WAL + `ws` + SSE) backend + React 19 SPA.
+- **`sandbox` mode**: 100% client-side standalone runtime (`LocalSandboxAdapter` + `BroadcastChannel` multi-tab sync) requiring zero backend server.
+- **`mtproto` mode**: Pluggable `TelegramClientPort` adapter for direct Telegram DC transport configuration.
+
+### 2. Desktop-to-Browser Control Bridge (`F17`)
+Provides bidirectional browser automation and inspection capabilities **to** `gpui-telegram` desktop clients, CLI scripts, and MCP agents:
+- **Protocol Contract (`packages/protocol/src/browserControl.ts`)**: Typed schemas for `BrowserTargetDto`, `BrowserSnapshotDto`, `BrowserElementRef`, `BrowserTabCommand`, `HeadlessBrowserSessionDto`, `DesktopPairingTokenDto`, and MCP JSON-RPC 2.0 envelopes.
+- **Live Web Tab Agent (`apps/web/src/services/browserControlAgent.ts` & `apps/web/src/components/ai/BrowserControlWorkspace.tsx`)**:
+  - Exposes `window.__GPUI_TELEGRAM_BROWSER_BRIDGE__` (`snapshot`, `executeCommand`, `getStatus`) and maintains a live `/api/v1/browser/ws` reverse-RPC channel.
+  - Supports deterministic element-ref (`e1`, `e2`, ...) DOM/Accessibility snapshots, `click`, `fill`, `press`, `hover`, `scroll`, `select`, `navigate`, SVG viewport `screenshot`, `evaluate_query`, and semantic `app_action` commands (`select_chat`, `send_chat_message`, `switch_theme`, `open_nav_dest`, `search_global`), plus `<10ms` emergency `Revoke All` (`#btn-browser-revoke-all`).
+- **Server Controller & Headless Chromium CDP Studio (`apps/server/src/routes/browserControl.ts`)**:
+  - Pairing & capability token lifecycle (`/api/v1/browser/pair/request`, `/api/v1/browser/pair/exchange`, `/api/v1/browser/grants`, `/api/v1/browser/revoke-all`) with strict per-user isolation via `X-Desktop-Browser-Token`.
+  - Isolated Headless Chromium CDP controller (`/api/v1/browser/headless/sessions/*`) with automatic `http_dom_fallback` when Chromium is absent.
+  - Standard **Model Context Protocol (MCP) JSON-RPC 2.0** server (`GET /api/v1/mcp/manifest`, `POST /api/v1/mcp/rpc`) exposing 9 `browser_*` tools.
+
+### 3. Verification Status
+- **TypeScript (`tsc --noEmit`)**: 0 errors across `packages/protocol`, `apps/server`, `apps/web`, and `e2e`.
+- **Unit & Integration (`vitest run`)**: 26/26 passed (`protocol.test.ts`, `server.test.ts`, `ecosystem.test.ts`, `browserControl.test.ts`).
+- **End-to-End (`@playwright/test` Chromium)**: 97/97 passed across all 17 Tier 1 spec files (`F1`–`F17`).

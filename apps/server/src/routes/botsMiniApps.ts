@@ -248,7 +248,7 @@ export function handleBotConversationTurn(
       createMessageAtomic(db, hub, {
         chatId,
         senderId: 777001,
-        text: 'Creating a new WebApp Mini App. Please send the `@username` of the bot that will host the Mini App.',
+        text: 'Alright, a new WebApp Mini App. Please choose a bot that will host the Mini App (send its `@username`):',
       });
       return true;
     }
@@ -394,7 +394,7 @@ export function handleBotConversationTurn(
       createMessageAtomic(db, hub, {
         chatId,
         senderId: 777001,
-        text: `Great! Send a short alphanumeric \`short_name\` for your Mini App on @${found.username} (e.g. \`dashboard\`):`,
+        text: 'Great! Now please choose a short name (alphanumeric `short_name` slug, e.g. `dashboard`) for your Web App:',
       });
       return true;
     }
@@ -1496,6 +1496,18 @@ export function registerBotsMiniAppsAndFabushiRoutes(
     ctx.res.end(sdkJs);
   });
 
+  // 5b. Binary WebAssembly kernel endpoint for 全球法布施 (`fabushi-globe`)
+  const serveFabushiWasm = (ctx: RequestContext): void => {
+    const wasmBytes = Buffer.from(FABUSHI_WASM_BASE64, 'base64');
+    ctx.res.statusCode = 200;
+    ctx.res.setHeader('Content-Type', 'application/wasm');
+    ctx.res.setHeader('Content-Length', String(wasmBytes.length));
+    ctx.res.setHeader('Cache-Control', 'no-cache');
+    ctx.res.end(wasmBytes);
+  };
+  router.get('/api/v1/fabushi-miniapp/app.wasm', serveFabushiWasm);
+  router.get('/miniapps/fabushi/app.wasm', serveFabushiWasm);
+
   // 6. Hosted Mini App Bundles (`/miniapps/:botUsername/:shortName`)
   router.get('/miniapps/:botUsername/:shortName', (ctx) => {
     const resolved = resolveMiniAppRow(ctx.params.botUsername!, ctx.params.shortName!);
@@ -1528,75 +1540,152 @@ function renderFabushiGlobeMiniAppHtml(app: MiniAppEntry): string {
   <script src="/js/telegram-web-app.js"></script>
   <style>
     body { margin: 0; padding: 16px; background: #0E1621; color: #F5F5F5; font-family: -apple-system, BlinkMacSystemFont, "Noto Sans SC", sans-serif; }
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; }
     h1 { font-size: 18px; margin: 0; color: #F5F5F5; }
     .badge { padding: 4px 10px; border-radius: 999px; background: #182533; border: 1px solid #2B5278; font-size: 12px; color: #64B5F6; }
     #globe-canvas { width: 100%; height: 220px; border-radius: 12px; background: #17212B; border: 1px solid #242F3D; display: block; margin-bottom: 12px; }
-    .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
-    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #2B5278; background: #182533; color: #F5F5F5; font-size: 13px; cursor: pointer; font-weight: 500; }
-    button:hover { background: #2B5278; }
-    .panel { background: #17212B; border: 1px solid #242F3D; border-radius: 10px; padding: 12px; font-size: 13px; line-height: 1.5; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+    .tab-btn { padding: 6px 12px; border-radius: 999px; border: 1px solid #242F3D; background: #17212B; color: #9FB3C8; font-size: 12px; cursor: pointer; }
+    .tab-btn[aria-selected="true"] { background: #2B5278; border-color: #3390EC; color: #FFFFFF; }
+    .controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+    button.action-btn { padding: 10px 12px; border-radius: 10px; border: 1px solid #2B5278; background: #182533; color: #F5F5F5; font-size: 13px; cursor: pointer; font-weight: 500; }
+    button.action-btn:hover { background: #2B5278; }
+    .panel { background: #17212B; border: 1px solid #242F3D; border-radius: 10px; padding: 12px; font-size: 13px; line-height: 1.55; margin-bottom: 10px; }
+    .rank-list { margin: 6px 0 0; padding-left: 18px; }
   </style>
 </head>
 <body>
   <header>
-    <h1>🌏 全球法布施 · 3D WASM 禅室</h1>
+    <h1>🌏 全球法布施 · 3D WASM 禅堂</h1>
     <span class="badge" id="merit-badge">功德: 108 · WASM Ready</span>
   </header>
   <canvas id="globe-canvas" width="520" height="220"></canvas>
+  <div class="tabs" role="tablist">
+    <button class="tab-btn" role="tab" aria-selected="true" data-tab="zen" type="button">禅堂 Zen</button>
+    <button class="tab-btn" role="tab" aria-selected="false" data-tab="sutra" type="button">佛经 Sutra</button>
+    <button class="tab-btn" role="tab" aria-selected="false" data-tab="leaderboard" type="button">功德榜 Leaderboard</button>
+    <button class="tab-btn" role="tab" aria-selected="false" data-tab="vip" type="button">成就与会员 Achievement VIP</button>
+  </div>
   <div class="controls">
-    <button id="btn-muyu" type="button">🪵 敲击木鱼 (+1)</button>
-    <button id="btn-beam" type="button">✨ 发射法布施光束</button>
-    <button id="btn-dedicate" type="button">🪷 功德回向</button>
+    <button id="btn-muyu" class="action-btn" data-testid="btn-muyu" type="button">🪵 敲击木鱼 Wooden Fish (+1)</button>
+    <button id="btn-incense" class="action-btn" data-testid="btn-incense" type="button">🕯️ 敬香上香 Light Incense (+3)</button>
+    <button id="btn-beam" class="action-btn" data-testid="btn-beam" type="button">✨ 发射法布施光束 Dharma Beam (+9)</button>
+    <button id="btn-dedicate" class="action-btn" data-testid="btn-dedicate" type="button">🪷 功德回向 Dedicate Merit (+18)</button>
   </div>
   <section class="panel" id="sutra-panel">
-    <strong>《般若波罗蜜多心经》</strong>：观自在菩萨，行深般若波罗蜜多时，照见五蕴皆空，度一切苦厄。
+    <strong>《般若波罗蜜多心经》 Heart Sutra</strong>：观自在菩萨，行深般若波罗蜜多时，照见五蕴皆空，度一切苦厄。色不异空，空不异色。《金刚经》：一切有为法，如梦幻泡影。
+  </section>
+  <section class="panel" id="leaderboard-panel">
+    <strong>🏆 全球法布施功德榜 Leaderboard</strong>
+    <ol class="rank-list">
+      <li>#1 莲池海会 · 功德 9,860</li>
+      <li>#2 普贤行愿 · 功德 6,420</li>
+      <li>#3 当前行者 · <span id="self-rank-merit">108</span></li>
+    </ol>
+  </section>
+  <section class="panel" id="vip-panel">
+    <strong>🎖️ 修行成就与护法会员 Achievement &amp; VIP</strong>：已解锁「初发菩提心」勋章 · 护法 VIP 莲花席位已激活 · 香炉清净供养中：<span id="incense-state">已上香 1 炷</span>
   </section>
   <script>
     (function () {
       var tg = window.Telegram && window.Telegram.WebApp;
-      if (tg) {
-        tg.ready();
-        tg.expand();
-        tg.MainButton.setText('回向并同步至聊天').show().onClick(function () {
-          tg.sendData({ action: 'dedicate_merit', merit: meritTotal });
-        });
-      }
-
       var meritTotal = 108;
-      var wasmMeritStep = function (a, b) { return a + b; };
-      var b64 = "${FABUSHI_WASM_BASE64}";
-      var bin = Uint8Array.from(atob(b64), function (c) { return c.charCodeAt(0); });
-      WebAssembly.instantiate(bin).then(function (res) {
-        if (res.instance && res.instance.exports && res.instance.exports.meritStep) {
-          wasmMeritStep = res.instance.exports.meritStep;
+      var incenseLit = 1;
+      var beams = [{ fromX: -42, fromY: -18, toX: 48, toY: 12, color: '#FFB300' }];
+
+      function syncCloudMerit() {
+        if (tg && tg.CloudStorage) {
+          tg.CloudStorage.setItem('merit_total', String(meritTotal));
+          tg.CloudStorage.setItem('incense_lit', String(incenseLit));
         }
-      }).catch(function () {});
+      }
 
       function updateBadge() {
         document.getElementById('merit-badge').textContent = '功德: ' + meritTotal + ' · WASM Active';
+        var rankEl = document.getElementById('self-rank-merit');
+        if (rankEl) rankEl.textContent = String(meritTotal);
+        var incEl = document.getElementById('incense-state');
+        if (incEl) incEl.textContent = '已上香 ' + incenseLit + ' 炷 (Incense Lit)';
       }
+
+      if (tg) {
+        tg.ready();
+        tg.expand();
+        if (tg.CloudStorage) {
+          tg.CloudStorage.getItem('merit_total', function (err, val) {
+            if (!err && val && !isNaN(Number(val))) {
+              meritTotal = Number(val);
+              updateBadge();
+            }
+          });
+        }
+        tg.MainButton.setText('回向并同步至聊天').show().onClick(function () {
+          tg.sendData({ action: 'dedicate_merit', merit: meritTotal, incense: incenseLit });
+        });
+      }
+
+      var wasmMeritStep = function (a, b) { return a + b; };
+      var b64 = "${FABUSHI_WASM_BASE64}";
+      var fallbackBin = Uint8Array.from(atob(b64), function (c) { return c.charCodeAt(0); });
+
+      fetch('/api/v1/fabushi-miniapp/app.wasm')
+        .then(function (r) { return r.ok ? r.arrayBuffer() : fallbackBin.buffer; })
+        .catch(function () { return fallbackBin.buffer; })
+        .then(function (buf) { return WebAssembly.instantiate(buf); })
+        .then(function (res) {
+          if (res.instance && res.instance.exports && res.instance.exports.meritStep) {
+            wasmMeritStep = res.instance.exports.meritStep;
+          }
+          updateBadge();
+        })
+        .catch(function () {});
 
       var authHdrs = { 'Content-Type': 'application/json' };
       if (tg && tg.initData) {
         authHdrs['X-Telegram-Init-Data'] = tg.initData;
       }
 
+      document.querySelectorAll('.tab-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          document.querySelectorAll('.tab-btn').forEach(function (b) {
+            b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+          });
+        });
+      });
+
       document.getElementById('btn-muyu').addEventListener('click', function () {
         meritTotal = wasmMeritStep(meritTotal, 1);
         updateBadge();
-        fetch('/api/v1/fabushi/zen/muyu', { method: 'POST', headers: authHdrs, body: '{"count":1}' });
+        syncCloudMerit();
+        fetch('/api/v1/fabushi/zen/muyu', { method: 'POST', headers: authHdrs, body: '{"count":1}' }).catch(function () {});
+      });
+
+      document.getElementById('btn-incense').addEventListener('click', function () {
+        incenseLit += 1;
+        meritTotal = wasmMeritStep(meritTotal, 3);
+        updateBadge();
+        syncCloudMerit();
+        fetch('/api/v1/fabushi/zen/incense', { method: 'POST', headers: authHdrs, body: '{"sticks":1}' }).catch(function () {});
       });
 
       document.getElementById('btn-beam').addEventListener('click', function () {
         meritTotal = wasmMeritStep(meritTotal, 9);
+        beams.push({
+          fromX: -65 + (beams.length * 19) % 110,
+          fromY: -28 + (beams.length * 13) % 56,
+          toX: 25 + (beams.length * 17) % 55,
+          toY: -22 + (beams.length * 23) % 54,
+          color: '#FFB300'
+        });
         updateBadge();
-        fetch('/api/v1/fabushi/beam', { method: 'POST', headers: authHdrs, body: '{"from_city":"Hangzhou","to_city":"London"}' });
+        syncCloudMerit();
+        fetch('/api/v1/fabushi/beam', { method: 'POST', headers: authHdrs, body: '{"from_city":"Hangzhou","to_city":"London"}' }).catch(function () {});
       });
 
       document.getElementById('btn-dedicate').addEventListener('click', function () {
         meritTotal = wasmMeritStep(meritTotal, 18);
         updateBadge();
+        syncCloudMerit();
         if (tg) tg.sendData({ action: 'dedicate', merit: meritTotal });
       });
 
@@ -1604,25 +1693,37 @@ function renderFabushiGlobeMiniAppHtml(app: MiniAppEntry): string {
       var ctx = canvas.getContext('2d');
       var angle = 0;
       function renderGlobe() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        var cx = canvas.width / 2, cy = canvas.height / 2, r = 82;
-        ctx.strokeStyle = '#3390EC';
-        ctx.lineWidth = 1.5;
+        ctx.fillStyle = '#111B27';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        var cx = canvas.width / 2, cy = canvas.height / 2, r = 84;
+        var grad = ctx.createRadialGradient(cx - 24, cy - 24, 12, cx, cy, r);
+        grad.addColorStop(0, '#1E4E79');
+        grad.addColorStop(1, '#0F253A');
+        ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#3390EC';
+        ctx.lineWidth = 1.6;
         ctx.stroke();
         for (var i = -2; i <= 2; i++) {
           ctx.beginPath();
-          ctx.ellipse(cx, cy, Math.abs(Math.cos(angle + i * 0.5)) * r, r, 0, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(51, 144, 236, 0.35)';
+          ctx.ellipse(cx, cy, Math.max(4, Math.abs(Math.cos(angle + i * 0.5)) * r), r, 0, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(100, 181, 246, 0.42)';
           ctx.stroke();
         }
-        ctx.beginPath();
-        ctx.moveTo(cx - 42, cy - 18);
-        ctx.quadraticCurveTo(cx, cy - 92, cx + 48, cy + 12);
-        ctx.strokeStyle = '#FFB300';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        beams.forEach(function (b) {
+          ctx.beginPath();
+          ctx.moveTo(cx + b.fromX, cy + b.fromY);
+          ctx.quadraticCurveTo(cx, cy - 94, cx + b.toX, cy + b.toY);
+          ctx.strokeStyle = b.color;
+          ctx.lineWidth = 2.2;
+          ctx.stroke();
+          ctx.fillStyle = '#00E676';
+          ctx.beginPath();
+          ctx.arc(cx + b.toX, cy + b.toY, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        });
         angle += 0.012;
         requestAnimationFrame(renderGlobe);
       }

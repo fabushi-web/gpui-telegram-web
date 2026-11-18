@@ -22,6 +22,7 @@ import {
   getMessageReactions,
   type PtsBroadcastSink,
 } from '../db/queries.js';
+import type { BrowserControlBridge } from '../routes/browserControl.js';
 
 interface ConnectedClient {
   ws: WebSocket;
@@ -29,8 +30,9 @@ interface ConnectedClient {
   sessionId: string | null;
   subscribedChats: Set<number>;
   isAlive: boolean;
-  mode: 'ws' | 'derp';
+  mode: 'ws' | 'derp' | 'browser_tab' | 'browser_controller';
   deviceId?: string;
+  desktopToken?: string;
 }
 
 export class RealtimeGatewayHub implements PtsBroadcastSink {
@@ -38,6 +40,7 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
   private readonly clients = new Set<ConnectedClient>();
   private readonly pingInterval: NodeJS.Timeout;
   private botTriggerHook?: (chatId: number, senderId: number, messageText: string) => void;
+  private browserBridge?: BrowserControlBridge;
 
   constructor(private readonly db: DatabaseSync) {
     this.wss = new WebSocketServer({ noServer: true });
@@ -45,6 +48,7 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
     this.pingInterval = setInterval(() => {
       for (const client of this.clients) {
         if (!client.isAlive) {
+          this.browserBridge?.unregisterSocket(client.ws);
           client.ws.terminate();
           this.clients.delete(client);
           continue;
@@ -62,10 +66,14 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
     this.botTriggerHook = hook;
   }
 
+  setBrowserControlBridge(bridge: BrowserControlBridge): void {
+    this.browserBridge = bridge;
+  }
+
   getOnlineUsersCount(): number {
     const uids = new Set<number>();
     for (const c of this.clients) {
-      if (c.userId !== null && c.ws.readyState === WebSocket.OPEN) {
+      if (c.userId !== null && c.mode === 'ws' && c.ws.readyState === WebSocket.OPEN) {
         uids.add(c.userId);
       }
     }
@@ -77,9 +85,80 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
       const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
       const isWs = reqUrl.pathname === '/api/v1/ws';
       const isDerp = reqUrl.pathname === '/api/v1/tailnet/derp' || reqUrl.searchParams.get('mode') === 'derp';
+      const isBrowserWs = reqUrl.pathname === '/api/v1/browser/ws';
 
-      if (!isWs && !isDerp) {
+      if (!isWs && !isDerp && !isBrowserWs) {
         socket.destroy();
+        return;
+      }
+
+      if (isBrowserWs) {
+        const rawToken =
+          this.browserBridge?.extractRequestToken(req, reqUrl.searchParams) ??
+          extractBearerToken(req, reqUrl.searchParams);
+        const browserAuth = this.browserBridge?.authenticateTokenString(rawToken) ?? null;
+
+        if (rawToken && !browserAuth) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+
+        const requestedRole = reqUrl.searchParams.get('role');
+        const mode: ConnectedClient['mode'] =
+          requestedRole === 'controller' || browserAuth?.callerKind === 'desktop_controller'
+            ? 'browser_controller'
+            : 'browser_tab';
+
+        this.wss.handleUpgrade(req, socket, head, (ws) => {
+          const client: ConnectedClient = {
+            ws,
+            userId: browserAuth?.userId ?? null,
+            sessionId: browserAuth ? `bws_${browserAuth.userId}` : null,
+            subscribedChats: new Set<number>(),
+            isAlive: true,
+            mode,
+            deviceId: reqUrl.searchParams.get('device_id') ?? undefined,
+            desktopToken:
+              browserAuth?.callerKind === 'desktop_controller' ? browserAuth.rawToken : undefined,
+          };
+          this.clients.add(client);
+
+          ws.on('pong', () => {
+            client.isAlive = true;
+          });
+          ws.on('close', () => {
+            this.browserBridge?.unregisterSocket(ws);
+            this.clients.delete(client);
+          });
+          ws.on('error', () => {
+            this.browserBridge?.unregisterSocket(ws);
+            this.clients.delete(client);
+          });
+
+          if (browserAuth) {
+            this.sendFrame(ws, {
+              type: 'AuthOk',
+              payload: {
+                user_id: browserAuth.userId,
+                session_id: client.sessionId ?? 'browser_ws',
+                server_time_ms: Date.now(),
+              },
+            });
+            if (mode === 'browser_controller') {
+              this.browserBridge?.registerControllerSocket(
+                ws,
+                browserAuth.userId,
+                client.desktopToken,
+              );
+            }
+          }
+
+          ws.on('message', (rawData) => {
+            client.isAlive = true;
+            this.handleIncomingMessage(client, rawData.toString('utf8'));
+          });
+        });
         return;
       }
 
@@ -110,10 +189,12 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
         });
 
         ws.on('close', () => {
+          this.browserBridge?.unregisterSocket(ws);
           this.clients.delete(client);
         });
 
         ws.on('error', () => {
+          this.browserBridge?.unregisterSocket(ws);
           this.clients.delete(client);
         });
 
@@ -282,6 +363,40 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
     }
 
     if (frame.type === 'Auth') {
+      if (client.mode === 'browser_tab' || client.mode === 'browser_controller') {
+        const bAuth = this.browserBridge?.authenticateTokenString(frame.payload?.token ?? null) ?? null;
+        if (!bAuth) {
+          this.sendFrame(client.ws, {
+            type: 'AuthError',
+            payload: { reason: 'Invalid, expired, or revoked browser bridge token' },
+          });
+          client.ws.close(4001, 'Unauthorized');
+          return;
+        }
+        client.userId = bAuth.userId;
+        client.sessionId = `bws_${bAuth.userId}`;
+        if (bAuth.callerKind === 'desktop_controller') {
+          client.mode = 'browser_controller';
+          client.desktopToken = bAuth.rawToken;
+        }
+        this.sendFrame(client.ws, {
+          type: 'AuthOk',
+          payload: {
+            user_id: bAuth.userId,
+            session_id: client.sessionId,
+            server_time_ms: Date.now(),
+          },
+        });
+        if (client.mode === 'browser_controller') {
+          this.browserBridge?.registerControllerSocket(
+            client.ws,
+            bAuth.userId,
+            client.desktopToken,
+          );
+        }
+        return;
+      }
+
       const auth = authenticateToken(this.db, frame.payload?.token ?? null);
       if (!auth) {
         this.sendFrame(client.ws, {
@@ -313,8 +428,102 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
       return;
     }
 
+    // Enforce strict scope on desktop controller tokens (`bctrl_...`)
+    if (
+      client.desktopToken &&
+      frame.type !== 'BrowserCommand'
+    ) {
+      // Also verify token has not been revoked mid-session
+      if (!this.browserBridge?.authenticateTokenString(client.desktopToken)) {
+        this.sendFrame(client.ws, {
+          type: 'AuthError',
+          payload: { reason: 'Desktop browser token was revoked' },
+        });
+        client.ws.close(4003, 'Revoked');
+        return;
+      }
+      this.sendFrame(client.ws, {
+        type: 'Error',
+        payload: {
+          code: 403,
+          message: 'Desktop browser token is strictly scoped to BrowserCommand frames',
+        },
+      });
+      return;
+    }
+
     try {
       switch (frame.type) {
+        case 'BrowserRegister': {
+          if (!this.browserBridge) break;
+          const desc = this.browserBridge.registerLiveTab(
+            client.userId,
+            frame.payload,
+            client.ws,
+          );
+          this.sendFrame(client.ws, { type: 'BrowserRegistered', payload: desc });
+          break;
+        }
+        case 'BrowserStateReport': {
+          if (!this.browserBridge) break;
+          this.browserBridge.reportTabState(client.userId, frame.payload);
+          break;
+        }
+        case 'BrowserCommandResult': {
+          if (!this.browserBridge) break;
+          this.browserBridge.resolveTabCommandResult(client.userId, frame.payload);
+          break;
+        }
+        case 'BrowserCommand': {
+          if (!this.browserBridge) break;
+          if (client.desktopToken && !this.browserBridge.authenticateTokenString(client.desktopToken)) {
+            this.sendFrame(client.ws, {
+              type: 'AuthError',
+              payload: { reason: 'Desktop browser token was revoked' },
+            });
+            client.ws.close(4003, 'Revoked');
+            return;
+          }
+          const uid = client.userId;
+          const bridge = this.browserBridge;
+          const callerAuth = {
+            userId: uid,
+            callerKind: client.desktopToken
+              ? ('desktop_controller' as const)
+              : ('user_session' as const),
+            callerLabel:
+              frame.payload.caller_label ||
+              (client.desktopToken ? 'Desktop WS Bridge' : `Web WS (${uid})`),
+            rawToken: client.desktopToken ?? '',
+            generation: bridge.getGeneration(uid),
+          };
+          void bridge
+            .dispatchCommand(callerAuth, frame.payload)
+            .then((res) => {
+              this.sendFrame(client.ws, { type: 'BrowserCommandResult', payload: res });
+            })
+            .catch((err) => {
+              const code = err instanceof ApiError ? err.status : 500;
+              const msg = err instanceof Error ? err.message : 'Browser command failed';
+              this.sendFrame(client.ws, {
+                type: 'BrowserCommandResult',
+                payload: {
+                  ok: false,
+                  command_id: frame.payload.command_id ?? 'unknown',
+                  target_id: frame.payload.target_id ?? 'unknown',
+                  generation: bridge.getGeneration(uid),
+                  action: frame.payload.action,
+                  error: msg,
+                  latency_ms: 0,
+                },
+              });
+              this.sendFrame(client.ws, {
+                type: 'Error',
+                payload: { code, message: msg },
+              });
+            });
+          break;
+        }
         case 'SubscribeChat': {
           const cid = Number(frame.payload.chat_id);
           ensureChatMembership(this.db, cid, client.userId);

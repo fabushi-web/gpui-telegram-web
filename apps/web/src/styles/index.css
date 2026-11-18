@@ -1,0 +1,5 @@
+/* Barrel stylesheet importing the complete GPUI Telegram Web design system */
+@import "./reset.css";
+@import "./tokens.css";
+@import "./layout.css";
+@import "./components.css";

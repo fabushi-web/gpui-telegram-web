@@ -22,6 +22,14 @@ import type {
   WireUserStatus,
 } from './models.js';
 import type { TailnetStatusDto } from './aiContracts.js';
+import type {
+  BrowserCommandRequest,
+  BrowserCommandResult,
+  BrowserControlRevokedPayload,
+  BrowserRegisterPayload,
+  BrowserStateReportPayload,
+  BrowserTargetDescriptor,
+} from './browserControl.js';
 
 export type TypingAction =
   | 'typing'
@@ -252,7 +260,11 @@ export type WsClientFrame =
   | { type: 'UnsubscribeChat'; payload: { chat_id: number } }
   | { type: 'VotePoll'; payload: { chat_id: number; message_id: number; poll_id: number; option_ids: number[] } }
   | { type: 'CallSignal'; payload: CallSignalPayload }
-  | { type: 'AckUpdates'; payload: { chat_id: number; pts: number } };
+  | { type: 'AckUpdates'; payload: { chat_id: number; pts: number } }
+  | { type: 'BrowserRegister'; payload: BrowserRegisterPayload }
+  | { type: 'BrowserStateReport'; payload: BrowserStateReportPayload }
+  | { type: 'BrowserCommandResult'; payload: BrowserCommandResult }
+  | { type: 'BrowserCommand'; payload: BrowserCommandRequest };
 
 export type WsServerFrame =
   | { type: 'AuthOk'; payload: { user_id: number; session_id: string; server_time_ms: number } }
@@ -287,4 +299,19 @@ export type WsServerFrame =
       };
     }
   | { type: 'TailnetMapUpdate'; payload: TailnetStatusDto }
+  | { type: 'BrowserRegistered'; payload: BrowserTargetDescriptor }
+  | {
+      type: 'BrowserCommand';
+      payload: BrowserCommandRequest & {
+        command_id: string;
+        target_id: string;
+        generation: number;
+      };
+    }
+  | { type: 'BrowserCommandResult'; payload: BrowserCommandResult }
+  | {
+      type: 'BrowserTargetsUpdated';
+      payload: { targets: BrowserTargetDescriptor[]; control_generation: number };
+    }
+  | { type: 'BrowserControlRevoked'; payload: BrowserControlRevokedPayload }
   | { type: 'Error'; payload: { code: number; message: string; details?: string } };

@@ -341,8 +341,10 @@ export function registerMessageAndSearchRoutes(
       topic_id?: number;
     }>(ctx.req);
 
-    const fromChatId = Number(ctx.params.chatId ?? body.from_chat_id);
-    const toChatId = Number(body.to_chat_id);
+    const fromChatId = Number(body.from_chat_id ?? ctx.params.chatId);
+    const toChatId = Number(
+      body.to_chat_id ?? (body.from_chat_id !== undefined ? ctx.params.chatId : undefined),
+    );
     ensureChatMembership(db, fromChatId, auth.userId);
     ensureChatMembership(db, toChatId, auth.userId);
 

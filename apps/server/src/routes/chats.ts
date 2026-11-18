@@ -293,6 +293,18 @@ export function registerChatAndSocialRoutes(
     }
 
     const detail = getChatDetailDto(db, chatId, auth.userId)!;
+    for (const memberId of body.member_ids ?? []) {
+      const uid = Number(memberId);
+      if (uid !== auth.userId) {
+        const peerDetail = getChatDetailDto(db, chatId, uid);
+        if (peerDetail) {
+          hub.sendToUser(uid, {
+            type: 'Update',
+            payload: { type: 'ChatUpdated', data: peerDetail },
+          });
+        }
+      }
+    }
     sendJson(ctx.res, 201, detail);
   });
 
@@ -825,6 +837,30 @@ export function registerChatAndSocialRoutes(
       targetRow = db.prepare(`SELECT * FROM users WHERE LOWER(username) = LOWER(?)`).get(clean) as Record<string, unknown> | undefined;
     } else if (body.phone) {
       targetRow = db.prepare(`SELECT * FROM users WHERE phone = ?`).get(body.phone.trim()) as Record<string, unknown> | undefined;
+    }
+
+    if (!targetRow && !body.user_id && (body.phone || body.username || body.first_name)) {
+      const mx = db
+        .prepare(`SELECT COALESCE(MAX(user_id), 2000) AS mx FROM users WHERE user_id < 700000`)
+        .get() as { mx: number };
+      const newUserId = Math.max(2001, Number(mx.mx) + 1);
+      const cleanUsername = body.username ? body.username.trim().replace(/^@+/, '') : null;
+      const cleanPhone = body.phone ? body.phone.trim() : null;
+      const newFirst =
+        body.first_name?.trim() || cleanUsername || cleanPhone || `Contact ${newUserId}`;
+      const newLast = body.last_name?.trim() || null;
+      const now = Date.now();
+
+      db.prepare(`
+        INSERT INTO users (
+          user_id, username, phone, first_name, last_name, is_bot, is_verified, is_premium,
+          status, last_seen_ms, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, 'offline', ?, ?)
+      `).run(newUserId, cleanUsername, cleanPhone, newFirst, newLast, now, now);
+
+      targetRow = db
+        .prepare(`SELECT * FROM users WHERE user_id = ?`)
+        .get(newUserId) as Record<string, unknown> | undefined;
     }
 
     if (!targetRow) {

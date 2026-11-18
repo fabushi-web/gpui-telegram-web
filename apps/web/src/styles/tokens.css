@@ -1,0 +1,307 @@
+/* ==========================================================================
+   GPUI Telegram Web — Design Tokens & Theme Invariants (tokens.css)
+   100% Vanilla CSS Custom Properties.
+   CRITICAL INVARIANT: Dark themes ("night", "tinted"), all 8 accent swatches,
+   and all 7 peer avatar colors strictly avoid purple/violet hues (238°..312°).
+   ========================================================================== */
+
+:root,
+:root[data-theme="night"] {
+  color-scheme: dark;
+
+  /* Core Surfaces — Night (Default Telegram Dark) */
+  --tg-bg-app: #0E1621;
+  --tg-bg-surface: #17212B;
+  --tg-bg-elevated: #202B36;
+  --tg-bg-hover: #202B36;
+  --tg-bg-active: #2B5278;
+  --tg-bg-chat: #0E1621;
+  --tg-bg-input: #242F3D;
+  --tg-bg-overlay: rgba(8, 14, 22, 0.72);
+  --tg-bg-glass: rgba(23, 33, 43, 0.88);
+
+  /* Borders & Dividers */
+  --tg-border: #242F3D;
+  --tg-border-subtle: rgba(127, 145, 164, 0.14);
+  --tg-border-strong: #314052;
+
+  /* Brand & Accent (Ocean Sky Blue — Hue ~210°) */
+  --tg-accent: #3390EC;
+  --tg-accent-hover: #2881D8;
+  --tg-accent-soft: rgba(51, 144, 236, 0.15);
+  --tg-accent-strong: rgba(51, 144, 236, 0.28);
+  --tg-on-accent: #FFFFFF;
+
+  /* Message Bubbles */
+  --tg-bubble-out: #2B5278;
+  --tg-bubble-out-hover: #315C86;
+  --tg-bubble-in: #182533;
+  --tg-bubble-in-hover: #1E2E3F;
+  --tg-bubble-out-meta: #8BB8E8;
+  --tg-bubble-in-meta: #7F91A4;
+  --tg-bubble-code-bg: rgba(10, 18, 28, 0.55);
+  --tg-bubble-quote-bg: rgba(51, 144, 236, 0.12);
+
+  /* Typography Colors */
+  --tg-text-primary: #F5F5F5;
+  --tg-text-secondary: #7F91A4;
+  --tg-text-muted: #5E7185;
+  --tg-text-link: #4EA4F5;
+  --tg-text-inverse: #0E1621;
+
+  /* Semantic Status Colors (Zero Purple!) */
+  --tg-success: #00C972;
+  --tg-success-soft: rgba(0, 201, 114, 0.16);
+  --tg-warning: #E5A030;
+  --tg-warning-soft: rgba(229, 160, 48, 0.16);
+  --tg-danger: #E15B64;
+  --tg-danger-soft: rgba(225, 91, 100, 0.16);
+  --tg-info: #29B6F6;
+  --tg-info-soft: rgba(41, 182, 246, 0.16);
+  --tg-secret: #20C997;
+  --tg-secret-soft: rgba(32, 201, 151, 0.16);
+  --tg-unread-badge: #3390EC;
+  --tg-muted-badge: #4A5B6D;
+
+  /* Elevation Shadows */
+  --tg-shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.26);
+  --tg-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.38);
+  --tg-shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.52);
+
+  /* Chat Wallpaper Pattern */
+  --tg-chat-wallpaper: radial-gradient(circle at 20% 20%, rgba(51, 144, 236, 0.06) 0%, transparent 45%),
+    radial-gradient(circle at 80% 75%, rgba(63, 193, 176, 0.05) 0%, transparent 48%);
+
+  /* Scrollbars */
+  --tg-scrollbar-thumb: rgba(127, 145, 164, 0.28);
+  --tg-scrollbar-thumb-hover: rgba(127, 145, 164, 0.46);
+}
+
+/* Tinted — Graphite Ocean Dark */
+:root[data-theme="tinted"] {
+  color-scheme: dark;
+
+  --tg-bg-app: #0E1013;
+  --tg-bg-surface: #15191E;
+  --tg-bg-elevated: #1D232A;
+  --tg-bg-hover: #222933;
+  --tg-bg-active: #1B4978;
+  --tg-bg-chat: #0E1013;
+  --tg-bg-input: #1F262E;
+  --tg-bg-overlay: rgba(6, 9, 13, 0.76);
+  --tg-bg-glass: rgba(21, 25, 30, 0.90);
+
+  --tg-border: #252D37;
+  --tg-border-subtle: rgba(138, 153, 170, 0.14);
+  --tg-border-strong: #323D4B;
+
+  --tg-accent: #1687FF;
+  --tg-accent-hover: #0E75E3;
+  --tg-accent-soft: rgba(22, 135, 255, 0.16);
+  --tg-accent-strong: rgba(22, 135, 255, 0.30);
+  --tg-on-accent: #FFFFFF;
+
+  --tg-bubble-out: #1B4978;
+  --tg-bubble-out-hover: #21558B;
+  --tg-bubble-in: #181E25;
+  --tg-bubble-in-hover: #1F2730;
+  --tg-bubble-out-meta: #8CC2FF;
+  --tg-bubble-in-meta: #8594A6;
+  --tg-bubble-code-bg: rgba(8, 11, 15, 0.62);
+  --tg-bubble-quote-bg: rgba(22, 135, 255, 0.14);
+
+  --tg-text-primary: #F3F5F8;
+  --tg-text-secondary: #8594A6;
+  --tg-text-muted: #617082;
+  --tg-text-link: #4BA3FF;
+  --tg-text-inverse: #0E1013;
+
+  --tg-unread-badge: #1687FF;
+  --tg-muted-badge: #44505E;
+
+  --tg-chat-wallpaper: radial-gradient(circle at 18% 24%, rgba(22, 135, 255, 0.06) 0%, transparent 45%),
+    radial-gradient(circle at 82% 76%, rgba(0, 201, 114, 0.04) 0%, transparent 45%);
+}
+
+/* Day — Clean Light */
+:root[data-theme="day"] {
+  color-scheme: light;
+
+  --tg-bg-app: #F1F3F5;
+  --tg-bg-surface: #FFFFFF;
+  --tg-bg-elevated: #F8FAFC;
+  --tg-bg-hover: #F1F5F9;
+  --tg-bg-active: #E1F0FF;
+  --tg-bg-chat: #E6ECF2;
+  --tg-bg-input: #F1F4F8;
+  --tg-bg-overlay: rgba(15, 23, 42, 0.42);
+  --tg-bg-glass: rgba(255, 255, 255, 0.90);
+
+  --tg-border: #E2E8F0;
+  --tg-border-subtle: rgba(15, 23, 42, 0.08);
+  --tg-border-strong: #CBD5E1;
+
+  --tg-accent: #3390EC;
+  --tg-accent-hover: #237CD6;
+  --tg-accent-soft: rgba(51, 144, 236, 0.12);
+  --tg-accent-strong: rgba(51, 144, 236, 0.22);
+  --tg-on-accent: #FFFFFF;
+
+  --tg-bubble-out: #EEFFDE;
+  --tg-bubble-out-hover: #E3F9CE;
+  --tg-bubble-in: #FFFFFF;
+  --tg-bubble-in-hover: #F8FAFC;
+  --tg-bubble-out-meta: #4E8F43;
+  --tg-bubble-in-meta: #6B7280;
+  --tg-bubble-code-bg: rgba(15, 23, 42, 0.06);
+  --tg-bubble-quote-bg: rgba(51, 144, 236, 0.10);
+
+  --tg-text-primary: #111827;
+  --tg-text-secondary: #6B7280;
+  --tg-text-muted: #94A3B8;
+  --tg-text-link: #1D78D6;
+  --tg-text-inverse: #FFFFFF;
+
+  --tg-unread-badge: #3390EC;
+  --tg-muted-badge: #94A3B8;
+
+  --tg-shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08);
+  --tg-shadow-md: 0 8px 24px rgba(15, 23, 42, 0.12);
+  --tg-shadow-lg: 0 18px 44px rgba(15, 23, 42, 0.18);
+
+  --tg-chat-wallpaper: radial-gradient(circle at 22% 20%, rgba(51, 144, 236, 0.07) 0%, transparent 46%),
+    radial-gradient(circle at 80% 78%, rgba(63, 193, 176, 0.07) 0%, transparent 46%);
+
+  --tg-scrollbar-thumb: rgba(100, 116, 139, 0.28);
+  --tg-scrollbar-thumb-hover: rgba(100, 116, 139, 0.45);
+}
+
+/* Classic — Telegram Classic Green */
+:root[data-theme="classic"] {
+  color-scheme: light;
+
+  --tg-bg-app: #E8F0E4;
+  --tg-bg-surface: #FFFFFF;
+  --tg-bg-elevated: #F7FAF6;
+  --tg-bg-hover: #EFF5EC;
+  --tg-bg-active: #E1F2FB;
+  --tg-bg-chat: #D5E8C8;
+  --tg-bg-input: #F0F4F7;
+  --tg-bg-overlay: rgba(17, 24, 39, 0.42);
+  --tg-bg-glass: rgba(255, 255, 255, 0.90);
+
+  --tg-border: #DCE5D8;
+  --tg-border-subtle: rgba(17, 24, 39, 0.08);
+  --tg-border-strong: #C5D4BE;
+
+  --tg-accent: #40A7E3;
+  --tg-accent-hover: #2E95D1;
+  --tg-accent-soft: rgba(64, 167, 227, 0.14);
+  --tg-accent-strong: rgba(64, 167, 227, 0.24);
+  --tg-on-accent: #FFFFFF;
+
+  --tg-bubble-out: #EFFDDE;
+  --tg-bubble-out-hover: #E4F8CD;
+  --tg-bubble-in: #FFFFFF;
+  --tg-bubble-in-hover: #F9FBF8;
+  --tg-bubble-out-meta: #529447;
+  --tg-bubble-in-meta: #6B7280;
+  --tg-bubble-code-bg: rgba(17, 24, 39, 0.06);
+  --tg-bubble-quote-bg: rgba(64, 167, 227, 0.12);
+
+  --tg-text-primary: #111827;
+  --tg-text-secondary: #64748B;
+  --tg-text-muted: #94A3B8;
+  --tg-text-link: #2488C4;
+  --tg-text-inverse: #FFFFFF;
+
+  --tg-unread-badge: #40A7E3;
+  --tg-muted-badge: #94A3B8;
+
+  --tg-shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08);
+  --tg-shadow-md: 0 8px 24px rgba(15, 23, 42, 0.12);
+  --tg-shadow-lg: 0 18px 44px rgba(15, 23, 42, 0.18);
+
+  --tg-chat-wallpaper: radial-gradient(circle at 25% 22%, rgba(82, 148, 71, 0.10) 0%, transparent 45%),
+    radial-gradient(circle at 75% 78%, rgba(64, 167, 227, 0.08) 0%, transparent 45%);
+
+  --tg-scrollbar-thumb: rgba(100, 116, 139, 0.28);
+  --tg-scrollbar-thumb-hover: rgba(100, 116, 139, 0.45);
+}
+
+/* ==========================================================================
+   Runtime Customization, Swatches, Avatars, Layout Metrics & Motion
+   ========================================================================== */
+:root {
+  /* Live Appearance Sliders (updated dynamically via useSettingsStore) */
+  --tg-font-size: 14px;
+  --tg-bubble-radius: 14px;
+  --tg-ui-scale: 1;
+  --tg-left-sidebar-width: 340px;
+  --tg-right-sidebar-width: 360px;
+  --tg-nav-rail-width: 64px;
+  --tg-header-height: 56px;
+
+  /* Typography Stacks */
+  --tg-font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --tg-font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono",
+    Menlo, monospace;
+
+  /* 8 Non-Purple Accent Swatches (Sky/Ocean Blues, Teal, Emerald, Amber, Coral, Crimson) */
+  --tg-swatch-0: #3390EC;
+  --tg-swatch-1: #1084FE;
+  --tg-swatch-2: #3FC1B0;
+  --tg-swatch-3: #00C972;
+  --tg-swatch-4: #E5A030;
+  --tg-swatch-5: #E86C52;
+  --tg-swatch-6: #E15B64;
+  --tg-swatch-7: #29B6F6;
+
+  /* 7 Non-Purple Deterministic Peer Avatar Colors */
+  --tg-avatar-0: #E15B64; /* Crimson Red (H=356°) */
+  --tg-avatar-1: #E86C52; /* Warm Coral (H=10°) */
+  --tg-avatar-2: #E5A030; /* Golden Amber (H=37°) */
+  --tg-avatar-3: #00C972; /* Emerald Green (H=154°) */
+  --tg-avatar-4: #3FC1B0; /* Ocean Teal (H=172°) */
+  --tg-avatar-5: #29B6F6; /* Sky Cyan (H=199°) */
+  --tg-avatar-6: #3390EC; /* Telegram Blue (H=210°) */
+
+  /* Radii */
+  --tg-radius-xs: 6px;
+  --tg-radius-sm: 8px;
+  --tg-radius-md: 12px;
+  --tg-radius-lg: 16px;
+  --tg-radius-xl: 20px;
+  --tg-radius-pill: 9999px;
+
+  /* Z-Index Scale (aligned with 7-layer Escape hierarchy) */
+  --tg-z-base: 1;
+  --tg-z-sticky: 20;
+  --tg-z-column-drawer: 60;
+  --tg-z-burger-drawer: 100;
+  --tg-z-settings: 140;
+  --tg-z-modal: 220;
+  --tg-z-miniapp: 260;
+  --tg-z-call: 300;
+  --tg-z-stories: 340;
+  --tg-z-lightbox: 380;
+  --tg-z-context-menu: 440;
+  --tg-z-toast: 500;
+  --tg-z-passcode-lock: 900;
+
+  /* Motion */
+  --tg-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --tg-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --tg-duration-fast: 140ms;
+  --tg-duration-normal: 220ms;
+}
+
+/* Power-saving reduced animations support */
+:root[data-power-saving="true"] *,
+:root[data-power-saving="true"] *::before,
+:root[data-power-saving="true"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}

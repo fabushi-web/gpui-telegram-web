@@ -603,7 +603,6 @@ export function createMessageAtomic(
   const expiresAtMs =
     effectiveTtl && effectiveTtl > 0 ? now + effectiveTtl * 1000 : undefined;
 
-  const msgId = Number(chatRow.next_msg_id);
   const nextPts = Number(chatRow.pts) + 1;
   const flags: MessageFlags = {
     is_out: true,
@@ -619,7 +618,12 @@ export function createMessageAtomic(
   };
 
   db.exec('BEGIN IMMEDIATE;');
+  let msgId = Number(chatRow.next_msg_id);
   try {
+    const maxMsgRow = db
+      .prepare(`SELECT COALESCE(MAX(message_id), 0) AS max_id FROM messages`)
+      .get() as { max_id: number } | undefined;
+    msgId = Math.max(msgId, Number(maxMsgRow?.max_id ?? 0) + 1);
     db.prepare(`
       INSERT INTO messages (
         chat_id, message_id, sender_id, send_as_peer_id, topic_id, date_ms,

@@ -20,6 +20,7 @@ const NAV_DESTINATION_MAP: Record<
   talk: { trigger: NAV_DESTS.talk, target: DOM.talkModeOrb },
   computer: { trigger: NAV_DESTS.computer, target: DOM.computerWorkbench },
   hermes: { trigger: NAV_DESTS.hermes, target: DOM.hermesStudioPanel },
+  browser: { trigger: NAV_DESTS.browser, target: DOM.browserControlWorkspace },
   settings: { trigger: NAV_DESTS.settings, target: DOM.settingsPanel },
 };
 

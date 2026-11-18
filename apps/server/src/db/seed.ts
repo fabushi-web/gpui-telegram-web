@@ -15,6 +15,7 @@ import {
   type MagpiePreset,
   type MagpieProviderView,
   type MagpieRoutingGroup,
+  type McpPendingApprovalDto,
   type McpServerDto,
   type MiniAppEntry,
   type PollData,
@@ -1176,11 +1177,37 @@ export function seedDeterministicUniverse(
       status: 'connected',
       tools_count: 3,
     };
-    db.prepare(`INSERT INTO mcp_servers (server_id, user_id, server_json, updated_at_ms) VALUES (?, 1001, ?, ?)`).run(
-      seedMcp.server_id,
-      JSON.stringify(seedMcp),
-      baseTs,
-    );
+    for (const uid of [1001, 1002, 1003, 1004]) {
+      const serverIdForUser = uid === 1001 ? 'mcp_filesystem' : `mcp_filesystem_${uid}`;
+      const userMcp: McpServerDto = {
+        ...seedMcp,
+        server_id: serverIdForUser,
+      };
+      db.prepare(`INSERT INTO mcp_servers (server_id, user_id, server_json, updated_at_ms) VALUES (?, ?, ?, ?)`).run(
+        userMcp.server_id,
+        uid,
+        JSON.stringify(userMcp),
+        baseTs,
+      );
+      const seedApproval: McpPendingApprovalDto = {
+        request_id: `mcpa_seed_write_audit_${uid}`,
+        server_id: serverIdForUser,
+        tool_name: 'write_file',
+        arguments: {
+          path: 'notes/release-audit.md',
+          content: 'Verified MCP human-in-the-loop permission gate',
+        },
+        risk_level: 'high',
+        status: 'pending',
+        created_at_ms: baseTs,
+      };
+      db.prepare(`INSERT INTO mcp_approvals (request_id, user_id, approval_json, created_at_ms) VALUES (?, ?, ?, ?)`).run(
+        seedApproval.request_id,
+        uid,
+        JSON.stringify(seedApproval),
+        baseTs,
+      );
+    }
 
     const sandboxNode: ComputerNodeDto = {
       node_id: 'sandbox:default',

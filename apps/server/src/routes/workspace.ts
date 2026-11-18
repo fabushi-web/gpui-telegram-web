@@ -34,6 +34,7 @@ import {
   type RequestContext,
 } from '../utils/http.js';
 import type { RealtimeGatewayHub } from '../ws/hub.js';
+import { BROWSER_MCP_DOCK_TOOLS, type BrowserControlBridge } from './browserControl.js';
 
 const VALID_TASK_STATES = new Set<TaskFsmState>([
   'draft',
@@ -46,10 +47,11 @@ const VALID_TASK_STATES = new Set<TaskFsmState>([
   'cancelled',
 ]);
 
-const DEFAULT_MCP_TOOLS: McpToolDto[] = [
+export const DEFAULT_MCP_TOOLS: McpToolDto[] = [
   { tool_id: 'fs_read_file', server_id: 'mcp_filesystem', name: 'read_file', description: 'Read UTF-8 file contents in workspace', risk_level: 'read_only', requires_approval: false },
   { tool_id: 'fs_list_dir', server_id: 'mcp_filesystem', name: 'list_directory', description: 'List files in a directory', risk_level: 'read_only', requires_approval: false },
   { tool_id: 'fs_write_file', server_id: 'mcp_filesystem', name: 'write_file', description: 'Write or overwrite a workspace file', risk_level: 'high', requires_approval: true },
+  ...BROWSER_MCP_DOCK_TOOLS,
 ];
 
 export function registerWorkspaceTailnetAndWalletRoutes(
@@ -57,6 +59,7 @@ export function registerWorkspaceTailnetAndWalletRoutes(
   db: DatabaseSync,
   config: ServerConfig,
   hub: RealtimeGatewayHub,
+  browserBridge?: BrowserControlBridge,
 ): void {
   // ==========================================================================
   // 1. Global Task Center (7-State FSM + 5-Field Cron Next-Run Evaluator)
@@ -257,7 +260,7 @@ export function registerWorkspaceTailnetAndWalletRoutes(
   });
 
   router.get('/api/v1/mcp/tools', (ctx) => {
-    const auth = requireAuth(db, ctx);
+    const auth = browserBridge ? browserBridge.requireBrowserAuth(ctx) : requireAuth(db, ctx);
     const approvalRows = db
       .prepare(`SELECT approval_json FROM mcp_approvals WHERE user_id = ? ORDER BY created_at_ms DESC`)
       .all(auth.userId) as Array<{ approval_json: string }>;
@@ -269,7 +272,7 @@ export function registerWorkspaceTailnetAndWalletRoutes(
   });
 
   router.post('/api/v1/mcp/invoke', async (ctx) => {
-    const auth = requireAuth(db, ctx);
+    const auth = browserBridge ? browserBridge.requireBrowserAuth(ctx) : requireAuth(db, ctx);
     const body = await readJsonBody<{
       tool_id?: string;
       tool_name?: string;
@@ -299,6 +302,31 @@ export function registerWorkspaceTailnetAndWalletRoutes(
         pending.created_at_ms,
       );
       sendJson(ctx.res, 202, { status: 'approval_required', approval: pending });
+      return;
+    }
+
+    if (tool.server_id === 'mcp_browser_bridge' && browserBridge) {
+      const callerAuth =
+        'callerKind' in auth
+          ? auth
+          : {
+              userId: auth.userId,
+              callerKind: 'user_session' as const,
+              callerLabel: `Web (@${auth.username})`,
+              rawToken: auth.rawToken,
+              generation: browserBridge.getGeneration(auth.userId),
+            };
+      const executed = await browserBridge.executeMcpTool(
+        callerAuth,
+        tool.name,
+        body.arguments ?? {},
+      );
+      sendJson(ctx.res, 200, {
+        status: 'completed',
+        tool_name: tool.name,
+        output: executed.result,
+        screenshot_data_url: executed.screenshotDataUrl,
+      });
       return;
     }
 

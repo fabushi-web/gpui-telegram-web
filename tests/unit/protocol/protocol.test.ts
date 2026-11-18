@@ -40,12 +40,12 @@ import {
 } from '@gpui-telegram/protocol';
 
 describe('@gpui-telegram/protocol — Canonical DOM IDs & Domain Mappers', () => {
-  it('exports all 127 unique canonical DOM IDs without leading # and domain DTO mappers', () => {
+  it('exports all 137 unique canonical DOM IDs without leading # and domain DTO mappers', () => {
     const entries = Object.entries(DOM_IDS);
-    expect(entries.length).toBe(127);
+    expect(entries.length).toBe(137);
 
     const uniqueValues = new Set(entries.map(([, v]) => v));
-    expect(uniqueValues.size).toBe(127);
+    expect(uniqueValues.size).toBe(137);
 
     for (const [, val] of entries) {
       expect(val.startsWith('#')).toBe(false);
@@ -53,6 +53,8 @@ describe('@gpui-telegram/protocol — Canonical DOM IDs & Domain Mappers', () =>
     }
 
     expect(domSelector(DOM_IDS.AUTH_SCREEN)).toBe('#auth-screen');
+    expect(domSelector(DOM_IDS.NAV_DEST_BROWSER)).toBe('#nav-dest-browser');
+    expect(domSelector(DOM_IDS.BROWSER_CONTROL_WORKSPACE)).toBe('#browser-control-workspace');
     expect(DATA_TEST_IDS.CHAT_ROW).toBe('chat-row');
     expect(DATA_TEST_IDS.MESSAGE_BUBBLE).toBe('message-bubble');
     expect(DATA_ATTRS.CHAT_ID).toBe('data-chat-id');

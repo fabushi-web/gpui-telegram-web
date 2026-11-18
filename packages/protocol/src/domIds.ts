@@ -142,6 +142,18 @@ export const DOM_IDS = {
   COMPUTER_CANVAS: 'computer-canvas',
   BTN_COMPUTER_TAKEOVER: 'btn-computer-takeover',
   WALLET_STARS_MODAL: 'wallet-stars-modal',
+
+  // 6. Browser Control & Desktop Bridge (10 IDs)
+  NAV_DEST_BROWSER: 'nav-dest-browser',
+  BROWSER_CONTROL_WORKSPACE: 'browser-control-workspace',
+  BTN_BROWSER_PAIR_DESKTOP: 'btn-browser-pair-desktop',
+  BTN_BROWSER_REVOKE_CONTROL: 'btn-browser-revoke-control',
+  BROWSER_PAIRING_CODE_DISPLAY: 'browser-pairing-code-display',
+  BROWSER_HEADLESS_URL_INPUT: 'browser-headless-url-input',
+  BTN_BROWSER_HEADLESS_OPEN: 'btn-browser-headless-open',
+  BROWSER_HEADLESS_VIEWPORT: 'browser-headless-viewport',
+  BROWSER_SNAPSHOT_VIEW: 'browser-snapshot-view',
+  BROWSER_AUDIT_LOG: 'browser-audit-log',
 } as const;
 
 export type DomIdKey = keyof typeof DOM_IDS;
@@ -161,6 +173,7 @@ export const DATA_ATTRS = {
   MESSAGE_ID: 'data-message-id',
   SETTINGS_SECTION: 'data-settings-section',
   HERMES_TAB: 'data-hermes-tab',
+  BROWSER_REF: 'data-bctrl-ref',
 } as const;
 
 export type DataAttrName = (typeof DATA_ATTRS)[keyof typeof DATA_ATTRS];

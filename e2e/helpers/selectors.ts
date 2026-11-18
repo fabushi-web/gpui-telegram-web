@@ -76,6 +76,7 @@ export const DOM = {
   navDestTalk: '#nav-dest-talk',
   navDestComputer: '#nav-dest-computer',
   navDestHermes: '#nav-dest-hermes',
+  navDestBrowser: '#nav-dest-browser',
   navDestSettings: '#nav-dest-settings',
 
   // ---------------------------------------------------------------------------
@@ -161,6 +162,15 @@ export const DOM = {
   computerCanvas: '#computer-canvas',
   btnComputerTakeover: '#btn-computer-takeover',
   walletStarsModal: '#wallet-stars-modal',
+  browserControlWorkspace: '#browser-control-workspace',
+  btnBrowserPairDesktop: '#btn-browser-pair-desktop',
+  browserPairingCodeDisplay: '#browser-pairing-code-display',
+  btnBrowserRevokeControl: '#btn-browser-revoke-control',
+  browserSnapshotView: '#browser-snapshot-view',
+  browserHeadlessUrlInput: '#browser-headless-url-input',
+  btnBrowserHeadlessOpen: '#btn-browser-headless-open',
+  browserHeadlessViewport: '#browser-headless-viewport',
+  browserAuditLog: '#browser-audit-log',
 } as const;
 
 export type DOMKey = keyof typeof DOM;
@@ -188,6 +198,7 @@ export const NAV_DESTS = {
   talk: DOM.navDestTalk,
   computer: DOM.navDestComputer,
   hermes: DOM.navDestHermes,
+  browser: DOM.navDestBrowser,
   settings: DOM.navDestSettings,
 } as const;
 export type NavDestKey = keyof typeof NAV_DESTS;

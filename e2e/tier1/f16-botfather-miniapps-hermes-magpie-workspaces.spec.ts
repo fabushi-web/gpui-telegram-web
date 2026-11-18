@@ -893,7 +893,7 @@ test.describe(
       const studio = await openNavDestination(authPage, 'hermes');
       await expect(studio).toBeVisible();
 
-      const tabLocators = studio.locator(DOM.hermesTabItem);
+      const tabLocators = authPage.locator(DOM.hermesTabItem);
       const tabCount = await tabLocators.count();
       expect(tabCount).toBeGreaterThanOrEqual(6);
 

@@ -20,6 +20,10 @@ import {
 import { registerMagpieGatewayRoutes } from './routes/magpie.js';
 import { registerMediaStoriesE2eeAndCallRoutes } from './routes/media.js';
 import { registerMessageAndSearchRoutes } from './routes/messages.js';
+import {
+  BrowserControlBridge,
+  registerBrowserControlRoutes,
+} from './routes/browserControl.js';
 import { registerWorkspaceTailnetAndWalletRoutes } from './routes/workspace.js';
 import { serveStaticSpa } from './staticHost.js';
 import {
@@ -36,6 +40,7 @@ export interface TelegramServerInstance {
   readonly config: ServerConfig;
   readonly db: DatabaseSync;
   readonly hub: RealtimeGatewayHub;
+  readonly browserBridge: BrowserControlBridge;
   readonly httpServer: http.Server;
   start(): Promise<{ port: number; host: string; baseUrl: string; wsUrl: string }>;
   close(): Promise<void>;
@@ -49,47 +54,74 @@ export function createTelegramServer(
   seedDatabaseIfEmpty(db);
 
   const hub = new RealtimeGatewayHub(db);
+  const browserBridge = new BrowserControlBridge(db);
+  hub.setBrowserControlBridge(browserBridge);
+
   const router = new HttpRouter();
   const startedAtMs = Date.now();
 
+  const deferredBotSink = Object.create(hub, {
+    broadcastChatPtsUpdate: {
+      value: (
+        cId: number,
+        ptsUpdate: Parameters<RealtimeGatewayHub['broadcastChatPtsUpdate']>[1],
+      ) => {
+        setTimeout(() => {
+          try {
+            hub.broadcastChatPtsUpdate(cId, ptsUpdate);
+          } catch {
+            // Ignore if hub closed during server teardown
+          }
+        }, 80).unref();
+      },
+    },
+  }) as RealtimeGatewayHub;
+
   // Bot & @HermesAgent conversational message hook (triggered from both HTTP and WS SendMessage!)
+  const runBotReplyNow = (chatId: number, senderId: number, text: string): void => {
+    try {
+      // 1. Check @BotFather / @FabushiBot / custom bots
+      if (handleBotConversationTurn(db, deferredBotSink, chatId, senderId, text)) {
+        return;
+      }
+
+      // 2. Check @HermesAgent (`777000`) DM chat or `@HermesAgent` mention
+      const hermesInChat = db
+        .prepare(`SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = 777000`)
+        .get(chatId);
+      const chatMeta = db
+        .prepare(`SELECT chat_type, peer_user_id FROM chats WHERE chat_id = ?`)
+        .get(chatId) as { chat_type: number; peer_user_id: number | null } | undefined;
+
+      const isDirectHermes = chatMeta?.chat_type === 0 && Number(chatMeta.peer_user_id) === 777000;
+      const mentionsHermes = /@HermesAgent\b/i.test(text);
+
+      if (isDirectHermes || (hermesInChat && mentionsHermes)) {
+        const trimmed = text.trim();
+        if (trimmed.startsWith('/')) {
+          const slashRes = executeSlashCommandInternal(db, senderId, trimmed, undefined, chatId);
+          createMessageAtomic(db, deferredBotSink, {
+            chatId,
+            senderId: 777000,
+            text: slashRes.response_text,
+          });
+        } else {
+          createMessageAtomic(db, deferredBotSink, {
+            chatId,
+            senderId: 777000,
+            text: `🤖 **Hermes AI**: Processed "${trimmed.slice(0, 160)}". Open **Hermes 6-Tab Studio** for full SSE reasoning & tool traces.`,
+          });
+        }
+      }
+    } catch {
+      // Ignore if DB closed during server teardown
+    }
+  };
+
   const dispatchBotReplyIfApplicable = (chatId: number, senderId: number, text: string): void => {
     // Ignore messages authored by bots themselves to prevent infinite loops
     if (senderId >= 777000) return;
-
-    // 1. Check @BotFather / @FabushiBot / custom bots
-    if (handleBotConversationTurn(db, hub, chatId, senderId, text)) {
-      return;
-    }
-
-    // 2. Check @HermesAgent (`777000`) DM chat or `@HermesAgent` mention
-    const hermesInChat = db
-      .prepare(`SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = 777000`)
-      .get(chatId);
-    const chatMeta = db
-      .prepare(`SELECT chat_type, peer_user_id FROM chats WHERE chat_id = ?`)
-      .get(chatId) as { chat_type: number; peer_user_id: number | null } | undefined;
-
-    const isDirectHermes = chatMeta?.chat_type === 0 && Number(chatMeta.peer_user_id) === 777000;
-    const mentionsHermes = /@HermesAgent\b/i.test(text);
-
-    if (isDirectHermes || (hermesInChat && mentionsHermes)) {
-      const trimmed = text.trim();
-      if (trimmed.startsWith('/')) {
-        const slashRes = executeSlashCommandInternal(db, senderId, trimmed, undefined, chatId);
-        createMessageAtomic(db, hub, {
-          chatId,
-          senderId: 777000,
-          text: slashRes.response_text,
-        });
-      } else {
-        createMessageAtomic(db, hub, {
-          chatId,
-          senderId: 777000,
-          text: `🤖 **Hermes AI**: Processed "${trimmed.slice(0, 160)}". Open **Hermes 6-Tab Studio** for full SSE reasoning & tool traces.`,
-        });
-      }
-    }
+    runBotReplyNow(chatId, senderId, text);
   };
 
   hub.setBotTriggerHook(dispatchBotReplyIfApplicable);
@@ -129,6 +161,7 @@ export function createTelegramServer(
       );
     }
     const t0 = performance.now();
+    browserBridge.resetFastSync();
     hub.disconnectAllSessions();
     resetAndSeedDatabase(db, config.mediaDir, config.uploadsDir);
     const elapsedMs = Number((performance.now() - t0).toFixed(2));
@@ -147,10 +180,15 @@ export function createTelegramServer(
   registerBotsMiniAppsAndFabushiRoutes(router, db, hub);
   registerHermesStudioRoutes(router, db, hub);
   registerMagpieGatewayRoutes(router, db, config);
-  registerWorkspaceTailnetAndWalletRoutes(router, db, config, hub);
+  registerWorkspaceTailnetAndWalletRoutes(router, db, config, hub, browserBridge);
+  registerBrowserControlRoutes(router, db, browserBridge);
 
   const httpServer = http.createServer(async (req, res) => {
     setCorsHeaders(res);
+    const allowHeaders = res.getHeader('Access-Control-Allow-Headers');
+    if (typeof allowHeaders === 'string' && !allowHeaders.includes('X-Desktop-Browser-Token')) {
+      res.setHeader('Access-Control-Allow-Headers', `${allowHeaders}, X-Desktop-Browser-Token`);
+    }
     if (req.method === 'OPTIONS') {
       res.statusCode = 204;
       res.end();
@@ -201,6 +239,7 @@ export function createTelegramServer(
     config,
     db,
     hub,
+    browserBridge,
     httpServer,
     async start() {
       await new Promise<void>((resolve, reject) => {
@@ -230,6 +269,7 @@ export function createTelegramServer(
     async close() {
       if (isClosed) return;
       isClosed = true;
+      await browserBridge.dispose();
       await hub.close();
       httpServer.closeAllConnections?.();
       await new Promise<void>((resolve) => {
@@ -249,6 +289,7 @@ export function createTelegramServer(
 }
 
 export * from './config.js';
+export { closeAllHeadlessSessions } from './routes/browserControl.js';
 
 // CLI Entrypoint when invoked directly via `node apps/server/dist/index.js` (`npm start`)
 const isDirectMain =

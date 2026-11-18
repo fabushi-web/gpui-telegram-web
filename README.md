@@ -1,14 +1,57 @@
 # gpui-telegram-web
 
-Full-featured web edition of [`bhrum/gpui-telegram`](https://github.com/bhrum/gpui-telegram) (`v1.2.0`) engineered with a hexagonal TypeScript monorepo architecture delivering parity with Telegram Web (Web A / Web K) and `gpui-telegram`.
+Complete standalone web edition of [`bhrum/gpui-telegram`](https://github.com/bhrum/gpui-telegram) (`v1.2.0`), engineered with a clean hexagonal TypeScript monorepo architecture (`packages/protocol`, `apps/server`, `apps/web`).
 
-## Architecture
+It delivers **100% standalone parity with Telegram Web (Web A / Web K) and `gpui-telegram` desktop** with **zero dependency on the native Rust/GPUI desktop binary**, while simultaneously exposing a bidirectional **Desktop-to-Browser Control Bridge (`F17` + MCP JSON-RPC 2.0)** so `gpui-telegram` desktop clients and AI agents can remotely inspect and control live web tabs or isolated Headless Chromium sessions.
 
-- **`packages/protocol` (`@gpui-telegram/protocol`)**: Shared domain models, wire DTOs, UTF-16 `MessageEntity` & Markdown parser/serializer, 3-state CJK `ImeSafetyFsm` (`Idle -> Composing -> Committed`), 100-bar 5-bit voice waveform codec, WebCrypto E2EE (`ECDH P-256 + HKDF-SHA256 + AES-256-GCM` + 4-emoji safety fingerprint), 23-variant `UpdateEvent` & monotonic per-chat `PtsUpdate` sync schemas, canonical `DOM_IDS` registry, and the hexagonal `TelegramClientPort` interface.
-- **`apps/server` (`@gpui-telegram/server`)**: Stateful Node.js 24 (`node:http` + built-in `node:sqlite` WAL + `ws` + SSE) backend supporting all 7 authentication flows, salted `scrypt` Cloud 2FA, `/api/v1/ws` per-chat monotonic `pts` sync & gap recovery, CJK-aware full-text search, SHA-256 content-addressable chunked media upload with HTTP `206 Partial Content` byte-range streaming, `@BotFather` (`777001`), `window.Telegram.WebApp` Mini Apps (`fabushi-globe` & `taskboard`), Hermes 6-Tab AI Studio & 61 `/slash` commands, Magpie Multi-Provider LLM Gateway, Global Task Center & 5-field Cron, MCP Tools Dock, Full-Duplex Talk Mode, Remote Computer Workbench (`<10ms` emergency takeover), Tailnet mesh status, Stars/TON Wallet, and static SPA co-hosting.
-- **`apps/web` (`@gpui-telegram/web`)**: Vite + React 19 + Zustand + `@tanstack/react-virtual` + 100% Vanilla CSS responsive Telegram Web interface.
+---
+
+## Highlights & Feature Matrix (`F1`–`F17`)
+
+- **3 Standalone Runtime Modes (Zero Native Binary Dependency)**:
+  - **`server` (Default Full-Stack Mode)**: Node.js 24 (`node:http` + `node:sqlite` WAL + `ws` + SSE) + React 19 SPA with real multi-client sync, WebRTC signaling, chunked media streaming, E2EE key directory, AI workspaces, and Browser Control Bridge.
+  - **`sandbox` (100% Browser-Standalone Offline Mode)**: Runs entirely inside the browser via `LocalSandboxAdapter` + `BroadcastChannel` multi-tab sync with zero backend server required (`?mode=sandbox`).
+  - **`mtproto` (Telegram DC Mode)**: Pluggable `TelegramClientPort` adapter for direct MTProto transport configuration (`?mode=mtproto`).
+- **Telegram Web (Web A / Web K) Complete UX (`F1`–`F15`)**:
+  - **7 Authentication Flows & Local Security (`F1`)**: Phone + OTP, QR Code login, Cloud 2FA (`scrypt`), Sign-Up, Passkey/WebAuthn, Demo Account Switcher (`Alice`, `Bob`, `Carol`, `Dave`), Bot Token login, Alipay OAuth simulation, and local AES-GCM Passcode Lock (`Ctrl+L`).
+  - **Responsive 3-Column Shell, 4 Themes & Bilingual i18n (`F2`)**: Desktop 3-column / Tablet 2-column / Mobile single-column layout, `Night`, `Day`, `Tinted`, and `Classic` themes (**100% Vanilla CSS, strictly zero purple/violet hues on dark themes**), custom accent picker, message density, and instant `zh-CN` / `en-US` switching.
+  - **Per-Chat Monotonic `pts` WebSocket Sync (`F3`)**: `/api/v1/ws` real-time push, `PtsStateMachine` gap detection, `/api/v1/sync/getDifference` recovery, `client_nonce` idempotency, typing/upload/record action indicators, and multi-tab `BroadcastChannel` state sync.
+  - **Stories, Folders, Archive & Forum Topics (`F4`)**: 24h Stories ring & viewer/composer, up to 10 Chat Folders, collapsible Archived Chats, Saved Messages, and Supergroup Forum Topics split-view.
+  - **CJK Full-Text Search & Rich Timeline (`F5`–`F13`)**: 1-char CJK (`中文`) + Latin prefix global/in-chat search, `@tanstack/react-virtual` virtualized timeline, grouped albums, UTF-16 `MessageEntity` formatting & spoilers, fenced code blocks with copy, Instant View reader, 3-state CJK `ImeSafetyFsm` composer, scheduled/silent messages, forward/reply/edit/delete/pin, animated reactions, SHA-256 chunked media upload + HTTP `206 Partial Content` streaming, Lightbox & Canvas media editor, 100-bar 5-bit voice notes & circular video notes with transcription, Polls/Quizzes, collaborative Todo checklists, and Stars/TON invoices.
+  - **Right Context Inspector, 25-Page Settings, WebRTC Calls & E2EE Secret Chats (`F14`–`F15`)**: Shared media/files/links/voice tabs, group/channel admin permissions & stats, JSON/HTML chat history export, 1-on-1 WebRTC P2P voice/video/screen-share calls with loopback verification, and WebCrypto E2EE Secret Chats (`ECDH P-256 + HKDF-SHA256 + AES-256-GCM`) with 4-emoji safety fingerprint verification.
+- **`gpui-telegram` Native Ecosystem Capabilities (`F16`)**:
+  - Conversational `@BotFather` (`777001`), `window.Telegram.WebApp` Mini Apps (`全球法布施` WebAssembly + 3D Canvas Globe + Zen Room, and `TaskBoard`), **Hermes 6-Tab AI Studio** (61 `/slash` commands + SSE `ThinkingBubble`), **Magpie Multi-Provider LLM Gateway** (PII masking + token ledger), **Global Task Center & 5-Field Cron Scheduler**, **MCP Tools Permission Dock**, **Full-Duplex Talk Mode Orb**, **Remote Computer Workbench** (`<10ms` emergency takeover), **Tailnet Mesh Overlay**, and **Stars/TON Wallet**.
+- **Desktop-to-Browser Control Bridge (`F17`)**:
+  - Live Web Tab Agent (`window.__GPUI_TELEGRAM_BROWSER_BRIDGE__`) + WebSocket reverse RPC (`/api/v1/browser/ws`) + REST controller API (`/api/v1/browser/*`) + Server-managed Headless Chromium CDP Studio (`/api/v1/browser/headless/*` with deterministic `http_dom_fallback`) + standard **Model Context Protocol JSON-RPC 2.0** endpoint (`POST /api/v1/mcp/rpc`).
+
+---
+
+## Monorepo Architecture
+
+```text
+gpui-telegram-web/
+├── packages/
+│   └── protocol/       # @gpui-telegram/protocol — Shared DTOs, UTF-16 entities, CJK IME FSM,
+│                       # 5-bit waveform codec, WebCrypto E2EE, PTS sync FSM, DOM_IDS & BrowserControl types
+├── apps/
+│   ├── server/         # @gpui-telegram/server — Node.js 24 HTTP + node:sqlite WAL + WS + SSE +
+│   │                   # Headless Chromium CDP controller + MCP JSON-RPC 2.0 host
+│   └── web/            # @gpui-telegram/web — Vite + React 19 + Zustand + @tanstack/react-virtual +
+│                       # 100% Vanilla CSS + Live Browser Control Agent
+├── tests/
+│   └── unit/           # Vitest unit, protocol, ecosystem & F17 browser bridge integration suites
+└── e2e/                # Self-contained Playwright Chromium E2E verification suite (F1–F17)
+```
+
+---
 
 ## Quick Start
+
+### Prerequisites
+- **Node.js `>= 24.0.0`** (uses built-in `node:sqlite` — zero native C++ addon compilation required)
+- **npm `>= 10`**
+
+### Install, Build & Launch
 
 ```bash
 npm install
@@ -16,11 +59,93 @@ npm run build
 PORT=4173 HOST=127.0.0.1 DATA_DIR=./data npm start
 ```
 
-Open `http://127.0.0.1:4173` in your browser.
+Open `http://127.0.0.1:4173` in your browser:
+- **Full-Stack Server Mode**: `http://127.0.0.1:4173`
+- **Standalone Offline Sandbox Mode (Zero Backend Needed)**: `http://127.0.0.1:4173/?mode=sandbox`
 
-## Development & Verification Commands
+---
 
-- `npm run typecheck` — Strict TypeScript 5 typechecking across all workspaces and tests
-- `npm run build` — Production build for `packages/protocol`, `apps/server`, and `apps/web`
-- `npm run test:unit` — Run Vitest unit & full-stack server integration tests (`--maxWorkers=2`)
-- `npm start` — Run unified production full-stack server (`PORT`, `HOST`, `DATA_DIR`, `ENABLE_TEST_RESET`)
+## Desktop-to-Browser Control Bridge (`F17`) — Integration Guide for `gpui-telegram` Desktop & MCP Clients
+
+`gpui-telegram-web` allows native `gpui-telegram` desktop clients, CLI scripts, and MCP-compatible AI agents to inspect and control browser sessions securely.
+
+### 1. Pair a Desktop Controller (Capability Token)
+
+1. Open **Browser Control Workspace** (`#nav-dest-browser` in the left navigation rail) in the web app to generate a 6-character pairing code, **or** request one via API with an authenticated user bearer token:
+   ```bash
+   curl -X POST http://127.0.0.1:4173/api/v1/browser/pair/request \
+     -H "Authorization: Bearer <USER_SESSION_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{"client_name":"gpui-telegram-desktop","Scopes":["snapshot","act","navigate","headless"]}'
+   ```
+2. Exchange the `pair_code` from the desktop client for a scoped `X-Desktop-Browser-Token`:
+   ```bash
+   curl -X POST http://127.0.0.1:4173/api/v1/browser/pair/exchange \
+     -H "Content-Type: application/json" \
+     -d '{"pair_code":"<6_CHAR_CODE>","desktop_name":"gpui-telegram macOS/Linux Desktop"}'
+   ```
+3. **Emergency `<10ms` Revoke**: Clicking `#btn-browser-revoke-all` in the web UI or calling `POST /api/v1/browser/revoke-all` immediately invalidates all desktop capability tokens and terminates active control leases.
+
+### 2. Inspect & Drive Live Paired Web Tabs
+
+```bash
+# List connected live web tabs & headless sessions for this user
+curl http://127.0.0.1:4173/api/v1/browser/targets \
+  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>"
+
+# Capture Accessibility / DOM snapshot with deterministic element refs (e1, e2, ...)
+curl -X POST http://127.0.0.1:4173/api/v1/browser/tabs/<TARGET_ID>/command \
+  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"snapshot"}'
+
+# Execute UI or semantic Telegram actions (click, fill, press, navigate, app_action, screenshot)
+curl -X POST http://127.0.0.1:4173/api/v1/browser/tabs/<TARGET_ID>/command \
+  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"app_action","app_action":"send_chat_message","app_payload":{"chat_id":101,"text":"Sent remotely from gpui-telegram Desktop!"}}'
+```
+
+### 3. Drive Server-Managed Headless Chromium Sessions
+
+Desktop clients can also spawn isolated headless Chromium instances (`cdp_chromium` with automatic `http_dom_fallback` when no browser binary is installed):
+
+```bash
+# Open a headless browser session
+curl -X POST http://127.0.0.1:4173/api/v1/browser/headless/sessions \
+  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"http://127.0.0.1:4173","width":1280,"height":800}'
+
+# Snapshot, click, fill, evaluate, or capture PNG/SVG screenshots
+curl -X POST http://127.0.0.1:4173/api/v1/browser/headless/sessions/<SESSION_ID>/action \
+  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"snapshot"}'
+```
+
+### 4. Connect via Model Context Protocol (MCP JSON-RPC 2.0)
+
+Point any MCP host (including `gpui-telegram` Hermes/MCP runtime, Claude Desktop, or Cursor) at:
+- **Manifest**: `GET /api/v1/mcp/manifest`
+- **JSON-RPC 2.0 Endpoint**: `POST /api/v1/mcp/rpc` (`initialize`, `ping`, `tools/list`, `tools/call`)
+- **Exposed Browser Tools**: `browser_list_targets`, `browser_tab_command`, `browser_snapshot`, `browser_act`, `browser_open_headless`, `browser_headless_open`, `browser_headless_action`, `browser_headless_screenshot`, `browser_headless_close`.
+
+---
+
+## Verification & Testing
+
+```bash
+# 1. Strict TypeScript check across protocol, server, web, and E2E suites
+npm run typecheck
+./node_modules/.bin/tsc -p e2e/tsconfig.json --noEmit
+
+# 2. Production bundle build
+npm run build
+
+# 3. Vitest unit & full-stack integration suite (26 tests across 4 suites)
+npm run test:unit
+
+# 4. Playwright Chromium End-to-End suite (17 spec files, 97 tests covering F1–F17)
+cd e2e && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_WORKERS=1 ./node_modules/.bin/playwright test
+```
