@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: gpui-telegram-web
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "4173"
+      - key: DATA_DIR
+        value: /data
+      - key: ENABLE_TEST_RESET
+        value: "0"
+    disk:
+      name: gpui-telegram-sqlite-wal
+      mountPath: /data
+      sizeGB: 2

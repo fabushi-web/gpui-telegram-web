@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>全球法布施 · 3D WASM 禅堂</title>
-  <script src="/js/telegram-web-app.js"></script>
+  <script src="../../../js/telegram-web-app.js"></script>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -217,7 +217,7 @@
       var fallbackBin = Uint8Array.from(atob(b64), function (c) { return c.charCodeAt(0); });
 
       function loadWasmBuffer() {
-        return fetch('/miniapps/fabushi/app.wasm')
+        return fetch('../../fabushi/app.wasm')
           .then(function (r) {
             if (r.ok) return r.arrayBuffer();
             return fetch('./fabushi-merit.wasm').then(function (r2) {

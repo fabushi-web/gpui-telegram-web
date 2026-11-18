@@ -275,6 +275,40 @@ function persistAuthEnvelope(
 }
 
 const bootAuth = loadPersistedAuth();
+
+function detectInitialBootOverride(): { mode?: AdapterMode; serverUrl?: string } {
+  if (typeof window === 'undefined') return {};
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const qMode = params.get('mode');
+    const qServer = params.get('server') || params.get('api');
+    const validMode: AdapterMode | undefined =
+      qMode === 'sandbox' || qMode === 'server' || qMode === 'mtproto' ? qMode : undefined;
+    if (validMode || qServer) {
+      return { mode: validMode, serverUrl: qServer ?? undefined };
+    }
+    const host = window.location.hostname.toLowerCase();
+    const isKnownStaticHost =
+      host.endsWith('.github.io') ||
+      host.endsWith('.pages.dev') ||
+      host.endsWith('.netlify.app') ||
+      host.endsWith('.vercel.app');
+    if (isKnownStaticHost && !bootAuth.serverUrl) {
+      return { mode: 'sandbox' };
+    }
+  } catch {
+    // Ignore URL parse error
+  }
+  return {};
+}
+
+const bootOverride = detectInitialBootOverride();
+if (bootOverride.mode) {
+  void switchClientAdapterMode(bootOverride.mode, {
+    serverUrl: bootOverride.serverUrl ?? bootAuth.serverUrl,
+  });
+}
+
 const initialActiveAccount =
   bootAuth.accounts.find((a) => a.accountId === bootAuth.activeAccountId) ??
   bootAuth.accounts[0] ??
@@ -282,7 +316,7 @@ const initialActiveAccount =
 
 if (initialActiveAccount) {
   getServerAdapter().configure({
-    serverUrl: initialActiveAccount.serverUrl || bootAuth.serverUrl,
+    serverUrl: bootOverride.serverUrl || initialActiveAccount.serverUrl || bootAuth.serverUrl,
     token: initialActiveAccount.token,
     accountId: initialActiveAccount.accountId,
     userId: initialActiveAccount.userId ?? initialActiveAccount.user.userId,
@@ -361,8 +395,8 @@ export const useAuthStore = create<AuthState>((set, get) => {
     isAuthenticated: Boolean(initialActiveAccount?.token),
     isAddingAccount: false,
 
-    adapterMode: initialActiveAccount?.adapterMode ?? bootAuth.adapterMode,
-    serverUrl: initialActiveAccount?.serverUrl ?? bootAuth.serverUrl,
+    adapterMode: bootOverride.mode ?? initialActiveAccount?.adapterMode ?? bootAuth.adapterMode,
+    serverUrl: bootOverride.serverUrl ?? initialActiveAccount?.serverUrl ?? bootAuth.serverUrl,
     mtprotoConfig: getMtprotoAdapter().getMtprotoConfig(),
 
     passcodeHash: bootAuth.passcodeHash,
@@ -386,26 +420,48 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     hydrateAuth: async () => {
       const loaded = loadPersistedAuth();
+      const override = detectInitialBootOverride();
+      const effectiveServerUrl = override.serverUrl ?? loaded.serverUrl;
       const active =
         loaded.accounts.find((a) => a.accountId === loaded.activeAccountId) ??
         loaded.accounts[0] ??
         null;
 
       if (!active) {
+        let resolvedMode: AdapterMode = override.mode ?? loaded.adapterMode;
+        if (resolvedMode === 'server' && !override.mode && typeof window !== 'undefined') {
+          try {
+            const healthUrl = `${effectiveServerUrl ? effectiveServerUrl.replace(/\/$/, '') : ''}/api/v1/health`;
+            const ctrl = new AbortController();
+            const timer = window.setTimeout(() => ctrl.abort(), 1500);
+            const res = await fetch(healthUrl, { signal: ctrl.signal });
+            window.clearTimeout(timer);
+            const ct = res.headers.get('content-type') || '';
+            if (!res.ok || !ct.includes('application/json')) {
+              resolvedMode = 'sandbox';
+            }
+          } catch {
+            resolvedMode = 'sandbox';
+          }
+        }
+        await switchClientAdapterMode(resolvedMode, { serverUrl: effectiveServerUrl });
         set({
           accounts: [],
           activeAccountId: null,
           currentUser: null,
           token: null,
           isAuthenticated: false,
+          adapterMode: resolvedMode,
+          serverUrl: effectiveServerUrl,
           passcodeHash: loaded.passcodeHash,
           isLocked: false,
         });
         return;
       }
 
-      const adapter = await switchClientAdapterMode(active.adapterMode, {
-        serverUrl: active.serverUrl || loaded.serverUrl,
+      const activeMode = override.mode ?? active.adapterMode;
+      const adapter = await switchClientAdapterMode(activeMode, {
+        serverUrl: override.serverUrl || active.serverUrl || loaded.serverUrl,
         token: active.token,
         accountId: active.accountId,
         userId: active.userId ?? active.user.userId,

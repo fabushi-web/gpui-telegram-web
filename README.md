@@ -133,6 +133,24 @@ Point any MCP host (including `gpui-telegram` Hermes/MCP runtime, Claude Desktop
 
 ---
 
+## Production Deployment
+
+- **Live Standalone Web Edition (GitHub Pages HTTPS)**:
+  - **https://fabushi-web.github.io/gpui-telegram-web/**
+  - Automatically runs in standalone `sandbox` mode (`LocalSandboxAdapter` + `BroadcastChannel` multi-tab sync) with zero backend dependency, or connects to any deployed full-stack server via `?mode=server&server=https://your-server.example.com`.
+  - Re-publish anytime via `npm run deploy:pages`.
+- **Docker & Docker Compose (Full-Stack Node.js 24 + SQLite WAL + Headless Chromium CDP + MCP Host)**:
+  ```bash
+  docker compose up -d --build
+  ```
+  Persists SQLite WAL databases and content-addressed media in the `gpui_telegram_data` volume (`/data`) with built-in `/api/v1/health` healthcheck.
+- **One-Click Cloud PaaS**:
+  - **Render**: Blueprint ready in `render.yaml` (persistent disk `/data` + Docker healthcheck).
+  - **Railway**: Configured in `railway.json` (`Dockerfile` builder + `/api/v1/health`).
+  - **Fly.io**: Configured in `fly.toml` (`fly volumes create gpui_telegram_data --size 2 && fly deploy`).
+
+---
+
 ## Verification & Testing
 
 ```bash

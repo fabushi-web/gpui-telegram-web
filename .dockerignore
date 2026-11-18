@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+dist
+**/dist
+.git
+.gitignore
+.test-tmp
+data
+e2e
+tests
+*.sqlite*
+*.db*
+*.log
+.env
+.env.*
+!.env.example

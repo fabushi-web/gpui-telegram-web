@@ -15,7 +15,9 @@ createRoot(container).render(
   </React.StrictMode>,
 );
 
-const isProdBuild = Boolean((import.meta as unknown as { env?: { PROD?: boolean } }).env?.PROD);
+const viteEnv = (import.meta as unknown as { env?: { PROD?: boolean; BASE_URL?: string } }).env;
+const isProdBuild = Boolean(viteEnv?.PROD);
+const appBaseUrl = viteEnv?.BASE_URL || '/';
 
 if (
   typeof window !== 'undefined' &&
@@ -24,7 +26,8 @@ if (
   !navigator.webdriver
 ) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {
+    const swUrl = `${appBaseUrl.replace(/\/$/, '')}/sw.js`;
+    navigator.serviceWorker.register(swUrl).catch(() => {
       // Non-fatal in restricted or private browser environments
     });
   });

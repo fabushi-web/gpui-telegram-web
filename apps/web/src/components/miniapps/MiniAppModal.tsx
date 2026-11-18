@@ -140,7 +140,16 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
     }
   }, [visible, activeMiniApp, launchMiniApp, activeChatId]);
 
-  const baseLaunchUrl = activeMiniApp?.launch_url || '/miniapps/fabushi-globe/index.html';
+  const baseLaunchUrl = useMemo(() => {
+    const raw = activeMiniApp?.launch_url || '/miniapps/fabushi-globe/index.html';
+    const basePrefix = (
+      (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL || '/'
+    ).replace(/\/$/, '');
+    if (basePrefix && raw.startsWith('/miniapps/')) {
+      return `${basePrefix}${raw}`;
+    }
+    return raw;
+  }, [activeMiniApp?.launch_url]);
 
   const effectiveSrc = useMemo(() => {
     if (reloadNonce === 0) return baseLaunchUrl;
