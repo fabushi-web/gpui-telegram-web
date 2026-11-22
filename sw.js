@@ -1,5 +1,5 @@
 /* GPUI Telegram Web — Standalone Offline-Capable Service Worker (Root & Subpath Safe) */
-const CACHE_NAME = 'gpui-telegram-web-shell-v2';
+const CACHE_NAME = 'gpui-telegram-web-shell-v3';
 
 function resolveScopedUrl(relPath) {
   const scope = (self.registration && self.registration.scope) || self.location.origin + '/';
@@ -10,10 +10,11 @@ const PRECACHE_REL_PATHS = [
   './',
   './manifest.webmanifest',
   './js/telegram-web-app.js',
-  './miniapps/fabushi/app.wasm',
-  './miniapps/fabushi-globe/fabushi-merit.wasm',
   './miniapps/fabushi-globe/index.html',
-  './miniapps/taskboard/index.html',
+  './miniapps/fabushi-globe/fabushi_miniapp.wasm',
+  './miniapps/fabushi-globe/earth_texture.jpg',
+  './miniapps/fabushi-globe/home_world_lightfield.webp',
+  './miniapps/fabushi-globe/zen_room_backdrop_2d.webp',
 ];
 
 self.addEventListener('install', (event) => {
