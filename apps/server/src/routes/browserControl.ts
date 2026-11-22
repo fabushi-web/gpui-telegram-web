@@ -938,7 +938,9 @@ class ChromiumCdpDriver implements HeadlessDriver {
         '--mute-audio',
         '--proxy-bypass-list=<-loopback>,127.0.0.1,localhost',
         `--user-data-dir=${userDataDir}`,
+        '--remote-debugging-address=127.0.0.1',
         '--remote-debugging-port=0',
+        '--remote-allow-origins=*',
         `--window-size=${this.viewport.width},${this.viewport.height}`,
         'about:blank',
       ],
@@ -950,11 +952,11 @@ class ChromiumCdpDriver implements HeadlessDriver {
       let stderrBuf = '';
       const timer = setTimeout(() => {
         reject(new Error(`Timed out waiting for Chromium DevTools port. Stderr: ${stderrBuf.slice(-300)}`));
-      }, 8000);
+      }, 15000);
 
       const onData = (chunk: Buffer) => {
         stderrBuf += chunk.toString('utf8');
-        const m = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(stderrBuf);
+        const m = /DevTools listening on ws:\/\/(?:\[::1\]|127\.0\.0\.1|localhost):(\d+)\//.exec(stderrBuf);
         if (m) {
           clearTimeout(timer);
           proc.stderr?.off('data', onData);
