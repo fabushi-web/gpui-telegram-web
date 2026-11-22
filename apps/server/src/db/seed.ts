@@ -132,15 +132,230 @@ export function buildComputerViewportSvg(title: string, statusLine: string): str
   return `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`;
 }
 
-export function seedDatabaseIfEmpty(db: DatabaseSync): void {
-  const existing = db.prepare(`SELECT COUNT(*) AS cnt FROM users`).get() as { cnt: number };
+export function seedSystemEntitiesIfEmpty(
+  db: DatabaseSync,
+  options: { inTransaction?: boolean } = {},
+): void {
+  const now = Date.now();
+  if (!options.inTransaction) {
+    db.exec('BEGIN IMMEDIATE;');
+  }
+  try {
+    // 1. Official platform system bots (zero fake human accounts, zero fake messages)
+    const insertSystemBotUser = db.prepare(`
+      INSERT OR IGNORE INTO users (
+        user_id, username, first_name, last_name, bio, phone, email,
+        password_salt, password_hash, emoji_status, is_bot, is_verified, is_premium,
+        status, last_seen_ms, created_at_ms
+      ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 1, 1, 1, 'bot', ?, ?)
+    `);
+    insertSystemBotUser.run(
+      777000,
+      'HermesAgent',
+      'Hermes AI',
+      'Assistant',
+      'Official Hermes 6-Tab AI Studio & Tool-Augmented Agent Runtime',
+      '🤖',
+      now,
+      now,
+    );
+    insertSystemBotUser.run(
+      777001,
+      'BotFather',
+      'BotFather',
+      '',
+      'BotFather is the one bot to rule them all. Use it to create new bot accounts and Mini Apps.',
+      '☑️',
+      now,
+      now,
+    );
+    insertSystemBotUser.run(
+      777002,
+      'FabushiBot',
+      '全球法布施',
+      'Bot',
+      '全球法布施 3D WASM Globe & Zen Room (木鱼 · 焚香 · 经典共修 · 功德回向)',
+      '🪷',
+      now,
+      now,
+    );
+
+    const officialBots: Array<{ token: string; entry: BotRegistryEntry }> = [
+      {
+        token: '777001:AAOfficialBotFatherToken_v1',
+        entry: {
+          bot_user_id: 777001,
+          owner_user_id: 0,
+          username: 'BotFather',
+          display_name: 'BotFather',
+          description: 'Official Bot & Mini App Father',
+          about: 'Create and manage bots & Telegram Mini Apps',
+          commands: [
+            { command: 'start', description: 'Show BotFather main menu' },
+            { command: 'newbot', description: 'Create a new bot' },
+            { command: 'mybots', description: 'List and manage your bots' },
+            { command: 'newapp', description: 'Create a new Mini App' },
+            { command: 'setdescription', description: 'Update bot description' },
+            { command: 'deletebot', description: 'Delete a bot' },
+            { command: 'cancel', description: 'Cancel current wizard operation' },
+          ],
+          is_official: true,
+          is_inline: false,
+          allow_attach_menu: false,
+          menu_button_type: 'commands',
+          has_main_app: false,
+          created_at_ms: now,
+        },
+      },
+      {
+        token: '777000:AAOfficialHermesAgentToken_v1',
+        entry: {
+          bot_user_id: 777000,
+          owner_user_id: 0,
+          username: 'HermesAgent',
+          display_name: 'Hermes AI',
+          description: 'Official Hermes 6-Tab AI Studio & Agent Runtime',
+          about: 'Streaming SSE reasoning, 61 slash commands, Memory, Skills & Kanban',
+          ai_persona: 'You are Hermes AI, a precise, helpful full-stack engineering and research agent.',
+          commands: [
+            { command: 'help', description: 'List Hermes slash commands' },
+            { command: 'status', description: 'Show Hermes engine status' },
+            { command: 'branch', description: 'Fork session trajectory' },
+            { command: 'memory', description: 'Inspect bounded MEMORY.md' },
+            { command: 'skills', description: 'List installed skills' },
+          ],
+          is_official: true,
+          is_inline: true,
+          allow_attach_menu: true,
+          menu_button_type: 'commands',
+          has_main_app: false,
+          approval_mode: 'ask',
+          toolset_preset: 'hermes-telegram',
+          created_at_ms: now,
+        },
+      },
+      {
+        token: '777002:AAOfficialFabushiBotToken_v1',
+        entry: {
+          bot_user_id: 777002,
+          owner_user_id: 0,
+          username: 'FabushiBot',
+          display_name: '全球法布施',
+          description: '全球法布施 WASM 3D Globe & Zen Room Mini App Bot',
+          about: '实时全球法布施光束 · 禅室共修 · 经典阅读 · 功德回向',
+          commands: [{ command: 'start', description: '打开全球法布施导航卡片' }],
+          is_official: true,
+          is_inline: true,
+          allow_attach_menu: true,
+          menu_button_type: 'web_app',
+          menu_button_text: '全球法布施',
+          menu_button_url: '/miniapps/FabushiBot/fabushi',
+          has_main_app: true,
+          main_app_short_name: 'fabushi',
+          created_at_ms: now,
+        },
+      },
+    ];
+
+    const insertBot = db.prepare(`
+      INSERT OR IGNORE INTO bots_registry (bot_user_id, owner_user_id, bot_token, bot_json, created_at_ms)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const b of officialBots) {
+      insertBot.run(b.entry.bot_user_id, b.entry.owner_user_id, b.token, JSON.stringify(b.entry), now);
+    }
+
+    // 2. Official built-in Fabushi Rust/WASM MiniApp (install_count starts at truthful 0)
+    const officialMiniApps: MiniAppEntry[] = [
+      {
+        app_id: 'app_fabushi_alias',
+        bot_user_id: 777002,
+        bot_username: 'FabushiBot',
+        short_name: 'fabushi',
+        title: '全球法布施',
+        description: '全球法布施 3D WASM 地球与禅室共修应用（Rust/WASM 核心）',
+        category: 'lifestyle',
+        icon_emoji: '🪷',
+        web_url: '/miniapps/FabushiBot/fabushi',
+        has_wasm: true,
+        is_installed: true,
+        install_count: 0,
+        created_at_ms: now,
+      },
+      {
+        app_id: 'app_fabushi_globe',
+        bot_user_id: 777002,
+        bot_username: 'FabushiBot',
+        short_name: 'fabushi-globe',
+        title: '全球法布施 3D Globe & 禅室',
+        description: '全球法布施 3D WASM 地球、八大经典、禅室共修与真实排行榜',
+        category: 'lifestyle',
+        icon_emoji: '🌏',
+        web_url: '/miniapps/FabushiBot/fabushi-globe',
+        has_wasm: true,
+        is_installed: true,
+        install_count: 0,
+        created_at_ms: now,
+      },
+    ];
+    const insertMiniApp = db.prepare(`
+      INSERT OR IGNORE INTO mini_apps (app_id, bot_user_id, bot_username, short_name, app_json, html_bundle, created_at_ms)
+      VALUES (?, ?, ?, ?, ?, NULL, ?)
+    `);
+    for (const app of officialMiniApps) {
+      insertMiniApp.run(app.app_id, app.bot_user_id, app.bot_username, app.short_name, JSON.stringify(app), now);
+    }
+
+    // 3. Built-in emoji sticker pack
+    const stickerSet: StickerSetDto = {
+      set_id: 'gpui_mascots',
+      short_name: 'gpui_mascots',
+      title: 'Official Emoji Stickers',
+      count: 4,
+      is_installed: true,
+      stickers: [
+        { id: 'stk_rocket', set_id: 'gpui_mascots', emoji: '🚀', mime_type: 'image/svg+xml', width: 160, height: 160, is_animated: false, is_video: false },
+        { id: 'stk_fire', set_id: 'gpui_mascots', emoji: '🔥', mime_type: 'image/svg+xml', width: 160, height: 160, is_animated: false, is_video: false },
+        { id: 'stk_lotus', set_id: 'gpui_mascots', emoji: '🪷', mime_type: 'image/svg+xml', width: 160, height: 160, is_animated: false, is_video: false },
+        { id: 'stk_party', set_id: 'gpui_mascots', emoji: '🎉', mime_type: 'image/svg+xml', width: 160, height: 160, is_animated: false, is_video: false },
+      ],
+    };
+    db.prepare(
+      `INSERT OR IGNORE INTO sticker_sets (set_id, short_name, title, stickers_json, installed_by_default) VALUES (?, ?, ?, ?, 1)`,
+    ).run(stickerSet.set_id, stickerSet.short_name, stickerSet.title, JSON.stringify(stickerSet.stickers));
+
+    if (!options.inTransaction) {
+      db.exec('COMMIT;');
+    }
+  } catch (err) {
+    if (!options.inTransaction) {
+      db.exec('ROLLBACK;');
+    }
+    throw err;
+  }
+}
+
+export function seedDatabaseIfEmpty(
+  db: DatabaseSync,
+  options: { seedDemoData?: boolean } = {},
+): void {
+  if (!options.seedDemoData) {
+    seedSystemEntitiesIfEmpty(db);
+    return;
+  }
+  const existing = db.prepare(`SELECT COUNT(*) AS cnt FROM users WHERE is_bot = 0`).get() as { cnt: number };
   if (Number(existing.cnt) > 0) {
     return;
   }
   seedDeterministicUniverse(db);
 }
 
-export function resetAndSeedDatabase(db: DatabaseSync, mediaDir: string, uploadsDir: string): void {
+export function resetAndSeedDatabase(
+  db: DatabaseSync,
+  mediaDir: string,
+  uploadsDir: string,
+  options: { seedDemoData?: boolean } = { seedDemoData: true },
+): void {
   // Wipe CAS blobs and in-flight upload part files
   for (const dir of [mediaDir, uploadsDir]) {
     if (fs.existsSync(dir)) {
@@ -153,6 +368,11 @@ export function resetAndSeedDatabase(db: DatabaseSync, mediaDir: string, uploads
   db.exec('BEGIN IMMEDIATE;');
   try {
     db.exec(`
+      DELETE FROM fabushi_online_heartbeats;
+      DELETE FROM fabushi_follows;
+      DELETE FROM fabushi_transfers;
+      DELETE FROM fabushi_practice_records;
+      DELETE FROM fabushi_profiles;
       DELETE FROM wallet_idempotency;
       DELETE FROM wallet_transactions;
       DELETE FROM wallet_accounts;
@@ -217,7 +437,11 @@ export function resetAndSeedDatabase(db: DatabaseSync, mediaDir: string, uploads
       DELETE FROM users;
       DELETE FROM sqlite_sequence;
     `);
-    seedDeterministicUniverse(db, { inTransaction: true });
+    if (options.seedDemoData !== false) {
+      seedDeterministicUniverse(db, { inTransaction: true });
+    } else {
+      seedSystemEntitiesIfEmpty(db, { inTransaction: true });
+    }
     db.exec('COMMIT;');
   } catch (err) {
     db.exec('ROLLBACK;');

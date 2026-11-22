@@ -153,6 +153,9 @@ export interface AiWorkspaceState {
 
   loadMagpie: () => Promise<void>;
   updateMagpie: (patch: Record<string, unknown>) => Promise<MagpieConfigSnapshot>;
+  probeMagpieProvider: (providerId: string) => Promise<{ ok: boolean; latency_ms?: number; models?: string[]; error?: string }>;
+  scanMagpieSubscriptions: () => Promise<Array<Record<string, unknown>>>;
+  importMagpieConfig: (payload: { raw_text?: string; providers?: Array<Record<string, unknown>> }) => Promise<MagpieConfigSnapshot>;
   previewMask: (sampleText: string) => Promise<MagpieMaskingPreviewResult>;
 
   loadTasks: () => Promise<TaskItemDto[]>;
@@ -161,6 +164,8 @@ export interface AiWorkspaceState {
   deleteTask: (taskId: string) => Promise<void>;
 
   loadMcp: () => Promise<void>;
+  registerMcpServer: (req: { name: string; transport: string; url?: string; command?: string; args?: string[] }) => Promise<McpServerDto>;
+  deleteMcpServer: (serverId: string) => Promise<void>;
   invokeMcpTool: (req: { toolId?: string; toolName?: string; arguments?: Record<string, unknown>; forceApprove?: boolean }) => Promise<Record<string, unknown>>;
   decideMcpApproval: (requestId: string, allow: boolean) => Promise<void>;
 
@@ -170,6 +175,9 @@ export interface AiWorkspaceState {
   stopTalk: () => Promise<TalkSessionDto>;
 
   loadComputers: () => Promise<void>;
+  createCloudComputer: (req: { display_name: string; host: string; port?: number; ssh_user: string; secret?: string; run_policy?: ComputerRunPolicy }) => Promise<ComputerNodeDto>;
+  testComputerConnection: (nodeId: string) => Promise<{ ok: boolean; latency_ms?: number; message?: string }>;
+  deleteComputer: (nodeId: string) => Promise<void>;
   runComputerOp: (nodeId: string, operation: Record<string, unknown>, callerLabel?: string) => Promise<Record<string, unknown>>;
   decideComputerApproval: (commandId: string, approve: boolean) => Promise<void>;
   setComputerPolicy: (nodeId: string, policy: ComputerRunPolicy) => Promise<void>;
@@ -466,12 +474,12 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
     set({
       streamingTurn: {
         turnId: `turn_${Date.now()}`,
-        sessionId: req.sessionId ?? 'default',
+        sessionId: req.sessionId ?? '',
         prompt: req.prompt,
         thinkingText: '',
         outputText: '',
-        model: req.model ?? 'hermes-3',
-        provider: 'magpie',
+        model: req.model ?? '',
+        provider: '',
         isStreaming: true,
         toolCalls: [],
         pendingApproval: null,
@@ -589,6 +597,33 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
     return updated;
   },
 
+  probeMagpieProvider: async (providerId) => {
+    const adapter = getClientAdapter();
+    if (!adapter.probeMagpieProvider) {
+      throw new Error('当前模式不支持探测上游模型提供商');
+    }
+    return adapter.probeMagpieProvider(providerId);
+  },
+
+  scanMagpieSubscriptions: async () => {
+    const adapter = getClientAdapter();
+    if (!adapter.scanMagpieSubscriptions) {
+      return [];
+    }
+    const res = await adapter.scanMagpieSubscriptions();
+    return res.subscriptions;
+  },
+
+  importMagpieConfig: async (payload) => {
+    const adapter = getClientAdapter();
+    if (!adapter.importMagpieConfig) {
+      throw new Error('当前模式不支持导入 Magpie 配置');
+    }
+    const updated = await adapter.importMagpieConfig(payload);
+    set({ magpieConfig: updated });
+    return updated;
+  },
+
   previewMask: async (sampleText) => {
     const preview = await getClientAdapter().testMagpiePrivacyMask(sampleText);
     set({ maskPreview: preview });
@@ -633,6 +668,25 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
       mcpTools: toolsRes.tools,
       mcpApprovals: toolsRes.approvals,
     });
+  },
+
+  registerMcpServer: async (req) => {
+    const adapter = getClientAdapter();
+    if (!adapter.registerMcpServer) {
+      throw new Error('当前模式不支持注册远程 MCP 服务器');
+    }
+    const created = await adapter.registerMcpServer(req);
+    await get().loadMcp();
+    return created;
+  },
+
+  deleteMcpServer: async (serverId) => {
+    const adapter = getClientAdapter();
+    if (!adapter.deleteMcpServer) {
+      throw new Error('当前模式不支持删除 MCP 服务器');
+    }
+    await adapter.deleteMcpServer(serverId);
+    await get().loadMcp();
   },
 
   invokeMcpTool: async (req) => {
@@ -686,6 +740,33 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
       computerApprovals: compRes.pendingApprovals,
       tailnet,
     });
+  },
+
+  createCloudComputer: async (req) => {
+    const adapter = getClientAdapter();
+    if (!adapter.createCloudComputer) {
+      throw new Error('当前模式不支持绑定云主机');
+    }
+    const created = await adapter.createCloudComputer(req);
+    await get().loadComputers();
+    return created;
+  },
+
+  testComputerConnection: async (nodeId) => {
+    const adapter = getClientAdapter();
+    if (!adapter.testComputerConnection) {
+      throw new Error('当前模式不支持连通性检测');
+    }
+    return adapter.testComputerConnection(nodeId);
+  },
+
+  deleteComputer: async (nodeId) => {
+    const adapter = getClientAdapter();
+    if (!adapter.deleteComputer) {
+      throw new Error('当前模式不支持移除远程电脑');
+    }
+    await adapter.deleteComputer(nodeId);
+    await get().loadComputers();
   },
 
   runComputerOp: async (nodeId, operation, callerLabel) => {

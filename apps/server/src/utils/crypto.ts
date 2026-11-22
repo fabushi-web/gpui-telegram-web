@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { MagpieMaskingConfig, MagpieMaskingPreviewResult } from '@gpui-telegram/protocol';
-import { escapeHtml } from '@gpui-telegram/protocol';
+import { renderQrCodeSvg } from '@gpui-telegram/protocol';
 
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_PARAMS: crypto.ScryptOptions = { N: 16384, r: 8, p: 1 };
@@ -209,80 +209,11 @@ export function verifyMiniAppInitData(
 }
 
 // ============================================================================
-// Deterministic QR Code SVG Matrix Generator (29x29 Version-3 Grid)
+// Standards-Compliant ISO/IEC 18004 QR Code SVG Generator (EcLevel Q)
 // ============================================================================
 
 export function generateQrCodeSvg(payload: string, sizePx = 220): string {
-  const N = 29;
-  const grid: boolean[][] = Array.from({ length: N }, () => Array<boolean>(N).fill(false));
-  const reserved: boolean[][] = Array.from({ length: N }, () => Array<boolean>(N).fill(false));
-
-  const placeFinder = (row0: number, col0: number): void => {
-    for (let r = -1; r <= 7; r++) {
-      for (let c = -1; c <= 7; c++) {
-        const rr = row0 + r;
-        const cc = col0 + c;
-        if (rr < 0 || rr >= N || cc < 0 || cc >= N) continue;
-        reserved[rr]![cc] = true;
-        const inOuter = r >= 0 && r <= 6 && c >= 0 && c <= 6;
-        const isBorder = r === 0 || r === 6 || c === 0 || c === 6;
-        const isCenter = r >= 2 && r <= 4 && c >= 2 && c <= 4;
-        grid[rr]![cc] = inOuter && (isBorder || isCenter);
-      }
-    }
-  };
-
-  placeFinder(0, 0);
-  placeFinder(0, N - 7);
-  placeFinder(N - 7, 0);
-
-  // Alignment pattern at (20, 20)
-  for (let r = -2; r <= 2; r++) {
-    for (let c = -2; c <= 2; c++) {
-      const rr = 22 + r;
-      const cc = 22 + c;
-      reserved[rr]![cc] = true;
-      grid[rr]![cc] = Math.max(Math.abs(r), Math.abs(c)) !== 1;
-    }
-  }
-
-  // Timing patterns
-  for (let i = 8; i < N - 8; i++) {
-    reserved[6]![i] = true;
-    reserved[i]![6] = true;
-    grid[6]![i] = i % 2 === 0;
-    grid[i]![6] = i % 2 === 0;
-  }
-
-  // Fill remaining cells deterministically from SHA-256 stream of payload
-  const stream = Buffer.concat([
-    crypto.createHash('sha256').update(`qr:0:${payload}`).digest(),
-    crypto.createHash('sha256').update(`qr:1:${payload}`).digest(),
-    crypto.createHash('sha256').update(`qr:2:${payload}`).digest(),
-    crypto.createHash('sha256').update(`qr:3:${payload}`).digest(),
-  ]);
-
-  let bitIdx = 0;
-  for (let r = 0; r < N; r++) {
-    for (let c = 0; c < N; c++) {
-      if (reserved[r]![c]) continue;
-      const byte = stream[Math.floor(bitIdx / 8) % stream.length] ?? 0;
-      grid[r]![c] = ((byte >> (bitIdx % 8)) & 1) === 1;
-      bitIdx++;
-    }
-  }
-
-  const rects: string[] = [];
-  for (let r = 0; r < N; r++) {
-    for (let c = 0; c < N; c++) {
-      if (grid[r]![c]) {
-        rects.push(`M${c + 2},${r + 2}h1v1h-1z`);
-      }
-    }
-  }
-
-  const safeLabel = escapeHtml(payload);
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${N + 4} ${N + 4}" width="${sizePx}" height="${sizePx}" role="img" aria-label="QR Code for ${safeLabel}"><rect width="100%" height="100%" rx="2" fill="#FFFFFF"/><path d="${rects.join('')}" fill="#0E1621"/></svg>`;
+  return renderQrCodeSvg(payload, { sizePx, ecLevel: 'Q', quietZone: 4 });
 }
 
 // ============================================================================

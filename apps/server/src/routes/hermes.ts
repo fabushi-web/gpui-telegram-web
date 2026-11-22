@@ -12,7 +12,9 @@ import {
   type HermesSkillDto,
   type HermesStreamEvent,
 } from '@gpui-telegram/protocol';
+import type { ServerConfig } from '../config.js';
 import { createMessageAtomic } from '../db/queries.js';
+import { runConfiguredLlmCompletion } from './magpie.js';
 import { computeNextCronRunMs, runPrivacyMasking } from '../utils/crypto.js';
 import {
   ApiError,
@@ -644,6 +646,7 @@ export function executeSlashCommandInternal(
 export function registerHermesStudioRoutes(
   router: HttpRouter,
   db: DatabaseSync,
+  config: ServerConfig,
   hub: RealtimeGatewayHub,
 ): void {
   // 1. Runtime Status & Slash Commands
@@ -657,12 +660,16 @@ export function registerHermesStudioRoutes(
     const skillCnt = db
       .prepare(`SELECT COUNT(*) AS cnt FROM hermes_skills WHERE user_id = ?`)
       .get(auth.userId) as { cnt: number };
+    const magpieRow = db
+      .prepare(`SELECT state_json FROM magpie_state WHERE user_id = ?`)
+      .get(auth.userId) as { state_json: string } | undefined;
+    const magpieState = magpieRow ? (JSON.parse(magpieRow.state_json) as { active_model?: string; active_provider?: string }) : null;
 
     sendJson(ctx.res, 200, {
       ready: true,
-      version: '1.2.0',
-      active_model: 'hermes-local-v1',
-      active_provider: 'local_hermes',
+      version: '1.3.0',
+      active_model: magpieState?.active_model || (config.seedDemoData ? 'hermes-local-v1' : ''),
+      active_provider: magpieState?.active_provider || (config.seedDemoData ? 'local_hermes' : ''),
       approval_mode: getHermesKv(db, auth.userId, 'approval_mode', 'ask'),
       session_count: Number(sessionCnt.cnt),
       skill_count: Number(skillCnt.cnt),
@@ -800,7 +807,8 @@ export function registerHermesStudioRoutes(
 
     const session = getOrCreateHermesSession(db, auth.userId, body.session_id, body.chat_id);
     const turnId = `turn_${crypto.randomBytes(8).toString('hex')}`;
-    const model = body.model ?? session.model;
+    let activeModel = body.model ?? session.model;
+    let activeProvider = 'local_hermes';
     const approvalMode = getHermesKv(db, auth.userId, 'approval_mode', 'ask');
 
     // Privacy Masking before persistence & execution!
@@ -814,26 +822,19 @@ export function registerHermesStudioRoutes(
     const safePrompt = masked.masked_text;
 
     const events: HermesStreamEvent[] = [];
-    events.push({
-      type: 'turn_started',
-      turn_id: turnId,
-      session_id: session.session_id,
-      model,
-      provider: 'local_hermes',
-    });
-
-    const reasoningText = `Analyzing request (${safePrompt.length} chars) with bounded MEMORY.md context and active toolsets.`;
-    events.push({
-      type: 'thinking_delta',
-      turn_id: turnId,
-      delta: reasoningText,
-    });
-
-    // Check dangerous command guard (`approval_required` unless `approval_mode === 'yolo'`)
+    const memState = getHermesMemoryState(db, auth.userId);
     let responseText: string;
+    let reasoningText = '';
     let toolCallsCount = 0;
 
     if (DANGEROUS_COMMAND_REGEX.test(safePrompt) && approvalMode !== 'yolo') {
+      events.push({
+        type: 'turn_started',
+        turn_id: turnId,
+        session_id: session.session_id,
+        model: activeModel,
+        provider: activeProvider,
+      });
       const approvalId = `appr_${crypto.randomBytes(6).toString('hex')}`;
       const approvalItem: HermesApprovalItem = {
         approval_id: approvalId,
@@ -861,26 +862,75 @@ export function registerHermesStudioRoutes(
       });
       responseText = `⚠️ Execution paused: High-risk command requires explicit approval (\`${approvalId}\`) in **Hermes Studio -> Toolsets / Approvals**.`;
     } else {
-      const toolCallId = `tc_${crypto.randomBytes(4).toString('hex')}`;
-      toolCallsCount = 1;
-      events.push({
-        type: 'tool_call_started',
-        turn_id: turnId,
-        tool_call_id: toolCallId,
-        tool_name: 'memory_lookup',
-        arguments: { query: safePrompt.slice(0, 64) },
-      });
-      events.push({
-        type: 'tool_call_finished',
-        turn_id: turnId,
-        tool_call_id: toolCallId,
-        tool_name: 'memory_lookup',
-        ok: true,
-        output_preview: 'Loaded bounded MEMORY.md & active workspace metadata',
-        duration_ms: 4,
+      const llmMessages: Array<{ role: string; content: string }> = [
+        {
+          role: 'system',
+          content: [
+            memState.soul,
+            memState.memory.raw ? `\n[MEMORY.md]\n${memState.memory.raw}` : '',
+            memState.user.raw ? `\n[USER.md]\n${memState.user.raw}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        },
+        ...session.messages.slice(-12).map((m) => ({ role: m.role, content: m.content })),
+        { role: 'user', content: safePrompt },
+      ];
+
+      const llmRes = await runConfiguredLlmCompletion(db, config, auth.userId, llmMessages, {
+        model: body.model,
       });
 
-      responseText = `**Hermes AI Response**: Processed "${safePrompt}".\n• Session: \`${session.session_id}\`\n• Model: \`${model}\`${masked.hit_count > 0 ? `\n• Privacy Masking: Redacted ${masked.hit_count} sensitive token(s)` : ''}`;
+      if (llmRes.usedUpstream && llmRes.text) {
+        activeModel = llmRes.model;
+        activeProvider = llmRes.providerId;
+        responseText = llmRes.text;
+        reasoningText = `Completed via ${activeProvider} (${activeModel}).`;
+      } else if (config.seedDemoData) {
+        // Test/sandbox fixture deterministic turn
+        reasoningText = `Analyzing request (${safePrompt.length} chars) with bounded MEMORY.md context and active toolsets.`;
+        responseText = `**Hermes AI Response**: Processed "${safePrompt}".\n• Session: \`${session.session_id}\`\n• Model: \`${activeModel}\`${masked.hit_count > 0 ? `\n• Privacy Masking: Redacted ${masked.hit_count} sensitive token(s)` : ''}`;
+      } else {
+        activeProvider = llmRes.providerId || 'unconfigured';
+        responseText = llmRes.error
+          ? `⚠️ 上游模型提供商调用失败（${llmRes.providerId}）：${llmRes.error}。请检查 **Magpie LLM 网关** 中的 API Key、Endpoint 与模型名称。`
+          : `尚未配置可用的大模型 API 提供商。请点击左侧栏的 **Magpie LLM 网关** 添加并启用您的 OpenAI / Anthropic / Gemini / DeepSeek / Ollama API Key 后再试。`;
+      }
+
+      events.push({
+        type: 'turn_started',
+        turn_id: turnId,
+        session_id: session.session_id,
+        model: activeModel,
+        provider: activeProvider,
+      });
+      if (reasoningText) {
+        events.push({
+          type: 'thinking_delta',
+          turn_id: turnId,
+          delta: reasoningText,
+        });
+      }
+      if (memState.memory.chars > 0 || config.seedDemoData) {
+        const toolCallId = `tc_${crypto.randomBytes(4).toString('hex')}`;
+        toolCallsCount = 1;
+        events.push({
+          type: 'tool_call_started',
+          turn_id: turnId,
+          tool_call_id: toolCallId,
+          tool_name: 'memory_lookup',
+          arguments: { query: safePrompt.slice(0, 64) },
+        });
+        events.push({
+          type: 'tool_call_finished',
+          turn_id: turnId,
+          tool_call_id: toolCallId,
+          tool_name: 'memory_lookup',
+          ok: true,
+          output_preview: `Loaded MEMORY.md (${memState.memory.chars} chars) & USER.md (${memState.user.chars} chars)`,
+          duration_ms: 4,
+        });
+      }
     }
 
     // Emit chunked text deltas
@@ -909,15 +959,15 @@ export function registerHermesStudioRoutes(
       turn_id: turnId,
       session_id: session.session_id,
       response_text: responseText,
-      model,
-      provider: 'local_hermes',
+      model: activeModel,
+      provider: activeProvider,
       finish_reason: 'stop',
       delivered_message_id: deliveredMessageId,
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
-        reasoning_tokens: 12,
-        total_tokens: inputTokens + outputTokens + 12,
+        reasoning_tokens: reasoningText ? 12 : 0,
+        total_tokens: inputTokens + outputTokens + (reasoningText ? 12 : 0),
         estimated_cost_usd: 0,
       },
       tool_calls_count: toolCallsCount,
@@ -929,20 +979,20 @@ export function registerHermesStudioRoutes(
     const updatedMessages: StoredHermesMessage[] = [
       ...session.messages,
       { id: `u_${turnId}`, role: 'user', content: safePrompt, created_at_ms: now },
-      { id: `a_${turnId}`, role: 'assistant', content: responseText, reasoning: reasoningText, created_at_ms: now + 1 },
+      { id: `a_${turnId}`, role: 'assistant', content: responseText, reasoning: reasoningText || undefined, created_at_ms: now + 1 },
     ];
     db.prepare(`
       UPDATE hermes_sessions
-      SET messages_json = ?, total_tokens = total_tokens + ?, updated_at_ms = ?
+      SET messages_json = ?, model = ?, total_tokens = total_tokens + ?, updated_at_ms = ?
       WHERE session_id = ?
-    `).run(JSON.stringify(updatedMessages), inputTokens + outputTokens + 12, now, session.session_id);
+    `).run(JSON.stringify(updatedMessages), activeModel, inputTokens + outputTokens, now, session.session_id);
 
     const turnSummary = {
       turn_id: turnId,
       session_id: session.session_id,
       response_text: responseText,
-      model,
-      provider: 'local_hermes',
+      model: activeModel,
+      provider: activeProvider,
       delivered_message_id: deliveredMessageId,
       usage: doneEvent.usage,
       events,
@@ -1278,7 +1328,7 @@ export function registerHermesStudioRoutes(
     sendJson(ctx.res, 201, skill);
   });
 
-  router.post('/api/v1/hermes/skills/:name/trust', (ctx) => {
+  const handleTrustSkill = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const row = db
       .prepare(`SELECT skill_json FROM hermes_skills WHERE user_id = ? AND name = ?`)
@@ -1296,7 +1346,9 @@ export function registerHermesStudioRoutes(
       skill.name,
     );
     sendJson(ctx.res, 200, skill);
-  });
+  };
+  router.post('/api/v1/hermes/skills/:name/trust', handleTrustSkill);
+  router.post('/api/v1/hermes/skills/:name/approve', handleTrustSkill);
 
   router.delete('/api/v1/hermes/skills/:name', (ctx) => {
     const auth = requireAuth(db, ctx);
@@ -1390,18 +1442,17 @@ export function registerHermesStudioRoutes(
   });
 
   // 7. Tab 5: Cron Scheduler & Proactive Heartbeat
+  const defaultHeartbeatJson = config.seedDemoData
+    ? '{"enabled":true,"interval_secs":300,"active_chat_id":106,"tick_count":1}'
+    : '{"enabled":false,"interval_secs":300,"active_chat_id":null,"tick_count":0}';
+
   router.get('/api/v1/hermes/cron', (ctx) => {
     const auth = requireAuth(db, ctx);
     const rows = db
       .prepare(`SELECT job_json FROM hermes_cron_jobs WHERE user_id = ? ORDER BY created_at_ms DESC`)
       .all(auth.userId) as Array<{ job_json: string }>;
     const heartbeat = JSON.parse(
-      getHermesKv(
-        db,
-        auth.userId,
-        'heartbeat',
-        '{"enabled":true,"interval_secs":300,"active_chat_id":106,"tick_count":1}',
-      ),
+      getHermesKv(db, auth.userId, 'heartbeat', defaultHeartbeatJson),
     );
     sendJson(ctx.res, 200, {
       jobs: rows.map((r) => JSON.parse(r.job_json) as HermesCronJobDto),
@@ -1433,7 +1484,7 @@ export function registerHermesStudioRoutes(
       name: body.name?.trim() || 'Scheduled Agent Job',
       schedule_expr: scheduleExpr,
       prompt: body.prompt?.trim() || 'Run periodic status check',
-      chat_id: body.chat_id ?? 106,
+      chat_id: body.chat_id ?? (config.seedDemoData ? 106 : undefined),
       bot_id: 777000,
       enabled: body.enabled ?? true,
       next_run_ms: nextRunMs,
@@ -1492,12 +1543,7 @@ export function registerHermesStudioRoutes(
   router.get('/api/v1/hermes/heartbeat', (ctx) => {
     const auth = requireAuth(db, ctx);
     const hb = JSON.parse(
-      getHermesKv(
-        db,
-        auth.userId,
-        'heartbeat',
-        '{"enabled":true,"interval_secs":300,"active_chat_id":106,"tick_count":1}',
-      ),
+      getHermesKv(db, auth.userId, 'heartbeat', defaultHeartbeatJson),
     );
     sendJson(ctx.res, 200, hb);
   });
@@ -1506,12 +1552,7 @@ export function registerHermesStudioRoutes(
     const auth = requireAuth(db, ctx);
     const patch = await readJsonBody<Record<string, unknown>>(ctx.req);
     const cur = JSON.parse(
-      getHermesKv(
-        db,
-        auth.userId,
-        'heartbeat',
-        '{"enabled":true,"interval_secs":300,"active_chat_id":106,"tick_count":1}',
-      ),
+      getHermesKv(db, auth.userId, 'heartbeat', defaultHeartbeatJson),
     );
     const next = { ...cur, ...patch, updated_at_ms: Date.now() };
     setHermesKv(db, auth.userId, 'heartbeat', JSON.stringify(next));
@@ -1521,13 +1562,8 @@ export function registerHermesStudioRoutes(
   router.post('/api/v1/hermes/heartbeat/tick', (ctx) => {
     const auth = requireAuth(db, ctx);
     const cur = JSON.parse(
-      getHermesKv(
-        db,
-        auth.userId,
-        'heartbeat',
-        '{"enabled":true,"interval_secs":300,"active_chat_id":106,"tick_count":1}',
-      ),
-    ) as { enabled: boolean; interval_secs: number; active_chat_id?: number; tick_count: number; last_tick_ms?: number };
+      getHermesKv(db, auth.userId, 'heartbeat', defaultHeartbeatJson),
+    ) as { enabled: boolean; interval_secs: number; active_chat_id?: number | null; tick_count: number; last_tick_ms?: number };
     cur.tick_count = Number(cur.tick_count ?? 0) + 1;
     cur.last_tick_ms = Date.now();
     setHermesKv(db, auth.userId, 'heartbeat', JSON.stringify(cur));
@@ -1535,14 +1571,16 @@ export function registerHermesStudioRoutes(
   });
 
   // 8. Tab 6: Kanban Boards & Cards CRUD
-  router.get('/api/v1/hermes/kanban', (ctx) => {
+  const handleGetKanban = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const rows = db
       .prepare(`SELECT board_json FROM hermes_kanban_boards WHERE user_id = ? ORDER BY updated_at_ms DESC`)
       .all(auth.userId) as Array<{ board_json: string }>;
     const boards = rows.map((r) => JSON.parse(r.board_json) as HermesKanbanBoardDto);
     sendJson(ctx.res, 200, { boards, board: boards[0] ?? null });
-  });
+  };
+  router.get('/api/v1/hermes/kanban', handleGetKanban);
+  router.get('/api/v1/hermes/kanban/boards', handleGetKanban);
 
   router.post('/api/v1/hermes/kanban/cards', async (ctx) => {
     const auth = requireAuth(db, ctx);

@@ -9,6 +9,11 @@ primary_region = "sin"
   HOST = "0.0.0.0"
   PORT = "4173"
   DATA_DIR = "/data"
+  OMBHRUM_API_URL = "https://api.ombhrum.com"
+  AI_GATEWAY_URL = "https://api.ombhrum.com/v1"
+  SEED_DEMO_DATA = "0"
+  ALLOW_DEMO_AUTH = "0"
+  EXPOSE_DEV_OTP_CODE = "0"
   ENABLE_TEST_RESET = "0"
 
 [mounts]

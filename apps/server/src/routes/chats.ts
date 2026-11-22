@@ -176,6 +176,11 @@ export function registerChatAndSocialRoutes(
     }>(ctx.req);
 
     const rawType = body.chat_type ?? 1;
+    if (rawType === 5 || rawType === 'saved') {
+      const savedChatId = ensureUserBootstrapResources(db, auth.userId);
+      sendJson(ctx.res, 200, getChatDetailDto(db, savedChatId, auth.userId));
+      return;
+    }
     const chatType =
       rawType === 'private' || rawType === 0
         ? 0
@@ -332,7 +337,7 @@ export function registerChatAndSocialRoutes(
     }
   };
 
-  router.patch('/api/v1/chats/:chatId', async (ctx) => {
+  const handleUpdateChatMeta = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     ensureChatMembership(db, chatId, auth.userId);
@@ -372,7 +377,9 @@ export function registerChatAndSocialRoutes(
     const detail = getChatDetailDto(db, chatId, auth.userId)!;
     hub.broadcastChatEphemeral(chatId, { type: 'ChatUpdated', data: detail });
     sendJson(ctx.res, 200, detail);
-  });
+  };
+  router.patch('/api/v1/chats/:chatId', handleUpdateChatMeta);
+  router.put('/api/v1/chats/:chatId', handleUpdateChatMeta);
 
   const handleLeaveOrDeleteChat = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
@@ -456,6 +463,36 @@ export function registerChatAndSocialRoutes(
   };
   router.post('/api/v1/chats/:chatId/settings', handleUpdateChatSettings);
   router.patch('/api/v1/chats/:chatId/settings', handleUpdateChatSettings);
+  router.post('/api/v1/chats/:chatId/pin', async (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId);
+    ensureChatMembership(db, chatId, auth.userId);
+    const body = await readJsonBody<{ pinned?: boolean; is_pinned?: boolean }>(ctx.req);
+    const pinned = body.pinned ?? body.is_pinned ?? true;
+    db.prepare(`INSERT OR IGNORE INTO user_chat_settings (user_id, chat_id) VALUES (?, ?)`).run(auth.userId, chatId);
+    db.prepare(`UPDATE user_chat_settings SET is_pinned = ? WHERE user_id = ? AND chat_id = ?`).run(pinned ? 1 : 0, auth.userId, chatId);
+    sendJson(ctx.res, 200, getChatDetailDto(db, chatId, auth.userId));
+  });
+  router.post('/api/v1/chats/:chatId/archive', async (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId);
+    ensureChatMembership(db, chatId, auth.userId);
+    const body = await readJsonBody<{ archived?: boolean; is_archived?: boolean }>(ctx.req);
+    const archived = body.archived ?? body.is_archived ?? true;
+    db.prepare(`INSERT OR IGNORE INTO user_chat_settings (user_id, chat_id) VALUES (?, ?)`).run(auth.userId, chatId);
+    db.prepare(`UPDATE user_chat_settings SET is_archived = ? WHERE user_id = ? AND chat_id = ?`).run(archived ? 1 : 0, auth.userId, chatId);
+    sendJson(ctx.res, 200, getChatDetailDto(db, chatId, auth.userId));
+  });
+  router.post('/api/v1/chats/:chatId/mute', async (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId);
+    ensureChatMembership(db, chatId, auth.userId);
+    const body = await readJsonBody<{ muted?: boolean; is_muted?: boolean; mute_until_ms?: number | null }>(ctx.req);
+    const muted = body.muted ?? body.is_muted ?? true;
+    db.prepare(`INSERT OR IGNORE INTO user_chat_settings (user_id, chat_id) VALUES (?, ?)`).run(auth.userId, chatId);
+    db.prepare(`UPDATE user_chat_settings SET is_muted = ?, mute_until_ms = ? WHERE user_id = ? AND chat_id = ?`).run(muted ? 1 : 0, body.mute_until_ms ?? null, auth.userId, chatId);
+    sendJson(ctx.res, 200, getChatDetailDto(db, chatId, auth.userId));
+  });
 
   // Cloud Drafts CRUD
   router.get('/api/v1/chats/:chatId/draft', (ctx) => {
@@ -533,7 +570,7 @@ export function registerChatAndSocialRoutes(
   router.post('/api/v1/chats/:chatId/ttl', handleSetChatTtl);
   router.put('/api/v1/chats/:chatId/ttl', handleSetChatTtl);
 
-  router.post('/api/v1/chats/:chatId/history/clear', async (ctx) => {
+  const handleClearChatHistory = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     ensureChatMembership(db, chatId, auth.userId);
@@ -560,7 +597,9 @@ export function registerChatAndSocialRoutes(
       `).run(auth.userId, chatId, Number(chatRow?.last_message_id ?? 0));
     }
     sendJson(ctx.res, 200, { ok: true });
-  });
+  };
+  router.post('/api/v1/chats/:chatId/history/clear', handleClearChatHistory);
+  router.post('/api/v1/chats/:chatId/clear', handleClearChatHistory);
 
   // Send-As Identity
   router.get('/api/v1/chats/:chatId/send_as', (ctx) => {
@@ -734,7 +773,7 @@ export function registerChatAndSocialRoutes(
     sendJson(ctx.res, 201, dto);
   });
 
-  router.patch('/api/v1/chats/:chatId/topics/:topicId', async (ctx) => {
+  const handleUpdateTopic = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const topicId = Number(ctx.params.topicId);
@@ -783,7 +822,9 @@ export function registerChatAndSocialRoutes(
     };
     hub.broadcastChatEphemeral(chatId, { type: 'ForumTopicChanged', data: { chat_id: chatId, topic: dto } });
     sendJson(ctx.res, 200, dto);
-  });
+  };
+  router.patch('/api/v1/chats/:chatId/topics/:topicId', handleUpdateTopic);
+  router.put('/api/v1/chats/:chatId/topics/:topicId', handleUpdateTopic);
 
   router.delete('/api/v1/chats/:chatId/topics/:topicId', (ctx) => {
     const auth = requireAuth(db, ctx);
@@ -979,7 +1020,7 @@ export function registerChatAndSocialRoutes(
     sendJson(ctx.res, 200, { ok: true, added });
   });
 
-  router.patch('/api/v1/chats/:chatId/members/:userId', async (ctx) => {
+  const handleUpdateMemberRole = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const targetUserId = Number(ctx.params.userId);
@@ -1028,7 +1069,9 @@ export function registerChatAndSocialRoutes(
       custom_title: body.custom_title,
       joined_at_ms: Date.now(),
     });
-  });
+  };
+  router.patch('/api/v1/chats/:chatId/members/:userId', handleUpdateMemberRole);
+  router.put('/api/v1/chats/:chatId/members/:userId', handleUpdateMemberRole);
 
   router.delete('/api/v1/chats/:chatId/members/:userId', (ctx) => {
     const auth = requireAuth(db, ctx);
@@ -1143,9 +1186,17 @@ export function registerChatAndSocialRoutes(
     sendJson(ctx.res, 200, { ok: true, revoked: true });
   });
 
-  const handleJoinByInvite = (ctx: RequestContext): void => {
+  const handleJoinByInvite = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
-    const code = ctx.params.code!.replace(/^\+/, '');
+    let rawCode = ctx.params.code ?? '';
+    if (!rawCode) {
+      const body = await readJsonBody<{ invite_code?: string; code?: string; link?: string }>(ctx.req);
+      rawCode = (body.invite_code ?? body.code ?? body.link ?? '').trim();
+    }
+    const code = rawCode.replace(/^https?:\/\/[^/]+\//i, '').replace(/^\+/, '').trim();
+    if (!code) {
+      throw new ApiError(400, 'missing_invite_code', 'Invite code is required');
+    }
     const inv = db
       .prepare(`SELECT * FROM chat_invite_links WHERE code = ?`)
       .get(code) as Record<string, unknown> | undefined;
@@ -1172,9 +1223,10 @@ export function registerChatAndSocialRoutes(
     sendJson(ctx.res, 200, getChatDetailDto(db, chatId, auth.userId));
   };
   router.post('/api/v1/invites/:code/join', handleJoinByInvite);
+  router.post('/api/v1/invites/join', handleJoinByInvite);
   router.post('/api/v1/chats/join/:code', handleJoinByInvite);
 
-  // 11. Channel & Group Statistics Time-Series
+  // 11. Channel & Group Statistics Time-Series (Real SQLite Aggregates — zero fabricated stats)
   const handleChannelStats = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
@@ -1183,33 +1235,126 @@ export function registerChatAndSocialRoutes(
     if (!detail) throw new ApiError(404, 'chat_not_found', 'Chat not found');
 
     const msgStats = db
-      .prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(views), 0) AS sum_views FROM messages WHERE chat_id = ? AND deleted_for_everyone = 0`)
-      .get(chatId) as { total: number; sum_views: number };
+      .prepare(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(views), 0) AS sum_views,
+                COALESCE(SUM(forwards), 0) AS sum_forwards
+         FROM messages
+         WHERE chat_id = ? AND deleted_for_everyone = 0`,
+      )
+      .get(chatId) as { total: number; sum_views: number; sum_forwards: number };
     const reactionRows = db
-      .prepare(`SELECT emoji, COUNT(*) AS cnt FROM message_reactions WHERE chat_id = ? GROUP BY emoji ORDER BY cnt DESC LIMIT 6`)
+      .prepare(
+        `SELECT emoji, COUNT(*) AS cnt
+         FROM message_reactions
+         WHERE chat_id = ?
+         GROUP BY emoji
+         ORDER BY cnt DESC
+         LIMIT 6`,
+      )
       .all(chatId) as Array<{ emoji: string; cnt: number }>;
+
+    const mutedCountRow = db
+      .prepare(
+        `SELECT COUNT(*) AS cnt
+         FROM user_chat_settings
+         WHERE chat_id = ? AND is_muted = 1`,
+      )
+      .get(chatId) as { cnt: number };
 
     const totalMessages = Number(msgStats.total);
     const viewsPerPost = totalMessages > 0 ? Math.round(Number(msgStats.sum_views) / totalMessages) : 0;
+    const sharesPerPost = totalMessages > 0 ? Math.round(Number(msgStats.sum_forwards) / totalMessages) : 0;
     const nowDay = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+    const windowStart = nowDay - 13 * 86_400_000;
+
+    const msgDayRows = db
+      .prepare(
+        `SELECT (date_ms / 86400000) * 86400000 AS day_ms,
+                COUNT(*) AS msgs,
+                COALESCE(SUM(views), 0) AS views,
+                COUNT(DISTINCT sender_id) AS active_senders
+         FROM messages
+         WHERE chat_id = ? AND deleted_for_everyone = 0 AND date_ms >= ?
+         GROUP BY day_ms`,
+      )
+      .all(chatId, windowStart) as Array<{
+      day_ms: number;
+      msgs: number;
+      views: number;
+      active_senders: number;
+    }>;
+
+    const rxDayRows = db
+      .prepare(
+        `SELECT (created_at_ms / 86400000) * 86400000 AS day_ms, COUNT(*) AS cnt
+         FROM message_reactions
+         WHERE chat_id = ? AND created_at_ms >= ?
+         GROUP BY day_ms`,
+      )
+      .all(chatId, windowStart) as Array<{ day_ms: number; cnt: number }>;
+
+    const joinedRows = db
+      .prepare(
+        `SELECT joined_at_ms FROM chat_members WHERE chat_id = ? AND role != 'banned'`,
+      )
+      .all(chatId) as Array<{ joined_at_ms: number }>;
+
+    const msgByDay = new Map<number, { msgs: number; views: number; active_senders: number }>();
+    for (const r of msgDayRows) {
+      msgByDay.set(Number(r.day_ms), {
+        msgs: Number(r.msgs),
+        views: Number(r.views),
+        active_senders: Number(r.active_senders),
+      });
+    }
+    const rxByDay = new Map<number, number>();
+    for (const r of rxDayRows) {
+      rxByDay.set(Number(r.day_ms), Number(r.cnt));
+    }
 
     const dailySeries = Array.from({ length: 14 }, (_, idx) => {
       const ts = nowDay - (13 - idx) * 86_400_000;
+      const dayEnd = ts + 86_400_000 - 1;
       const dayStr = new Date(ts).toISOString().slice(0, 10);
-      const msgs = Math.max(1, ((chatId + idx * 3) % 9) + 1);
-      const views = msgs * Math.max(12, viewsPerPost || 45);
-      const members = Math.max(1, detail.member_count - (13 - idx > detail.member_count ? 0 : Math.floor((13 - idx) / 4)));
+      const bucket = msgByDay.get(ts);
+      const membersAtDay = joinedRows.filter((j) => Number(j.joined_at_ms) <= dayEnd).length;
       return {
         day: dayStr,
         date: dayStr,
         timestamp_ms: ts,
-        messages: msgs,
-        views,
-        members,
-        reactions: Math.max(0, msgs - 1),
-        active_senders: Math.min(detail.member_count, 3),
+        messages: bucket?.msgs ?? 0,
+        views: bucket?.views ?? 0,
+        members: membersAtDay,
+        reactions: rxByDay.get(ts) ?? 0,
+        active_senders: bucket?.active_senders ?? 0,
       };
     });
+
+    const sevenDaysAgo = nowDay - 6 * 86_400_000;
+    const activePostersRow = db
+      .prepare(
+        `SELECT COUNT(DISTINCT sender_id) AS cnt
+         FROM messages
+         WHERE chat_id = ? AND deleted_for_everyone = 0 AND date_ms >= ?`,
+      )
+      .get(chatId, sevenDaysAgo) as { cnt: number };
+
+    const members7dAgo = dailySeries[6]?.members ?? detail.member_count;
+    const growthRatePct =
+      members7dAgo > 0
+        ? Number((((detail.member_count - members7dAgo) / members7dAgo) * 100).toFixed(1))
+        : 0;
+    const enabledNotifPct =
+      detail.member_count > 0
+        ? Number(
+            (
+              (Math.max(0, detail.member_count - Number(mutedCountRow.cnt)) /
+                detail.member_count) *
+              100
+            ).toFixed(1),
+          )
+        : 0;
 
     const stats: ChannelStatisticsDto = {
       chat_id: chatId,
@@ -1218,12 +1363,12 @@ export function registerChatAndSocialRoutes(
       total_messages: totalMessages,
       messages_last_7d: dailySeries.slice(-7).reduce((s, p) => s + p.messages, 0),
       views_per_post: viewsPerPost,
-      shares_per_post: Math.max(1, Math.floor(viewsPerPost / 18)),
-      enabled_notifications_pct: 74.5,
-      boosts_count: 12,
+      shares_per_post: sharesPerPost,
+      enabled_notifications_pct: enabledNotifPct,
+      boosts_count: 0,
       total_reactions: reactionRows.reduce((s, r) => s + Number(r.cnt), 0),
-      active_posters_7d: Math.min(detail.member_count, 4),
-      growth_rate_pct: 8.4,
+      active_posters_7d: Number(activePostersRow.cnt),
+      growth_rate_pct: growthRatePct,
       daily_series: dailySeries,
       daily_growth: dailySeries.map((d) => ({ date: d.day, members: d.members, views: d.views })),
       top_emojis: reactionRows.map((r) => [r.emoji, Number(r.cnt)]),

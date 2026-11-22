@@ -42,7 +42,7 @@ const EN_US = {
 
   // Authentication & Passcode Lock (F1)
   'auth.title': 'Sign in to Telegram Web',
-  'auth.subtitle': 'Choose an authentication method or launch instant demo',
+  'auth.subtitle': 'Sign in with password, Alipay, Email OTP, QR pairing, or Passkey',
   'auth.demoButton': 'Instant Demo Login',
   'auth.tab.phone': 'Phone',
   'auth.tab.qr': 'QR Code',
@@ -388,7 +388,7 @@ const ZH_CN: Record<TranslationKey, string> = {
 
   // Authentication & Passcode Lock (F1)
   'auth.title': '登录 Telegram 网页版',
-  'auth.subtitle': '选择登录方式，或一键进入演示账号',
+  'auth.subtitle': '支持账号密码、支付宝扫码、邮箱验证码、设备扫码及通行密钥登录',
   'auth.demoButton': '一键体验登录',
   'auth.tab.phone': '手机号',
   'auth.tab.qr': '扫码登录',

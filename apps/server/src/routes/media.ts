@@ -332,6 +332,13 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       .prepare(`SELECT file_id, file_name, duration_secs FROM media_files WHERE file_id = ?`)
       .get(ctx.params.fileId!) as { file_id: string; file_name: string; duration_secs: number | null } | undefined;
     if (!row) throw new ApiError(404, 'media_not_found', 'Media file not found');
+    if (!config.seedDemoData) {
+      throw new ApiError(
+        501,
+        'transcription_not_configured',
+        'Voice transcription service is not configured on this server',
+      );
+    }
     sendJson(ctx.res, 200, {
       file_id: row.file_id,
       transcript: `Voice note transcript (${row.file_name}, ${row.duration_secs ?? 3}s): Verified clear audio stream.`,
@@ -633,6 +640,10 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   const handleSearchGifs = (ctx: RequestContext): void => {
     requireAuth(db, ctx);
     const q = (ctx.query.get('q') ?? '').trim().toLowerCase();
+    if (!config.seedDemoData) {
+      sendJson(ctx.res, 200, { gifs: [], results: [] });
+      return;
+    }
     const catalog: GifResultDto[] = [
       { id: 'gif_celebrate', title: 'Celebrate Launch Rocket', file_id: 'gif_celebrate', url: '/api/v1/gifs/svg/celebrate', preview_url: '/api/v1/gifs/svg/celebrate', width: 320, height: 180, mime_type: 'image/svg+xml' },
       { id: 'gif_thumbsup', title: 'Thumbs Up Approved', file_id: 'gif_thumbsup', url: '/api/v1/gifs/svg/thumbsup', preview_url: '/api/v1/gifs/svg/thumbsup', width: 320, height: 180, mime_type: 'image/svg+xml' },
@@ -701,7 +712,7 @@ export function registerMediaStoriesE2eeAndCallRoutes(
     });
   });
 
-  router.get('/api/v1/e2ee/users/:userId/prekeys', (ctx) => {
+  const handleGetUserPreKeys = (ctx: RequestContext): void => {
     requireAuth(db, ctx);
     const targetUserId = Number(ctx.params.userId);
     const rows = db
@@ -732,7 +743,9 @@ export function registerMediaStoriesE2eeAndCallRoutes(
     }
 
     sendJson(ctx.res, 200, { user_id: targetUserId, devices });
-  });
+  };
+  router.get('/api/v1/e2ee/users/:userId/prekeys', handleGetUserPreKeys);
+  router.get('/api/v1/e2ee/prekeys/:userId', handleGetUserPreKeys);
 
   // 6. WebRTC Calls & Ephemeral HMAC-SHA1 TURN Credentials
   const handleTurnCredentials = (ctx: RequestContext): void => {
@@ -745,10 +758,21 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       .update(username)
       .digest('base64');
 
+    const envUris = (process.env.TURN_URIS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const uris =
+      envUris.length > 0
+        ? envUris
+        : config.seedDemoData
+          ? ['stun:127.0.0.1:3478', 'turn:127.0.0.1:3478?transport=udp']
+          : ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
+
     const dto: TurnCredentialsDto = {
       username,
       credential,
-      uris: ['stun:127.0.0.1:3478', 'turn:127.0.0.1:3478?transport=udp'],
+      uris,
       ttl_seconds: ttlSecs,
       expires_at: expiresAt,
     };
@@ -792,7 +816,11 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       is_video?: boolean;
     }>(ctx.req);
 
-    const calleeId = Number(body.callee_id ?? body.peer_user_id ?? 1002);
+    const rawCallee = body.callee_id ?? body.peer_user_id ?? (config.seedDemoData ? 1002 : undefined);
+    if (!rawCallee || !Number.isFinite(Number(rawCallee))) {
+      throw new ApiError(400, 'missing_callee', 'callee_id or peer_user_id is required to start a call');
+    }
+    const calleeId = Number(rawCallee);
     const callId = `call_${crypto.randomBytes(8).toString('hex')}`;
     const now = Date.now();
     const fpHash = crypto.createHash('sha256').update(`call:${callId}:${auth.userId}:${calleeId}`).digest();

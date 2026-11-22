@@ -120,8 +120,11 @@ export function HermesStudioPanel({
   const setActiveNavDest = useUiStore((s) => s.setActiveNavDest);
   const pushToast = useUiStore((s) => s.pushToast);
 
-  const [selectedModel, setSelectedModel] = useState('hermes-local-v1');
-  const [selectedSessionId, setSelectedSessionId] = useState<string>('sess_main');
+  const magpieConfig = useAiWorkspaceStore((s) => s.magpieConfig);
+  const loadMagpie = useAiWorkspaceStore((s) => s.loadMagpie);
+
+  const [selectedModel, setSelectedModel] = useState('');
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [promptInput, setPromptInput] = useState('');
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
   const [magpieModalOpen, setMagpieModalOpen] = useState(false);
@@ -140,12 +143,9 @@ export function HermesStudioPanel({
   const [skillBody, setSkillBody] = useState('');
   const [disabledSkills, setDisabledSkills] = useState<Record<string, boolean>>({});
 
-  // Toolsets terminal log
-  const [terminalCmdInput, setTerminalCmdInput] = useState('hermes doctor --toolsets');
-  const [terminalLog, setTerminalLog] = useState<string[]>([
-    '$ hermes status --runtime=hexagonal',
-    '[ok] 29 canonical toolsets registered · SSE stream bridge online · sandbox guard active',
-  ]);
+  // Toolsets diagnostic log (starts empty; populated by real toolset changes / commands)
+  const [terminalCmdInput, setTerminalCmdInput] = useState('');
+  const [terminalLog, setTerminalLog] = useState<string[]>([]);
 
   // Cron form
   const [cronName, setCronName] = useState('');
@@ -160,7 +160,20 @@ export function HermesStudioPanel({
 
   useEffect(() => {
     void loadHermesStudio().catch(() => undefined);
-  }, [loadHermesStudio]);
+    void loadMagpie().catch(() => undefined);
+  }, [loadHermesStudio, loadMagpie]);
+
+  useEffect(() => {
+    if (selectedModel) return;
+    const statusModel =
+      typeof hermesStudio?.status?.active_model === 'string'
+        ? hermesStudio.status.active_model
+        : '';
+    const nextModel = magpieConfig?.activeModel || statusModel;
+    if (nextModel) {
+      setSelectedModel(nextModel);
+    }
+  }, [magpieConfig?.activeModel, hermesStudio?.status?.active_model, selectedModel]);
 
   // Hydrate Memory & Soul drafts when studio snapshot arrives
   useEffect(() => {
@@ -171,15 +184,13 @@ export function HermesStudioPanel({
     const serverUser = hermesStudio.memory.user?.raw || '';
 
     setSoulDraft(
-      getClientAdapter().mode === 'sandbox' && backup?.soul ? backup.soul : serverSoul || backup?.soul || '',
+      getClientAdapter().mode === 'sandbox' && backup?.soul ? backup.soul : serverSoul,
     );
     setMemoryDraft(
-      getClientAdapter().mode === 'sandbox' && backup?.memory
-        ? backup.memory
-        : serverMem || backup?.memory || '',
+      getClientAdapter().mode === 'sandbox' && backup?.memory ? backup.memory : serverMem,
     );
     setUserDraft(
-      getClientAdapter().mode === 'sandbox' && backup?.user ? backup.user : serverUser || backup?.user || '',
+      getClientAdapter().mode === 'sandbox' && backup?.user ? backup.user : serverUser,
     );
     setMemoryInitialized(true);
   }, [hermesStudio?.memory, memoryInitialized]);
@@ -203,16 +214,20 @@ export function HermesStudioPanel({
 
     if (text.startsWith('/')) {
       try {
-        const reply = await runSlashCommand(text, activeChatId ?? undefined, selectedSessionId);
+        const reply = await runSlashCommand(
+          text,
+          activeChatId ?? undefined,
+          selectedSessionId || undefined,
+        );
         setConsoleEntries((prev) => [
           ...prev,
           {
             id: `slash_${Date.now()}`,
             kind: 'slash',
             input: text,
-            thinking: `Executed Hermes slash command ${text.split(/\s+/)[0]}`,
+            thinking: '',
             output: reply,
-            model: selectedModel,
+            model: selectedModel || 'server',
             timestampMs: Date.now(),
           },
         ]);
@@ -227,7 +242,7 @@ export function HermesStudioPanel({
         prompt: text,
         sessionId: selectedSessionId || undefined,
         chatId: activeChatId ?? undefined,
-        model: selectedModel,
+        model: selectedModel || undefined,
       });
       const finished = useAiWorkspaceStore.getState().streamingTurn;
       if (finished) {
@@ -237,11 +252,9 @@ export function HermesStudioPanel({
             id: finished.turnId || `turn_${Date.now()}`,
             kind: 'prompt',
             input: text,
-            thinking:
-              finished.thinkingText ||
-              'Analyzed context, verified hexagonal protocol invariants, synthesized response.',
+            thinking: finished.thinkingText || '',
             output: finished.outputText,
-            model: finished.model || selectedModel,
+            model: finished.model || selectedModel || 'default',
             timestampMs: Date.now(),
           },
         ]);
@@ -440,10 +453,32 @@ export function HermesStudioPanel({
             onChange={(e) => setSelectedModel(e.target.value)}
             style={{ width: 'auto', padding: '6px 10px', fontSize: '12.5px' }}
           >
-            <option value="hermes-local-v1">hermes-local-v1 (Zero-Sub Smart)</option>
-            <option value="gpt-4o">gpt-4o (OpenAI)</option>
-            <option value="claude-3-5-sonnet">claude-3-5-sonnet (Anthropic)</option>
-            <option value="gemini-2.5-pro">gemini-2.5-pro (Google Gemini)</option>
+            {(() => {
+              const configured = (magpieConfig?.providers ?? []).filter((p) => p.enabled);
+              const options: Array<{ value: string; label: string }> = [];
+              const seen = new Set<string>();
+              if (magpieConfig?.activeModel) {
+                seen.add(magpieConfig.activeModel);
+                options.push({
+                  value: magpieConfig.activeModel,
+                  label: `${magpieConfig.activeModel} (${magpieConfig.activeProvider || 'Active'})`,
+                });
+              }
+              for (const p of configured) {
+                if (p.default_model && !seen.has(p.default_model)) {
+                  seen.add(p.default_model);
+                  options.push({ value: p.default_model, label: `${p.default_model} (${p.name})` });
+                }
+              }
+              if (options.length === 0) {
+                return <option value="">未配置模型 · 请打开 Magpie 网关配置</option>;
+              }
+              return options.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ));
+            })()}
           </select>
 
           <button
@@ -504,7 +539,7 @@ export function HermesStudioPanel({
                   ⚡ SSE Streaming Prompt &amp; /slash Console · 流式推理与斜杠命令台
                 </div>
                 <span style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
-                  Session: <code>{selectedSessionId}</code> · {hermesCommands.length || 24} commands ready
+                  Session: <code>{selectedSessionId || 'auto'}</code> · {hermesCommands.length} commands ready
                 </span>
               </div>
 
@@ -556,15 +591,16 @@ export function HermesStudioPanel({
                   Prompt: <strong>{streamingTurn.prompt}</strong> · Model: <code>{streamingTurn.model}</code>
                 </div>
 
-                <div data-testid="thinking-bubble" className="tg-thinking-bubble">
-                  <div style={{ fontWeight: 600, color: 'var(--tg-info)', marginBottom: '4px' }}>
-                    🧠 Thinking / 思考推理 {streamingTurn.isStreaming ? '(Streaming...)' : '(Completed)'}
+                {(streamingTurn.thinkingText || streamingTurn.isStreaming) && (
+                  <div data-testid="thinking-bubble" className="tg-thinking-bubble">
+                    <div style={{ fontWeight: 600, color: 'var(--tg-info)', marginBottom: '4px' }}>
+                      🧠 Thinking / 思考推理 {streamingTurn.isStreaming ? '(Streaming...)' : '(Completed)'}
+                    </div>
+                    <div style={{ whiteSpace: 'pre-wrap' }}>
+                      {streamingTurn.thinkingText || '等待模型返回推理内容…'}
+                    </div>
                   </div>
-                  <div style={{ whiteSpace: 'pre-wrap' }}>
-                    {streamingTurn.thinkingText ||
-                      '1. Parsing intent & workspace constraints\n2. Verifying clean hexagonal port invariants\n3. Formulating structured response'}
-                  </div>
-                </div>
+                )}
 
                 {streamingTurn.toolCalls.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
@@ -1002,16 +1038,26 @@ export function HermesStudioPanel({
               </div>
 
               <form
-                onSubmit={(e) => {
+                onSubmit={async (e) => {
                   e.preventDefault();
                   const cmd = terminalCmdInput.trim();
                   if (!cmd) return;
-                  setTerminalLog((prev) => [
-                    ...prev,
-                    `$ ${cmd}`,
-                    `[hermes-sandbox] Executed "${cmd}" -> 0 errors · active toolsets: ${Array.from(enabledToolsetsSet).join(', ')}`,
-                  ]);
                   setTerminalCmdInput('');
+                  const slashCmd = cmd.startsWith('/') ? cmd : `/${cmd}`;
+                  setTerminalLog((prev) => [...prev, `$ ${slashCmd}`]);
+                  try {
+                    const reply = await runSlashCommand(
+                      slashCmd,
+                      activeChatId ?? undefined,
+                      selectedSessionId || undefined,
+                    );
+                    setTerminalLog((prev) => [...prev, reply]);
+                  } catch (err) {
+                    setTerminalLog((prev) => [
+                      ...prev,
+                      `[error] ${err instanceof Error ? err.message : String(err)}`,
+                    ]);
+                  }
                 }}
                 style={{ display: 'flex', gap: '8px' }}
               >
@@ -1019,7 +1065,7 @@ export function HermesStudioPanel({
                   type="text"
                   className="tg-input"
                   aria-label="Toolset Diagnostic Command 终端命令"
-                  placeholder="Enter diagnostic command..."
+                  placeholder="输入服务端斜杠指令，例如 /status 或 /skills..."
                   value={terminalCmdInput}
                   onChange={(e) => setTerminalCmdInput(e.target.value)}
                 />
@@ -1042,7 +1088,9 @@ export function HermesStudioPanel({
                   whiteSpace: 'pre-wrap',
                 }}
               >
-                {terminalLog.join('\n')}
+                {terminalLog.length > 0
+                  ? terminalLog.join('\n')
+                  : '暂无诊断日志 · 输入 /status 等服务端指令后显示真实输出'}
               </pre>
             </div>
           </div>

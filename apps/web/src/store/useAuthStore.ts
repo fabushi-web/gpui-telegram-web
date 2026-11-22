@@ -53,6 +53,16 @@ interface PersistedAuthEnvelope {
   isLocked: boolean;
 }
 
+export interface ServerHealthSnapshot {
+  ok?: boolean;
+  status: 'unknown' | 'checking' | 'online' | 'offline';
+  version?: string;
+  server?: string;
+  mode?: string;
+  latencyMs?: number;
+  error?: string;
+}
+
 export interface AuthState {
   accounts: StoredAccountSession[];
   activeAccountId: string | null;
@@ -63,6 +73,7 @@ export interface AuthState {
 
   adapterMode: AdapterMode;
   serverUrl: string;
+  serverHealth: ServerHealthSnapshot;
   mtprotoConfig: MtprotoConfig;
 
   passcodeHash: string | null;
@@ -85,6 +96,7 @@ export interface AuthState {
   activeSessions: SessionDto[];
 
   hydrateAuth: () => Promise<void>;
+  probeServerHealth: (overrideUrl?: string) => Promise<ServerHealthSnapshot>;
   clearError: () => void;
   setAdapterMode: (mode: AdapterMode) => Promise<void>;
   setServerUrl: (url: string) => void;
@@ -132,6 +144,15 @@ export interface AuthState {
     code: string;
     emailCodeHash?: string;
   }) => Promise<UserProfile>;
+  registerEmail: (params: {
+    email?: string;
+    code: string;
+    username: string;
+    password: string;
+    firstName?: string;
+    lastName?: string;
+    emailCodeHash?: string;
+  }) => Promise<UserProfile>;
 
   startAlipay: () => Promise<AlipayAuthSession>;
   pollAlipay: (sessionId?: string) => Promise<AlipayAuthSession | null>;
@@ -156,22 +177,35 @@ export interface AuthState {
   unlockApp: (passcode: string) => Promise<boolean>;
 }
 
+export function isDemoUiEnabled(adapterMode: AdapterMode): boolean {
+  if (adapterMode === 'sandbox') return true;
+  if (import.meta.env?.VITE_ENABLE_DEMO === '1') return true;
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('dev') === '1' || params.get('mode') === 'sandbox') return true;
+  }
+  return false;
+}
+
 function authResponseToUserProfile(authRes: AuthResponse): UserProfile {
   if (authRes.user) {
     return mapUserDtoToDomain(authRes.user);
   }
-  const userId = Number(authRes.user_id) || 1001;
+  const userId = Number(authRes.user_id);
+  if (!Number.isFinite(userId) || userId <= 0) {
+    throw new Error('服务器未返回有效的用户 ID');
+  }
   return {
     userId,
     user_id: userId,
     username: authRes.username,
-    firstName: authRes.first_name ?? authRes.username ?? 'User',
-    first_name: authRes.first_name ?? authRes.username ?? 'User',
+    firstName: authRes.first_name ?? authRes.username ?? `User ${userId}`,
+    first_name: authRes.first_name ?? authRes.username ?? `User ${userId}`,
     lastName: authRes.last_name,
     last_name: authRes.last_name,
     isBot: false,
     isVerified: false,
-    isPremium: true,
+    isPremium: false,
     status: 'online',
     colorIndex: peerAvatarColorIndex(userId),
   };
@@ -277,7 +311,10 @@ function persistAuthEnvelope(
 const bootAuth = loadPersistedAuth();
 
 function detectInitialBootOverride(): { mode?: AdapterMode; serverUrl?: string } {
-  if (typeof window === 'undefined') return {};
+  const envDefaultServer = (import.meta.env?.VITE_DEFAULT_SERVER_URL ?? '').trim().replace(/\/+$/, '');
+  if (typeof window === 'undefined') {
+    return envDefaultServer ? { serverUrl: envDefaultServer } : {};
+  }
   try {
     const params = new URLSearchParams(window.location.search);
     const qMode = params.get('mode');
@@ -285,7 +322,10 @@ function detectInitialBootOverride(): { mode?: AdapterMode; serverUrl?: string }
     const validMode: AdapterMode | undefined =
       qMode === 'sandbox' || qMode === 'server' || qMode === 'mtproto' ? qMode : undefined;
     if (validMode || qServer) {
-      return { mode: validMode, serverUrl: qServer ?? undefined };
+      return { mode: validMode, serverUrl: qServer?.trim().replace(/\/+$/, '') || undefined };
+    }
+    if (envDefaultServer && !bootAuth.serverUrl) {
+      return { mode: 'server', serverUrl: envDefaultServer };
     }
     const host = window.location.hostname.toLowerCase();
     const isKnownStaticHost =
@@ -294,7 +334,8 @@ function detectInitialBootOverride(): { mode?: AdapterMode; serverUrl?: string }
       host.endsWith('.netlify.app') ||
       host.endsWith('.vercel.app');
     if (isKnownStaticHost && !bootAuth.serverUrl) {
-      return { mode: 'sandbox' };
+      // Production static CDN deployments connect to the real web.ombhrum.com backend instead of fake sandbox!
+      return { mode: 'server', serverUrl: 'https://web.ombhrum.com' };
     }
   } catch {
     // Ignore URL parse error
@@ -303,9 +344,17 @@ function detectInitialBootOverride(): { mode?: AdapterMode; serverUrl?: string }
 }
 
 const bootOverride = detectInitialBootOverride();
-if (bootOverride.mode) {
-  void switchClientAdapterMode(bootOverride.mode, {
-    serverUrl: bootOverride.serverUrl ?? bootAuth.serverUrl,
+const initialServerUrl = bootOverride.serverUrl ?? bootAuth.serverUrl;
+// Never restore accidental stale 'sandbox' mode in production unless explicitly requested via ?mode=sandbox
+const initialAdapterMode: AdapterMode =
+  bootOverride.mode ??
+  (bootAuth.adapterMode === 'sandbox' && import.meta.env?.VITE_ENABLE_DEMO !== '1'
+    ? 'server'
+    : bootAuth.adapterMode);
+
+if (bootOverride.mode || initialServerUrl) {
+  void switchClientAdapterMode(initialAdapterMode, {
+    serverUrl: initialServerUrl,
   });
 }
 
@@ -316,11 +365,13 @@ const initialActiveAccount =
 
 if (initialActiveAccount) {
   getServerAdapter().configure({
-    serverUrl: bootOverride.serverUrl || initialActiveAccount.serverUrl || bootAuth.serverUrl,
+    serverUrl: bootOverride.serverUrl || initialActiveAccount.serverUrl || initialServerUrl,
     token: initialActiveAccount.token,
     accountId: initialActiveAccount.accountId,
     userId: initialActiveAccount.userId ?? initialActiveAccount.user.userId,
   });
+} else {
+  getServerAdapter().configure({ serverUrl: initialServerUrl });
 }
 
 let onAccountActivatedHook: ((accountId: string, user: UserProfile) => void) | null = null;
@@ -395,8 +446,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
     isAuthenticated: Boolean(initialActiveAccount?.token),
     isAddingAccount: false,
 
-    adapterMode: bootOverride.mode ?? initialActiveAccount?.adapterMode ?? bootAuth.adapterMode,
-    serverUrl: bootOverride.serverUrl ?? initialActiveAccount?.serverUrl ?? bootAuth.serverUrl,
+    adapterMode: initialActiveAccount?.adapterMode ?? initialAdapterMode,
+    serverUrl: bootOverride.serverUrl ?? initialActiveAccount?.serverUrl ?? initialServerUrl,
+    serverHealth: { status: 'unknown' },
     mtprotoConfig: getMtprotoAdapter().getMtprotoConfig(),
 
     passcodeHash: bootAuth.passcodeHash,
@@ -418,6 +470,29 @@ export const useAuthStore = create<AuthState>((set, get) => {
     alipaySession: null,
     activeSessions: [],
 
+    probeServerHealth: async (overrideUrl) => {
+      const targetUrl = overrideUrl !== undefined ? overrideUrl : get().serverUrl;
+      set({ serverHealth: { ok: false, status: 'checking' } });
+      const res = await getServerAdapter().probeServerHealth(targetUrl);
+      const snapshot: ServerHealthSnapshot = res.ok
+        ? {
+            ok: true,
+            status: 'online',
+            version: res.version,
+            server: res.server,
+            mode: res.mode,
+            latencyMs: res.latencyMs,
+          }
+        : {
+            ok: false,
+            status: 'offline',
+            latencyMs: res.latencyMs,
+            error: res.error ?? '服务器无法连接',
+          };
+      set({ serverHealth: snapshot });
+      return snapshot;
+    },
+
     hydrateAuth: async () => {
       const loaded = loadPersistedAuth();
       const override = detectInitialBootOverride();
@@ -428,22 +503,11 @@ export const useAuthStore = create<AuthState>((set, get) => {
         null;
 
       if (!active) {
-        let resolvedMode: AdapterMode = override.mode ?? loaded.adapterMode;
-        if (resolvedMode === 'server' && !override.mode && typeof window !== 'undefined') {
-          try {
-            const healthUrl = `${effectiveServerUrl ? effectiveServerUrl.replace(/\/$/, '') : ''}/api/v1/health`;
-            const ctrl = new AbortController();
-            const timer = window.setTimeout(() => ctrl.abort(), 1500);
-            const res = await fetch(healthUrl, { signal: ctrl.signal });
-            window.clearTimeout(timer);
-            const ct = res.headers.get('content-type') || '';
-            if (!res.ok || !ct.includes('application/json')) {
-              resolvedMode = 'sandbox';
-            }
-          } catch {
-            resolvedMode = 'sandbox';
-          }
-        }
+        const resolvedMode: AdapterMode =
+          override.mode ??
+          (loaded.adapterMode === 'sandbox' && import.meta.env?.VITE_ENABLE_DEMO !== '1'
+            ? 'server'
+            : loaded.adapterMode);
         await switchClientAdapterMode(resolvedMode, { serverUrl: effectiveServerUrl });
         set({
           accounts: [],
@@ -456,12 +520,16 @@ export const useAuthStore = create<AuthState>((set, get) => {
           passcodeHash: loaded.passcodeHash,
           isLocked: false,
         });
+        if (resolvedMode === 'server') {
+          void get().probeServerHealth(effectiveServerUrl);
+        }
         return;
       }
 
       const activeMode = override.mode ?? active.adapterMode;
+      const targetServerUrl = override.serverUrl || active.serverUrl || loaded.serverUrl;
       const adapter = await switchClientAdapterMode(activeMode, {
-        serverUrl: override.serverUrl || active.serverUrl || loaded.serverUrl,
+        serverUrl: targetServerUrl,
         token: active.token,
         accountId: active.accountId,
         userId: active.userId ?? active.user.userId,
@@ -473,8 +541,8 @@ export const useAuthStore = create<AuthState>((set, get) => {
         currentUser: active.user,
         token: active.token,
         isAuthenticated: true,
-        adapterMode: active.adapterMode,
-        serverUrl: active.serverUrl || loaded.serverUrl,
+        adapterMode: activeMode,
+        serverUrl: targetServerUrl,
         passcodeHash: loaded.passcodeHash,
         isLocked: loaded.isLocked,
       });
@@ -485,10 +553,37 @@ export const useAuthStore = create<AuthState>((set, get) => {
         const updatedAccounts = get().accounts.map((acc) =>
           acc.accountId === active.accountId ? { ...acc, user: refreshedMe } : acc,
         );
-        set({ currentUser: refreshedMe, accounts: updatedAccounts });
+        set({
+          currentUser: refreshedMe,
+          accounts: updatedAccounts,
+          serverHealth: { status: 'online' },
+        });
         persistAuthEnvelope(get());
         onAccountActivatedHook?.(active.accountId, refreshedMe);
-      } catch {
+      } catch (err) {
+        const status = (err as { status?: number } | null)?.status;
+        const msg = err instanceof Error ? err.message.toLowerCase() : '';
+        const isAuthRejected =
+          status === 401 ||
+          status === 403 ||
+          msg.includes('unauthorized') ||
+          msg.includes('invalid or expired') ||
+          msg.includes('session revoked');
+        if (isAuthRejected && activeMode === 'server') {
+          // Matching desktop shell.rs: clear expired/revoked session cleanly instead of showing stale cache
+          const remaining = get().accounts.filter((a) => a.accountId !== active.accountId);
+          set({
+            accounts: remaining,
+            activeAccountId: null,
+            currentUser: null,
+            token: null,
+            isAuthenticated: false,
+            error: '登录会话已失效，请重新登录。',
+          });
+          persistAuthEnvelope(get());
+          void get().probeServerHealth(targetServerUrl);
+          return;
+        }
         onAccountActivatedHook?.(active.accountId, active.user);
       }
     },
@@ -513,7 +608,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     setServerUrl: (url) => {
       const clean = url.trim().replace(/\/+$/, '');
       getServerAdapter().configure({ serverUrl: clean });
-      set({ serverUrl: clean });
+      set({ serverUrl: clean, serverHealth: { status: 'unknown' } });
       persistAuthEnvelope(get());
     },
 
@@ -649,10 +744,10 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (!targetId) return null;
       const session = await getClientAdapter(get().adapterMode).pollQrPairing(targetId);
       set({ qrSession: session });
-      if (session.status === 'approved' && (session.session || session.token)) {
+      if (session.status === 'approved' && (session.session || (session.token && session.user))) {
         const auth: AuthResponse = session.session ?? {
-          user_id: session.user?.user_id ?? 1001,
-          username: session.user?.username ?? 'alice',
+          user_id: session.user!.user_id,
+          username: session.user!.username ?? `user${session.user!.user_id}`,
           session_id: `qr_${session.pair_id}`,
           token: session.token!,
           user: session.user,
@@ -669,11 +764,14 @@ export const useAuthStore = create<AuthState>((set, get) => {
       try {
         const session = await adapter.acceptQrPairing(targetId);
         set({ qrSession: session });
+        if (!session.session && !(session.token && session.user)) {
+          throw new Error('二维码扫码尚未获得服务器授权凭证');
+        }
         const auth: AuthResponse = session.session ?? {
-          user_id: session.user?.user_id ?? 1001,
-          username: session.user?.username ?? 'alice',
+          user_id: session.user!.user_id,
+          username: session.user!.username ?? `user${session.user!.user_id}`,
           session_id: `qr_${session.pair_id}`,
-          token: session.token ?? `tok_qr_${Date.now()}`,
+          token: session.token!,
           user: session.user,
         };
         return await commitAuthSuccess(auth);
@@ -764,6 +862,31 @@ export const useAuthStore = create<AuthState>((set, get) => {
       }
     },
 
+    registerEmail: async (params) => {
+      const email = params.email ?? get().pendingEmail ?? '';
+      const email_code_hash = params.emailCodeHash ?? get().emailCodeHash ?? undefined;
+      set({ isLoading: true, error: null });
+      try {
+        const adapter = getClientAdapter(get().adapterMode);
+        const res = adapter.emailRegister
+          ? await adapter.emailRegister({
+              email,
+              code: params.code,
+              username: params.username,
+              password: params.password,
+              first_name: params.firstName,
+              last_name: params.lastName,
+              email_code_hash,
+            })
+          : await adapter.verifyEmailCode({ email, code: params.code, email_code_hash });
+        return await commitAuthSuccess(res);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        set({ isLoading: false, error: msg });
+        throw err;
+      }
+    },
+
     startAlipay: async () => {
       set({ isLoading: true, error: null });
       try {
@@ -791,7 +914,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         auth: polled.auth,
       };
       set({ alipaySession: next });
-      if (polled.status === 'confirmed' && polled.auth) {
+      if ((polled.status === 'confirmed' || polled.status === 'completed') && polled.auth) {
         await commitAuthSuccess(polled.auth);
       }
       return next;
@@ -817,9 +940,12 @@ export const useAuthStore = create<AuthState>((set, get) => {
     registerPasskey: async (label = 'GPUI Web Passkey') => {
       const adapter = getClientAdapter(get().adapterMode);
       const user = get().currentUser;
-      const challenge = await adapter.getPasskeyChallenge(user?.username);
+      if (!user) {
+        throw new Error('请先登录后再绑定通行密钥 (Passkey)');
+      }
+      const challenge = await adapter.getPasskeyChallenge(user.username);
 
-      let credId = `pk_cred_${Date.now()}`;
+      let credId: string | undefined;
       let publicKeyB64 = '';
 
       if (
@@ -828,44 +954,50 @@ export const useAuthStore = create<AuthState>((set, get) => {
         navigator.credentials &&
         typeof navigator.credentials.create === 'function'
       ) {
-        try {
-          const userIdBytes = new TextEncoder().encode(String(user?.userId ?? 1001));
-          const created = (await navigator.credentials.create({
-            publicKey: {
-              challenge: base64ToUint8Array(challenge.challenge) as BufferSource,
-              rp: {
-                name: 'GPUI Telegram Web',
-                id: challenge.rp_id || window.location.hostname || 'localhost',
-              },
-              user: {
-                id: userIdBytes as BufferSource,
-                name: user?.username || 'alice',
-                displayName:
-                  `${user?.firstName ?? 'Alice'} ${user?.lastName ?? ''}`.trim() || 'Alice',
-              },
-              pubKeyCredParams: [
-                { type: 'public-key', alg: -7 },
-                { type: 'public-key', alg: -257 },
-              ],
-              authenticatorSelection: {
-                userVerification: 'preferred',
-                residentKey: 'preferred',
-              },
-              timeout: 60_000,
+        const userIdBytes = new TextEncoder().encode(String(user.userId));
+        const created = (await navigator.credentials.create({
+          publicKey: {
+            challenge: base64ToUint8Array(challenge.challenge) as BufferSource,
+            rp: {
+              name: 'GPUI Telegram Web',
+              id: challenge.rp_id || window.location.hostname || 'localhost',
             },
-          })) as PublicKeyCredential | null;
+            user: {
+              id: userIdBytes as BufferSource,
+              name: user.username || `user_${user.userId}`,
+              displayName:
+                `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() ||
+                user.username ||
+                `User ${user.userId}`,
+            },
+            pubKeyCredParams: [
+              { type: 'public-key', alg: -7 },
+              { type: 'public-key', alg: -257 },
+            ],
+            authenticatorSelection: {
+              userVerification: 'preferred',
+              residentKey: 'preferred',
+            },
+            timeout: 60_000,
+          },
+        })) as PublicKeyCredential | null;
 
-          if (created) {
-            credId = created.id || arrayBufferToBase64Url(created.rawId);
-            const resp = created.response as AuthenticatorAttestationResponse;
-            if (typeof resp.getPublicKey === 'function') {
-              const pk = resp.getPublicKey();
-              if (pk) publicKeyB64 = arrayBufferToBase64Url(pk);
-            }
+        if (created) {
+          credId = created.id || arrayBufferToBase64Url(created.rawId);
+          const resp = created.response as AuthenticatorAttestationResponse;
+          if (typeof resp.getPublicKey === 'function') {
+            const pk = resp.getPublicKey();
+            if (pk) publicKeyB64 = arrayBufferToBase64Url(pk);
           }
-        } catch {
-          // Fallback to deterministic credential registration in headless mode
         }
+      } else if (get().adapterMode === 'sandbox') {
+        credId = `pk_cred_${Date.now()}`;
+      } else {
+        throw new Error('当前浏览器或环境不支持 WebAuthn Passkey（需要 HTTPS 安全上下文）');
+      }
+
+      if (!credId) {
+        throw new Error('已取消创建通行密钥');
       }
 
       const res = await adapter.registerPasskey({
@@ -896,30 +1028,33 @@ export const useAuthStore = create<AuthState>((set, get) => {
           navigator.credentials &&
           typeof navigator.credentials.get === 'function'
         ) {
-          try {
-            const assertion = (await navigator.credentials.get({
-              publicKey: {
-                challenge: base64ToUint8Array(challenge.challenge) as BufferSource,
-                rpId: challenge.rp_id || window.location.hostname || 'localhost',
-                userVerification: 'preferred',
-                timeout: 60_000,
-              },
-            })) as PublicKeyCredential | null;
-            if (assertion) {
-              credentialId = assertion.id || arrayBufferToBase64Url(assertion.rawId);
-            }
-          } catch {
-            // Fall through to stored passkey ID
+          const assertion = (await navigator.credentials.get({
+            publicKey: {
+              challenge: base64ToUint8Array(challenge.challenge) as BufferSource,
+              rpId: challenge.rp_id || window.location.hostname || 'localhost',
+              userVerification: 'preferred',
+              timeout: 60_000,
+            },
+          })) as PublicKeyCredential | null;
+          if (assertion) {
+            credentialId = assertion.id || arrayBufferToBase64Url(assertion.rawId);
           }
+        } else if (get().adapterMode === 'sandbox') {
+          credentialId =
+            (typeof localStorage !== 'undefined'
+              ? localStorage.getItem('gpui_tg_last_passkey_id')
+              : null) ?? `pk_sandbox_${Date.now()}`;
+        } else {
+          throw new Error('当前浏览器不支持 WebAuthn 通行密钥，请使用 HTTPS 或切换其他登录方式');
         }
 
-        if (!credentialId && typeof localStorage !== 'undefined') {
-          credentialId = localStorage.getItem('gpui_tg_last_passkey_id') ?? undefined;
+        if (!credentialId) {
+          throw new Error('未获取到通行密钥凭证');
         }
 
         const auth = await adapter.verifyPasskey({
           challenge_id: challenge.challenge_id,
-          credential_id: credentialId ?? `pk_sim_${Date.now()}`,
+          credential_id: credentialId,
         });
         return await commitAuthSuccess(auth);
       } catch (err) {

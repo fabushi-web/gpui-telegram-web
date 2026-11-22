@@ -32,9 +32,9 @@ export function WalletStarsModal({
   const activeChatId = useChatStore((s) => s.activeChatId);
 
   const [customAmount, setCustomAmount] = useState('250');
-  const [recipientUserId, setRecipientUserId] = useState<number>(1002);
+  const [recipientUserId, setRecipientUserId] = useState<number>(0);
   const [selectedGiftId, setSelectedGiftId] = useState(GIFT_PRESETS[0].id);
-  const [giftMessage, setGiftMessage] = useState('Thank you for building clean hexagonal architecture!');
+  const [giftMessage, setGiftMessage] = useState('');
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   const visible = isOpen !== undefined ? isOpen : activeModal === 'wallet_stars';
@@ -58,11 +58,18 @@ export function WalletStarsModal({
         });
       }
     }
-    if (!seen.has(1002)) {
-      list.push({ id: 1002, label: 'Bob (@bob_dev)' });
-    }
     return list;
   }, [contacts]);
+
+  useEffect(() => {
+    if (recipientOptions.length === 0) {
+      if (recipientUserId !== 0) setRecipientUserId(0);
+      return;
+    }
+    if (!recipientOptions.some((opt) => opt.id === recipientUserId)) {
+      setRecipientUserId(recipientOptions[0].id);
+    }
+  }, [recipientOptions, recipientUserId]);
 
   const handleClose = () => {
     closeModal();
@@ -94,6 +101,10 @@ export function WalletStarsModal({
 
   const handleSendGift = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!recipientUserId) {
+      pushToast('Please select a contact recipient first · 请先添加并选择赠送对象', 'warning');
+      return;
+    }
     const preset = GIFT_PRESETS.find((g) => g.id === selectedGiftId) || GIFT_PRESETS[0];
     setBusyAction('gift');
     try {
@@ -104,6 +115,7 @@ export function WalletStarsModal({
         giftId: preset.id,
         message: giftMessage.trim() || undefined,
       });
+      setGiftMessage('');
       pushToast(`Sent ${preset.stars} ★ Star Gift · 星币礼物已送出`, 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
@@ -114,8 +126,8 @@ export function WalletStarsModal({
 
   if (!visible) return null;
 
-  const starsBalance = wallet?.stars_balance ?? wallet?.balance ?? 500;
-  const tonBalance = wallet?.ton_balance || '12.50';
+  const starsBalance = wallet?.stars_balance ?? wallet?.balance ?? 0;
+  const tonBalance = wallet?.ton_balance || '0.0000';
   const transactions = wallet?.transactions ?? [];
 
   return (
@@ -279,13 +291,18 @@ export function WalletStarsModal({
                 className="tg-select"
                 aria-label="Gift Recipient 选择赠送对象"
                 value={recipientUserId}
+                disabled={recipientOptions.length === 0}
                 onChange={(e) => setRecipientUserId(Number(e.target.value))}
               >
-                {recipientOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
+                {recipientOptions.length === 0 ? (
+                  <option value={0}>暂无联系人 · Add a contact first</option>
+                ) : (
+                  recipientOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))
+                )}
               </select>
 
               <select
@@ -314,7 +331,7 @@ export function WalletStarsModal({
               <button
                 type="submit"
                 className="tg-btn tg-btn--primary"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !recipientUserId}
                 style={{ flexShrink: 0 }}
               >
                 Send Gift · 赠送礼物

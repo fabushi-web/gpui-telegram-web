@@ -54,53 +54,6 @@ const POPULAR_EMOJIS = [
   '✨', '⚡', '🚀', '💎', '🏆', '🎯', '✅', '👀',
 ] as const;
 
-const FALLBACK_STICKERS: StickerItemDto[] = [
-  { id: 'stk-rocket', set_id: 'gpui_core', emoji: '🚀', mime_type: 'image/webp', width: 160, height: 160, is_animated: false, is_video: false },
-  { id: 'stk-fire', set_id: 'gpui_core', emoji: '🔥', mime_type: 'image/webp', width: 160, height: 160, is_animated: false, is_video: false },
-  { id: 'stk-party', set_id: 'gpui_core', emoji: '🎉', mime_type: 'image/webp', width: 160, height: 160, is_animated: false, is_video: false },
-  { id: 'stk-cool', set_id: 'gpui_core', emoji: '😎', mime_type: 'image/webp', width: 160, height: 160, is_animated: false, is_video: false },
-  { id: 'stk-heart', set_id: 'gpui_core', emoji: '❤️', mime_type: 'image/webp', width: 160, height: 160, is_animated: false, is_video: false },
-  { id: 'stk-trophy', set_id: 'gpui_core', emoji: '🏆', mime_type: 'image/webp', width: 160, height: 160, is_animated: false, is_video: false },
-];
-
-function makeFallbackGifSvgDataUrl(label: string, accent: string): string {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="132" viewBox="0 0 200 132"><rect width="200" height="132" rx="10" fill="#0E1621"/><circle cx="46" cy="66" r="24" fill="${accent}" opacity="0.85"/><text x="84" y="72" fill="#F5F5F5" font-family="sans-serif" font-size="16" font-weight="700">${label}</text></svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
-const FALLBACK_GIFS: GifResultDto[] = [
-  {
-    id: 'gif-thumbsup',
-    title: 'Thumbs Up',
-    file_id: makeFallbackGifSvgDataUrl('Bravo!', '#3390EC'),
-    url: makeFallbackGifSvgDataUrl('Bravo!', '#3390EC'),
-    preview_url: makeFallbackGifSvgDataUrl('Bravo!', '#3390EC'),
-    width: 200,
-    height: 132,
-    mime_type: 'image/gif',
-  },
-  {
-    id: 'gif-celebrate',
-    title: 'Celebrate',
-    file_id: makeFallbackGifSvgDataUrl('Ship It!', '#00C972'),
-    url: makeFallbackGifSvgDataUrl('Ship It!', '#00C972'),
-    preview_url: makeFallbackGifSvgDataUrl('Ship It!', '#00C972'),
-    width: 200,
-    height: 132,
-    mime_type: 'image/gif',
-  },
-  {
-    id: 'gif-cheers',
-    title: 'Cheers',
-    file_id: makeFallbackGifSvgDataUrl('Cheers!', '#E5A030'),
-    url: makeFallbackGifSvgDataUrl('Cheers!', '#E5A030'),
-    preview_url: makeFallbackGifSvgDataUrl('Cheers!', '#E5A030'),
-    width: 200,
-    height: 132,
-    mime_type: 'image/gif',
-  },
-];
-
 const BUILTIN_SLASH_COMMANDS: Array<{ command: string; description: string }> = [
   { command: '/start', description: 'Start bot or workspace session' },
   { command: '/help', description: 'Show available commands and tips' },
@@ -813,11 +766,8 @@ export const CanonicalComposer = React.forwardRef<
     );
   }
 
-  const availableStickers =
-    stickerSets.flatMap((s) => s.stickers).length > 0
-      ? stickerSets.flatMap((s) => s.stickers)
-      : FALLBACK_STICKERS;
-  const availableGifs = gifResults.length > 0 ? gifResults : FALLBACK_GIFS;
+  const availableStickers = stickerSets.flatMap((s) => s.stickers);
+  const availableGifs = gifResults;
 
   return (
     <div
@@ -1227,51 +1177,57 @@ export const CanonicalComposer = React.forwardRef<
             )}
 
             {pickerTab === 'stickers' && (
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(4, 1fr)',
-                  gap: '6px',
-                }}
-              >
-                {availableStickers.map((stk) => (
-                  <button
-                    key={stk.id}
-                    type="button"
-                    data-sticker-id={stk.id}
-                    aria-label={`Send sticker ${stk.emoji}`}
-                    onClick={() => {
-                      setComposerPopover(null);
-                      void sendSticker(
-                        chat.chatId,
-                        stk,
-                        activeTopicId ?? undefined,
-                      ).then(() => onSentScrollToBottom?.());
-                    }}
-                    style={{
-                      height: '68px',
-                      borderRadius: '8px',
-                      border: '1px solid rgba(255,255,255,0.06)',
-                      backgroundColor: 'rgba(255,255,255,0.03)',
-                      fontSize: '36px',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {stk.svg_data_url ? (
-                      <img
-                        src={stk.svg_data_url}
-                        alt={stk.emoji}
-                        style={{ width: '52px', height: '52px', objectFit: 'contain' }}
-                      />
-                    ) : (
-                      stk.emoji
-                    )}
-                  </button>
-                ))}
-              </div>
+              availableStickers.length === 0 ? (
+                <div style={{ padding: '18px 8px', textAlign: 'center', fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
+                  暂无可用贴纸包 · No stickers available
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: '6px',
+                  }}
+                >
+                  {availableStickers.map((stk) => (
+                    <button
+                      key={stk.id}
+                      type="button"
+                      data-sticker-id={stk.id}
+                      aria-label={`Send sticker ${stk.emoji}`}
+                      onClick={() => {
+                        setComposerPopover(null);
+                        void sendSticker(
+                          chat.chatId,
+                          stk,
+                          activeTopicId ?? undefined,
+                        ).then(() => onSentScrollToBottom?.());
+                      }}
+                      style={{
+                        height: '68px',
+                        borderRadius: '8px',
+                        border: '1px solid rgba(255,255,255,0.06)',
+                        backgroundColor: 'rgba(255,255,255,0.03)',
+                        fontSize: '36px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      {stk.svg_data_url ? (
+                        <img
+                          src={stk.svg_data_url}
+                          alt={stk.emoji}
+                          style={{ width: '52px', height: '52px', objectFit: 'contain' }}
+                        />
+                      ) : (
+                        stk.emoji
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )
             )}
 
             {pickerTab === 'gifs' && (
@@ -1296,45 +1252,51 @@ export const CanonicalComposer = React.forwardRef<
                     boxSizing: 'border-box',
                   }}
                 />
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(2, 1fr)',
-                    gap: '6px',
-                  }}
-                >
-                  {availableGifs.map((gif) => (
-                    <button
-                      key={gif.id}
-                      type="button"
-                      data-gif-id={gif.id}
-                      aria-label={`Send GIF ${gif.title}`}
-                      onClick={() => {
-                        setComposerPopover(null);
-                        void sendGif(
-                          chat.chatId,
-                          gif,
-                          activeTopicId ?? undefined,
-                        ).then(() => onSentScrollToBottom?.());
-                      }}
-                      style={{
-                        padding: 0,
-                        height: '84px',
-                        borderRadius: '8px',
-                        overflow: 'hidden',
-                        border: '1px solid rgba(255,255,255,0.1)',
-                        backgroundColor: '#0E1621',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      <img
-                        src={gif.preview_url || gif.url}
-                        alt={gif.title}
-                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                      />
-                    </button>
-                  ))}
-                </div>
+                {availableGifs.length === 0 ? (
+                  <div style={{ padding: '18px 8px', textAlign: 'center', fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
+                    暂无 GIF 搜索结果 · No GIFs found
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(2, 1fr)',
+                      gap: '6px',
+                    }}
+                  >
+                    {availableGifs.map((gif) => (
+                      <button
+                        key={gif.id}
+                        type="button"
+                        data-gif-id={gif.id}
+                        aria-label={`Send GIF ${gif.title}`}
+                        onClick={() => {
+                          setComposerPopover(null);
+                          void sendGif(
+                            chat.chatId,
+                            gif,
+                            activeTopicId ?? undefined,
+                          ).then(() => onSentScrollToBottom?.());
+                        }}
+                        style={{
+                          padding: 0,
+                          height: '84px',
+                          borderRadius: '8px',
+                          overflow: 'hidden',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          backgroundColor: '#0E1621',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <img
+                          src={gif.preview_url || gif.url}
+                          alt={gif.title}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

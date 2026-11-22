@@ -2,9 +2,14 @@
 # ==============================================================================
 # Stage 1: Build @gpui-telegram/protocol, @gpui-telegram/server & @gpui-telegram/web
 # ==============================================================================
-FROM node:24-bookworm-slim AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
+
+ARG VITE_BASE_PATH=/
+ARG VITE_DEFAULT_SERVER_URL=
+ENV VITE_BASE_PATH=${VITE_BASE_PATH} \
+    VITE_DEFAULT_SERVER_URL=${VITE_DEFAULT_SERVER_URL}
 
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/protocol/package.json ./packages/protocol/
@@ -19,9 +24,9 @@ COPY apps ./apps
 RUN npm run build && npm prune --omit=dev
 
 # ==============================================================================
-# Stage 2: Production Full-Stack Runtime (Node.js 24 + SQLite WAL + Chromium CDP)
+# Stage 2: Production Full-Stack Runtime (Node.js 22 LTS + SQLite WAL + Chromium CDP)
 # ==============================================================================
-FROM node:24-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -36,7 +41,13 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=4173 \
     DATA_DIR=/data \
-    CHROMIUM_PATH=/usr/bin/chromium
+    CHROMIUM_PATH=/usr/bin/chromium \
+    OMBHRUM_API_URL=https://api.ombhrum.com \
+    AI_GATEWAY_URL=https://api.ombhrum.com/v1 \
+    SEED_DEMO_DATA=0 \
+    ALLOW_DEMO_AUTH=0 \
+    EXPOSE_DEV_OTP_CODE=0 \
+    ENABLE_TEST_RESET=0
 
 RUN mkdir -p /data && chown -R node:node /data /app
 

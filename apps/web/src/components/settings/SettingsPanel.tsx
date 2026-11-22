@@ -9,7 +9,7 @@ import {
 import { indexedDbCache } from '../../adapters';
 import { t, type LocaleCode } from '../../i18n';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
-import { useAuthStore } from '../../store/useAuthStore';
+import { isDemoUiEnabled, useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import {
   NON_PURPLE_ACCENT_SWATCHES,
@@ -183,18 +183,18 @@ const SETTINGS_SECTIONS: readonly SectionDescriptor[] = [
   {
     id: 'connection_mode',
     icon: '🔌',
-    titleEn: 'Connection & MTProto',
-    titleZh: '连接模式与 MTProto',
-    subtitleEn: 'Server, Local Sandbox, or MTProto transport',
-    subtitleZh: '切换全栈服务、离线沙盒与 MTProto 协议',
+    titleEn: 'Server Connection',
+    titleZh: '服务器连接',
+    subtitleEn: 'Configure backend server URL & health check',
+    subtitleZh: '配置后端服务地址与连通性检测',
   },
   {
     id: 'magpie_gateway',
     icon: '🐦',
     titleEn: 'Magpie LLM Gateway',
     titleZh: 'Magpie 模型网关',
-    subtitleEn: 'Zero-subscription preset, routing & PII mask',
-    subtitleZh: '零订阅内置模型、多路由与隐私脱敏',
+    subtitleEn: 'Multi-provider routing, probe & PII mask',
+    subtitleZh: '多模型路由、连通性检测与隐私脱敏',
   },
   {
     id: 'hermes_studio',
@@ -225,7 +225,7 @@ const SETTINGS_SECTIONS: readonly SectionDescriptor[] = [
     icon: 'ℹ️',
     titleEn: 'About & Keyboard Shortcuts',
     titleZh: '关于与键盘快捷键',
-    subtitleEn: 'GPUI Telegram Web v1.2.0 & shortcut cheatsheet',
+    subtitleEn: 'GPUI Telegram Web v1.3.0 & shortcut cheatsheet',
     subtitleZh: '版本架构信息与全局快捷键一览',
   },
 ] as const;
@@ -367,6 +367,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
   const currentUser = useAuthStore((s) => s.currentUser);
   const adapterMode = useAuthStore((s) => s.adapterMode);
   const serverUrl = useAuthStore((s) => s.serverUrl);
+  const serverHealth = useAuthStore((s) => s.serverHealth);
   const mtprotoConfig = useAuthStore((s) => s.mtprotoConfig);
   const passcodeHash = useAuthStore((s) => s.passcodeHash);
   const twoFaStatus = useAuthStore((s) => s.twoFaStatus);
@@ -374,6 +375,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
 
   const setAdapterMode = useAuthStore((s) => s.setAdapterMode);
   const setServerUrl = useAuthStore((s) => s.setServerUrl);
+  const probeServerHealth = useAuthStore((s) => s.probeServerHealth);
   const setMtprotoConfig = useAuthStore((s) => s.setMtprotoConfig);
   const setPasscode = useAuthStore((s) => s.setPasscode);
   const clearPasscode = useAuthStore((s) => s.clearPasscode);
@@ -862,7 +864,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
               >
                 <div
                   className="tg-avatar tg-avatar--lg"
-                  data-color-index={peerAvatarColorIndex(currentUser?.userId ?? 1001)}
+                  data-color-index={peerAvatarColorIndex(currentUser?.userId ?? 0)}
                 >
                   {(currentUser?.firstName ?? 'U').slice(0, 2).toUpperCase()}
                 </div>
@@ -870,11 +872,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                   <div style={{ fontSize: '16px', fontWeight: 700 }}>
                     {currentUser
                       ? `${currentUser.firstName} ${currentUser.lastName ?? ''}`.trim()
-                      : 'Demo Operator'}
+                      : isZh
+                        ? '未登录用户'
+                        : 'Signed Out'}
                   </div>
-                  <div style={{ fontSize: '12.5px', color: 'var(--tg-accent)' }}>
-                    @{currentUser?.username ?? 'telegram_user'}
-                  </div>
+                  {currentUser?.username && (
+                    <div style={{ fontSize: '12.5px', color: 'var(--tg-accent)' }}>
+                      @{currentUser.username}
+                    </div>
+                  )}
                   {currentUser?.phone && (
                     <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
                       {currentUser.phone}
@@ -2118,101 +2124,182 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
           {currentSection === 'chat_export' && renderExportCard()}
 
           {/* ================================================================
-              20. CONNECTION MODE & MTPROTO
+              20. CONNECTION MODE & SERVER CONFIGURATION
               ================================================================ */}
-          {currentSection === 'connection_mode' && (
-            <div className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
-                {t('auth.adapter.mode', language)}
-              </div>
+          {currentSection === 'connection_mode' && (() => {
+            const demoAllowed = isDemoUiEnabled(adapterMode);
+            return (
+              <div className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                  <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
+                    {isZh ? '后端服务器连接配置' : 'Backend Server Connection'}
+                  </div>
+                  <span
+                    style={{
+                      fontSize: '11.5px',
+                      padding: '2px 8px',
+                      borderRadius: '999px',
+                      backgroundColor: serverHealth?.ok ? 'var(--tg-success-soft)' : 'var(--tg-warning-soft)',
+                      color: serverHealth?.ok ? 'var(--tg-success)' : 'var(--tg-warning)',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {serverHealth?.ok
+                      ? `● ${isZh ? '已连接' : 'Online'} (${serverHealth.version ?? 'v1.3.0'}${serverHealth.mode ? ` · ${serverHealth.mode}` : ''})`
+                      : isZh
+                        ? '○ 未检测 / 离线'
+                        : '○ Unchecked / Offline'}
+                  </span>
+                </div>
 
-              {(
-                [
-                  { mode: 'server', label: t('auth.adapter.server', language) },
-                  { mode: 'sandbox', label: t('auth.adapter.sandbox', language) },
-                  { mode: 'mtproto', label: t('auth.adapter.mtproto', language) },
-                ] as Array<{ mode: AdapterMode; label: string }>
-              ).map((item) => (
-                <label
-                  key={item.mode}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '8px 10px',
-                    borderRadius: '8px',
-                    background: 'var(--tg-bg-elevated)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="adapterTransportMode"
-                    checked={adapterMode === item.mode}
-                    onChange={() => void setAdapterMode(item.mode)}
-                  />
-                  <span style={{ fontSize: '13px' }}>{item.label}</span>
-                </label>
-              ))}
+                {demoAllowed && (
+                  <>
+                    {(
+                      [
+                        { mode: 'server', label: t('auth.adapter.server', language) },
+                        { mode: 'sandbox', label: t('auth.adapter.sandbox', language) },
+                        { mode: 'mtproto', label: t('auth.adapter.mtproto', language) },
+                      ] as Array<{ mode: AdapterMode; label: string }>
+                    ).map((item) => (
+                      <label
+                        key={item.mode}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          background: 'var(--tg-bg-elevated)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          name="adapterTransportMode"
+                          checked={adapterMode === item.mode}
+                          onChange={() => void setAdapterMode(item.mode)}
+                        />
+                        <span style={{ fontSize: '13px' }}>{item.label}</span>
+                      </label>
+                    ))}
+                  </>
+                )}
 
-              <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12.5px' }}>
-                <span>{t('auth.adapter.serverUrl', language)}</span>
-                <input
-                  type="text"
-                  className="tg-input"
-                  value={serverUrlDraft}
-                  onChange={(e) => setServerUrlDraft(e.target.value)}
-                />
-              </label>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
-                  <span>MTProto API ID</span>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12.5px' }}>
+                  <span>{t('auth.adapter.serverUrl', language)}</span>
                   <input
                     type="text"
                     className="tg-input"
-                    value={apiIdDraft}
-                    onChange={(e) => setApiIdDraft(e.target.value)}
+                    placeholder="留空使用当前域名，或填写 https://web.ombhrum.com"
+                    value={serverUrlDraft}
+                    onChange={(e) => setServerUrlDraft(e.target.value)}
                   />
                 </label>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
-                  <span>DC ID</span>
-                  <input
-                    type="text"
-                    className="tg-input"
-                    value={dcIdDraft}
-                    onChange={(e) => setDcIdDraft(e.target.value)}
-                  />
-                </label>
+
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {[
+                    { label: isZh ? '当前域名' : 'Same Origin', url: '' },
+                    { label: 'web.ombhrum.com', url: 'https://web.ombhrum.com' },
+                    { label: isZh ? '桌面同源后端' : 'Desktop Cloud', url: 'http://34.46.77.133:8080' },
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      className="tg-btn tg-btn--secondary"
+                      style={{ padding: '4px 9px', fontSize: '11.5px' }}
+                      onClick={() => setServerUrlDraft(preset.url)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+
+                {demoAllowed && (
+                  <>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
+                        <span>MTProto API ID</span>
+                        <input
+                          type="text"
+                          className="tg-input"
+                          value={apiIdDraft}
+                          onChange={(e) => setApiIdDraft(e.target.value)}
+                        />
+                      </label>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
+                        <span>DC ID</span>
+                        <input
+                          type="text"
+                          className="tg-input"
+                          value={dcIdDraft}
+                          onChange={(e) => setDcIdDraft(e.target.value)}
+                        />
+                      </label>
+                    </div>
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
+                      <span>MTProto API Hash</span>
+                      <input
+                        type="text"
+                        className="tg-input"
+                        value={apiHashDraft}
+                        onChange={(e) => setApiHashDraft(e.target.value)}
+                      />
+                    </label>
+                  </>
+                )}
+
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="tg-btn tg-btn--primary"
+                    onClick={async () => {
+                      setServerUrl(serverUrlDraft.trim());
+                      if (demoAllowed) {
+                        setMtprotoConfig({
+                          apiId: Number(apiIdDraft) || 2040,
+                          apiHash: apiHashDraft.trim(),
+                          dcId: Number(dcIdDraft) || 2,
+                        });
+                      }
+                      const snap = await probeServerHealth();
+                      pushToast(
+                        snap.ok
+                          ? isZh
+                            ? `已连接至服务器 (${snap.version ?? 'v1.3.0'})`
+                            : `Connected (${snap.version ?? 'v1.3.0'})`
+                          : isZh
+                            ? `配置已保存，但服务器连通性检测失败：${snap.error ?? '不可达'}`
+                            : `Saved, server probe failed: ${snap.error ?? 'unreachable'}`,
+                        snap.ok ? 'success' : 'warning',
+                      );
+                    }}
+                  >
+                    {isZh ? '保存并检测连通性' : 'Save & Test Connection'}
+                  </button>
+                  <button
+                    type="button"
+                    className="tg-btn tg-btn--secondary"
+                    onClick={async () => {
+                      const snap = await probeServerHealth();
+                      pushToast(
+                        snap.ok
+                          ? isZh
+                            ? `服务器在线 (${snap.version ?? 'v1.3.0'})`
+                            : `Server online (${snap.version ?? 'v1.3.0'})`
+                          : isZh
+                            ? `服务器不可达：${snap.error ?? '请检查地址或网络'}`
+                            : `Server unreachable: ${snap.error ?? 'network error'}`,
+                        snap.ok ? 'success' : 'error',
+                      );
+                    }}
+                  >
+                    {isZh ? '检测连通性' : 'Probe Health'}
+                  </button>
+                </div>
               </div>
-
-              <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
-                <span>MTProto API Hash</span>
-                <input
-                  type="text"
-                  className="tg-input"
-                  value={apiHashDraft}
-                  onChange={(e) => setApiHashDraft(e.target.value)}
-                />
-              </label>
-
-              <button
-                type="button"
-                className="tg-btn tg-btn--primary"
-                onClick={() => {
-                  setServerUrl(serverUrlDraft.trim());
-                  setMtprotoConfig({
-                    apiId: Number(apiIdDraft) || 2040,
-                    apiHash: apiHashDraft.trim(),
-                    dcId: Number(dcIdDraft) || 2,
-                  });
-                  pushToast(isZh ? '连接配置已保存' : 'Connection settings saved', 'success');
-                }}
-              >
-                {t('common.save', language)}
-              </button>
-            </div>
-          )}
+            );
+          })()}
 
           {/* ================================================================
               21. MAGPIE LLM GATEWAY
@@ -2223,8 +2310,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                 🐦 {t('magpie.title', language)}
               </div>
               <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)' }}>
-                {t('magpie.zeroSubPreset', language)} · PII Masking:{' '}
-                <strong>{magpieConfig ? 'Active' : 'Ready'}</strong>
+                {magpieConfig?.activeProvider
+                  ? `${isZh ? '当前默认模型' : 'Active Model'}: ${magpieConfig.activeProvider}${magpieConfig.activeModel ? ` (${magpieConfig.activeModel})` : ''}`
+                  : isZh
+                    ? '尚未配置外部 LLM 模型供应商'
+                    : 'No external LLM provider configured yet'}
+                {' · '}PII Masking:{' '}
+                <strong>{magpieConfig?.masking?.enabled ? 'Active' : 'Off'}</strong>
               </div>
               <button
                 type="button"
@@ -2303,7 +2395,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                 ⭐ {t('wallet.title', language)}
               </div>
               <div style={{ fontSize: '20px', fontWeight: 700, color: '#E5A030' }}>
-                ★ {wallet?.stars_balance ?? 500} Stars
+                ★ {wallet?.stars_balance ?? wallet?.balance ?? 0} Stars
               </div>
               <button
                 type="button"
@@ -2324,12 +2416,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
           {currentSection === 'about' && (
             <div className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ fontSize: '16px', fontWeight: 700 }}>
-                GPUI Telegram Web · v1.2.0
+                GPUI Telegram Web · v1.3.0
               </div>
               <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', lineHeight: 1.5 }}>
                 {isZh
-                  ? '全栈六边形架构 Web 客户端：支持三适配器无缝切换 (Server / Offline Sandbox / MTProto)、WebCrypto ECDH P-256 + AES-256-GCM 端到端加密对话、WebRTC 音视频与屏幕共享，以及 Hermes + Magpie 智能体工作流。'
-                  : 'Standalone hexagonal TypeScript Web client featuring tri-adapter transport (Server, Offline Sandbox, MTProto), WebCrypto ECDH P-256 + AES-256-GCM Secret Chats, WebRTC Calls & Screen Share, and Hermes + Magpie AI Workspaces.'}
+                  ? '全栈协议对齐桌面端的 Web 客户端：兼容 gpui_telegram_server v1.3.0、全球法布施 3D WASM 小程序、WebCrypto ECDH P-256 + AES-256-GCM 端到端加密私密对话、WebRTC 音视频与屏幕共享，以及 Hermes + Magpie 智能体工作台。'
+                  : 'Protocol-aligned TypeScript Web client for gpui_telegram_server v1.3.0 featuring the 3D Fabushi WASM Mini App, WebCrypto ECDH P-256 + AES-256-GCM Secret Chats, WebRTC Calls & Screen Share, and Hermes + Magpie AI Workspaces.'}
               </div>
 
               <button

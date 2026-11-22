@@ -343,6 +343,58 @@ export interface TelegramClientPort {
   approveComputerCommand(commandId: string, approve: boolean): Promise<PendingComputerCommandDto>;
   updateComputerPolicy(nodeId: string, policy: ComputerRunPolicy): Promise<ComputerNodeDto>;
   emergencyTakeoverComputer(nodeId?: string): Promise<{ status: string; newGeneration: number; latencySub10ms: boolean }>;
+  // Optional production desktop-aligned extensions (implemented by HttpWsServerAdapter)
+  probeServerHealth?(serverUrl?: string): Promise<{
+    ok: boolean;
+    version?: string;
+    server?: string;
+    mode?: string;
+    latencyMs: number;
+    error?: string;
+  }>;
+  emailRegister?(req: {
+    email: string;
+    code: string;
+    username: string;
+    password: string;
+    first_name?: string;
+    last_name?: string;
+    email_code_hash?: string;
+  }): Promise<AuthResponse>;
+  probeMagpieProvider?(providerId: string): Promise<{
+    ok: boolean;
+    latency_ms?: number;
+    models?: string[];
+    error?: string;
+  }>;
+  scanMagpieSubscriptions?(): Promise<{ subscriptions: Array<Record<string, unknown>> }>;
+  importMagpieConfig?(payload: {
+    raw_text?: string;
+    providers?: Array<Record<string, unknown>>;
+  }): Promise<MagpieConfigSnapshot>;
+  createCloudComputer?(req: {
+    display_name: string;
+    host: string;
+    port?: number;
+    ssh_user: string;
+    secret?: string;
+    run_policy?: ComputerRunPolicy;
+  }): Promise<ComputerNodeDto>;
+  testComputerConnection?(nodeId: string): Promise<{
+    ok: boolean;
+    latency_ms?: number;
+    message?: string;
+  }>;
+  deleteComputer?(nodeId: string): Promise<void>;
+  registerMcpServer?(req: {
+    name: string;
+    transport: string;
+    url?: string;
+    command?: string;
+    args?: string[];
+  }): Promise<McpServerDto>;
+  deleteMcpServer?(serverId: string): Promise<void>;
+
   getTailnetStatus(): Promise<TailnetStatusDto>;
   getWalletState(): Promise<WalletStateDto>;
   topUpStars(amount: number): Promise<WalletStateDto>;

@@ -203,6 +203,76 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     }
   }
 
+  public getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  public getToken(): string | null {
+    return this.token;
+  }
+
+  public async probeServerHealth(overrideUrl?: string): Promise<{
+    ok: boolean;
+    version?: string;
+    server?: string;
+    mode?: string;
+    latencyMs: number;
+    error?: string;
+  }> {
+    const base =
+      overrideUrl !== undefined ? this.normalizeBaseUrl(overrideUrl) : this.baseUrl;
+    const candidates = ['/api/v1/status', '/api/v1/health', '/health'];
+    const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    let lastError = '无法连接到服务器';
+
+    for (const ep of candidates) {
+      try {
+        const url = base ? `${base}${ep}` : ep;
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3_000);
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: ctrl.signal,
+        });
+        clearTimeout(timer);
+        if (!res.ok) {
+          lastError = `HTTP ${res.status}`;
+          continue;
+        }
+        const ct = res.headers.get('content-type') || '';
+        const latencyMs = Math.max(
+          1,
+          Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0),
+        );
+        if (ct.includes('application/json')) {
+          const data = (await res.json()) as Record<string, unknown>;
+          return {
+            ok: data.ok !== false,
+            version: typeof data.version === 'string' ? data.version : undefined,
+            server:
+              typeof data.server === 'string'
+                ? data.server
+                : typeof data.service === 'string'
+                  ? data.service
+                  : undefined,
+            mode: typeof data.mode === 'string' ? data.mode : undefined,
+            latencyMs,
+          };
+        }
+        return { ok: true, latencyMs };
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    const latencyMs = Math.max(
+      1,
+      Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0),
+    );
+    return { ok: false, latencyMs, error: lastError };
+  }
+
   public getDiscoveredPeers(): UserProfile[] {
     return Array.from(this.discoveredPeers.values());
   }
@@ -305,7 +375,9 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     if (!contentType.includes('application/json')) {
       const text = await res.text();
       if (!res.ok) {
-        throw new Error(text || `HTTP ${res.status}`);
+        const err = new Error(text || `HTTP ${res.status}`) as Error & { status?: number };
+        err.status = res.status;
+        throw err;
       }
       return text as unknown as T;
     }
@@ -322,7 +394,10 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         (typeof data?.message === 'string' && data.message) ||
         (typeof data?.error === 'string' && data.error) ||
         `HTTP ${res.status}`;
-      throw new Error(errMsg);
+      const err = new Error(errMsg) as Error & { status?: number; code?: string };
+      err.status = res.status;
+      if (typeof data?.error === 'string') err.code = data.error;
+      throw err;
     }
 
     return data as T;
@@ -395,7 +470,8 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
           if (this.pingTimer) clearInterval(this.pingTimer);
           this.pingTimer = setInterval(() => {
-            this.sendWsFrame({ type: 'Ping', payload: { client_ts: Date.now() } });
+            const now = Date.now();
+            this.sendWsFrame({ type: 'Ping', payload: { nonce: now, client_ts: now } });
           }, 25_000);
 
           // Register live browser tab for F17 Desktop-to-Browser control bridge
@@ -685,7 +761,11 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     challenge_token: string;
     password: string;
   }): Promise<AuthResponse> {
-    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/2fa/verify', req);
+    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/2fa/verify', {
+      challenge_token: req.challenge_token,
+      password: req.password,
+      cloud_password: req.password,
+    });
     return this.applyAuthSuccess(res);
   }
 
@@ -709,21 +789,38 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async initQrPairing(deviceName = 'Telegram Web'): Promise<QrPairSessionDto> {
-    return this.requestJson<QrPairSessionDto>('POST', '/api/v1/auth/pair/init', {
-      device_name: deviceName,
-    });
+    const res = await this.requestJson<QrPairSessionDto & { pair_token?: string }>(
+      'POST',
+      '/api/v1/auth/pair/init',
+      { device_name: deviceName },
+    );
+    return {
+      ...res,
+      pair_id: res.pair_id ?? res.pair_token ?? '',
+      pair_token: res.pair_token ?? res.pair_id,
+    };
   }
 
   public async pollQrPairing(pairId: string): Promise<QrPairSessionDto> {
-    const res = await this.requestJson<QrPairSessionDto>(
-      'GET',
-      `/api/v1/auth/pair/poll/${encodeURIComponent(pairId)}`,
-    );
+    const res = await this.requestJson<
+      QrPairSessionDto & {
+        user_id?: number;
+        username?: string;
+        session_id?: string;
+      }
+    >('GET', `/api/v1/auth/pair/poll/${encodeURIComponent(pairId)}`);
     if (res.session?.token) {
       this.applyAuthSuccess(res.session);
-    } else if (res.token && res.user) {
-      this.token = res.token;
-      this.currentUserId = res.user.user_id;
+    } else if (res.token && (res.user || res.user_id)) {
+      const auth: AuthResponse = {
+        user_id: Number(res.user?.user_id ?? res.user_id ?? 0),
+        username: res.user?.username ?? res.username ?? '',
+        session_id: res.session_id ?? `qr_${pairId}`,
+        token: res.token,
+        user: res.user,
+      };
+      this.applyAuthSuccess(auth);
+      return { ...res, session: auth };
     }
     return res;
   }
@@ -731,6 +828,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   public async acceptQrPairing(pairId: string): Promise<QrPairSessionDto> {
     return this.requestJson<QrPairSessionDto>('POST', '/api/v1/auth/pair/accept', {
       pair_id: pairId,
+      pair_token: pairId,
     });
   }
 
@@ -772,23 +870,67 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     return this.applyAuthSuccess(res);
   }
 
+  public async emailRegister(req: {
+    email: string;
+    code: string;
+    username: string;
+    password: string;
+    first_name?: string;
+    last_name?: string;
+    email_code_hash?: string;
+  }): Promise<AuthResponse> {
+    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/email/register', req);
+    return this.applyAuthSuccess(res);
+  }
+
   public async startAlipayAuth(): Promise<{
     session_id: string;
     qr_url: string;
     svg: string;
     expires_at_ms: number;
   }> {
-    return this.requestJson('POST', '/api/v1/auth/alipay/start', {});
+    const res = await this.requestJson<{
+      session_id?: string;
+      attempt_id?: string;
+      qr_url?: string;
+      auth_url?: string;
+      qr_payload?: string;
+      svg?: string;
+      expires_at_ms?: number;
+    }>('POST', '/api/v1/auth/alipay/start', {});
+    return {
+      session_id: res.session_id ?? res.attempt_id ?? '',
+      qr_url: res.qr_url ?? res.qr_payload ?? res.auth_url ?? '',
+      svg: res.svg ?? '',
+      expires_at_ms: res.expires_at_ms ?? Date.now() + 180_000,
+    };
   }
 
   public async pollAlipayAuth(
     sessionId: string,
   ): Promise<{ status: string; auth?: AuthResponse }> {
-    const res = await this.requestJson<{ status: string; auth?: AuthResponse; session?: AuthResponse }>(
-      'GET',
-      `/api/v1/auth/alipay/poll/${encodeURIComponent(sessionId)}`,
-    );
-    const authPayload = res.auth ?? res.session;
+    const res = await this.requestJson<{
+      status: string;
+      auth?: AuthResponse;
+      session?: AuthResponse;
+      token?: string;
+      user_id?: number;
+      username?: string;
+      first_name?: string;
+      session_id?: string;
+      user?: UserProfileDto;
+    }>('GET', `/api/v1/auth/alipay/poll/${encodeURIComponent(sessionId)}`);
+    let authPayload = res.auth ?? res.session;
+    if (!authPayload && res.token && (res.user_id || res.user)) {
+      authPayload = {
+        user_id: Number(res.user?.user_id ?? res.user_id ?? 0),
+        username: res.user?.username ?? res.username ?? '',
+        first_name: res.user?.first_name ?? res.first_name,
+        session_id: res.session_id ?? `alipay_${sessionId}`,
+        token: res.token,
+        user: res.user,
+      };
+    }
     if (authPayload?.token) {
       this.applyAuthSuccess(authPayload);
     }
@@ -871,16 +1013,18 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
 
     const res = await this.requestJson<{
-      chats: ChatDetailDto[];
+      chats?: ChatDetailDto[];
       users?: UserProfileDto[];
-    }>('GET', `/api/v1/chats${suffix}`);
+    } | ChatDetailDto[]>('GET', `/api/v1/chats${suffix}`);
 
-    const chats = (res.chats ?? []).map((dto) => {
+    const rawChats = Array.isArray(res) ? res : (res.chats ?? []);
+    const rawUsers = Array.isArray(res) ? undefined : res.users;
+    const chats = rawChats.map((dto) => {
       const domain = mapChatDtoToDomain(dto);
       this.chatPtsMap.set(domain.chatId, domain.pts);
       return domain;
     });
-    const users = this.recordUsers(res.users);
+    const users = this.recordUsers(rawUsers);
     void indexedDbCache.saveChats(this.accountId, chats);
     return { chats, users };
   }
@@ -897,7 +1041,13 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async openSavedMessages(): Promise<ChatSummary> {
-    const dto = await this.requestJson<ChatDetailDto>('POST', '/api/v1/chats/saved', {});
+    const dto = await this.requestJson<ChatDetailDto>('POST', '/api/v1/chats/saved', {}).catch(
+      () =>
+        this.requestJson<ChatDetailDto>('POST', '/api/v1/chats', {
+          chat_type: 5,
+          title: 'Saved Messages',
+        }),
+    );
     return mapChatDtoToDomain(dto);
   }
 
@@ -937,7 +1087,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     }>,
   ): Promise<ChatSummary> {
     const res = await this.requestJson<ChatDetailDto & { chat?: ChatDetailDto }>(
-      'PATCH',
+      'PUT',
       `/api/v1/chats/${chatId}`,
       {
         title: patch.title,
@@ -957,7 +1107,11 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   public async clearChatHistory(chatId: number, forEveryone = false): Promise<void> {
     await this.requestJson('POST', `/api/v1/chats/${chatId}/history/clear`, {
       for_everyone: forEveryone,
-    });
+    }).catch(() =>
+      this.requestJson('POST', `/api/v1/chats/${chatId}/clear`, {
+        for_everyone: forEveryone,
+      }),
+    );
   }
 
   public async updateChatSettings(
@@ -985,7 +1139,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async setChatTtl(chatId: number, ttlSeconds: number): Promise<void> {
-    await this.requestJson('PUT', `/api/v1/chats/${chatId}/ttl`, {
+    await this.requestJson('POST', `/api/v1/chats/${chatId}/ttl`, {
       ttl_seconds: ttlSeconds,
     });
   }
@@ -1383,9 +1537,16 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     req: SendMessagePortInput,
   ): Promise<{ message: MessageItem; pts: number; duplicate?: boolean }> {
     const res = await this.requestJson<{
-      message: MessageItem;
+      message?: MessageItem;
+      message_id?: number;
+      id?: number;
       pts: number;
       duplicate?: boolean;
+      date?: string;
+      date_ms?: number;
+      sender_id?: number;
+      chat_id?: number;
+      text?: string;
     }>('POST', `/api/v1/chats/${req.chatId}/messages`, {
       chat_id: req.chatId,
       text: req.text,
@@ -1394,6 +1555,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       reply_to: req.replyToMsgId
         ? { reply_to_msg_id: req.replyToMsgId, quote_text: req.quoteText }
         : undefined,
+      reply_to_id: req.replyToMsgId,
       quote_text: req.quoteText,
       topic_id: req.topicId,
       client_nonce: req.clientNonce,
@@ -1403,15 +1565,42 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       send_as_peer_id: req.sendAsPeerId,
     });
 
+    const baseMsg: MessageItem = res.message ?? {
+      id: Number(res.message_id ?? res.id ?? 0),
+      chat_id: Number(res.chat_id ?? req.chatId),
+      peer_id: { Chat: req.chatId },
+      to_peer: { Chat: req.chatId },
+      sender_id: Number(res.sender_id ?? this.currentUserId),
+      topic_id: req.topicId,
+      flags: {
+        is_out: true,
+        is_pinned: false,
+        is_silent: Boolean(req.silent),
+        is_edited: false,
+        is_scheduled: Boolean(req.scheduleAtMs),
+        media_unread: false,
+        has_reactions: false,
+        no_forwards: false,
+        is_forwarded: false,
+      },
+      date: res.date ?? new Date(res.date_ms ?? Date.now()).toISOString(),
+      date_ms: res.date_ms ?? Date.now(),
+      text: res.text ?? req.text ?? '',
+      entities: req.entities ?? [],
+      content: req.content ?? createTextContent(res.text ?? req.text ?? '', req.entities),
+      reactions: [],
+      client_nonce: req.clientNonce,
+    };
+
     const enriched = enrichMessageItem({
-      ...res.message,
-      client_nonce: req.clientNonce ?? res.message.client_nonce,
+      ...baseMsg,
+      client_nonce: req.clientNonce ?? baseMsg.client_nonce,
       delivery_status: 'sent',
     });
-    this.chatPtsMap.set(req.chatId, Number(res.pts));
+    this.chatPtsMap.set(req.chatId, Number(res.pts ?? 0));
     return {
       message: enriched,
-      pts: Number(res.pts),
+      pts: Number(res.pts ?? 0),
       duplicate: res.duplicate,
     };
   }
@@ -1495,7 +1684,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     entities?: MessageEntity[],
   ): Promise<{ message: MessageItem; pts: number }> {
     const res = await this.requestJson<{ message: MessageItem; pts: number }>(
-      'PATCH',
+      'PUT',
       `/api/v1/chats/${chatId}/messages/${messageId}`,
       { text, entities },
     );
@@ -1515,20 +1704,28 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     messageIds: number[],
     forEveryone: boolean,
   ): Promise<{ pts: number }> {
-    const res = await this.requestJson<{ pts: number }>(
+    const res = await this.requestJson<{ pts?: number }>(
       'POST',
       `/api/v1/chats/${chatId}/messages/delete-batch`,
       {
         message_ids: messageIds,
         for_everyone: forEveryone,
+        revoke: forEveryone,
       },
+    ).catch(() =>
+      this.requestJson<{ pts?: number }>('POST', '/api/v1/messages/delete', {
+        chat_id: chatId,
+        message_ids: messageIds,
+        for_everyone: forEveryone,
+        revoke: forEveryone,
+      }),
     );
     broadcastSync.publish({
       kind: 'messages_deleted',
       accountId: this.accountId,
       chatId,
       messageIds,
-      pts: res.pts,
+      pts: Number(res.pts ?? 0),
     });
     return { pts: Number(res.pts ?? 0) };
   }
@@ -1559,6 +1756,17 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       pinned ? 'POST' : 'DELETE',
       `/api/v1/chats/${chatId}/messages/${messageId}/pin`,
       pinned ? {} : undefined,
+    ).catch(() =>
+      pinned
+        ? this.requestJson<{ pinned_message_ids?: number[]; pinned_ids?: number[] }>(
+            'POST',
+            `/api/v1/chats/${chatId}/pins`,
+            { message_id: messageId },
+          )
+        : this.requestJson<{ pinned_message_ids?: number[]; pinned_ids?: number[] }>(
+            'DELETE',
+            `/api/v1/chats/${chatId}/pins/${messageId}`,
+          ),
     );
     return res.pinned_message_ids ?? res.pinned_ids ?? [];
   }
@@ -1639,13 +1847,25 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     const res = await this.requestJson<{
       answer_text?: string;
       answerText?: string;
+      text?: string;
       message?: MessageItem;
     }>('POST', `/api/v1/chats/${chatId}/messages/${messageId}/callback`, {
       callback_data: data,
       data,
-    });
+    }).catch(() =>
+      this.requestJson<{
+        answer_text?: string;
+        answerText?: string;
+        text?: string;
+        message?: MessageItem;
+      }>('POST', `/api/v1/chats/${chatId}/callback`, {
+        message_id: messageId,
+        callback_data: data,
+        data,
+      }),
+    );
     return {
-      answerText: res.answer_text ?? res.answerText,
+      answerText: res.answer_text ?? res.answerText ?? res.text,
       message: res.message ? enrichMessageItem(res.message) : undefined,
     };
   }
@@ -1837,7 +2057,11 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public getMediaStreamUrl(fileId: string): string {
-    return this.resolveHttpUrl(`/api/v1/media/stream/${encodeURIComponent(fileId)}`);
+    const base = this.resolveHttpUrl(`/api/v1/media/stream/${encodeURIComponent(fileId)}`);
+    if (this.token) {
+      return `${base}${base.includes('?') ? '&' : '?'}token=${encodeURIComponent(this.token)}`;
+    }
+    return base;
   }
 
   public async listStickerSets(): Promise<StickerSetDto[]> {
@@ -1913,7 +2137,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     }>,
   ): Promise<UserProfile> {
     const res = await this.requestJson<UserProfileDto & { user?: UserProfileDto }>(
-      'PATCH',
+      'PUT',
       '/api/v1/users/me',
       {
         first_name: patch.firstName,
@@ -1929,13 +2153,17 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async getPrivacySettings(): Promise<UserPrivacySettingsDto> {
-    return this.requestJson<UserPrivacySettingsDto>('GET', '/api/v1/account/privacy');
+    return this.requestJson<UserPrivacySettingsDto>('GET', '/api/v1/account/privacy').catch(() =>
+      this.requestJson<UserPrivacySettingsDto>('GET', '/api/v1/users/me/settings'),
+    );
   }
 
   public async updatePrivacySettings(
     patch: Partial<UserPrivacySettingsDto>,
   ): Promise<UserPrivacySettingsDto> {
-    return this.requestJson<UserPrivacySettingsDto>('PUT', '/api/v1/account/privacy', patch);
+    return this.requestJson<UserPrivacySettingsDto>('PUT', '/api/v1/account/privacy', patch).catch(
+      () => this.requestJson<UserPrivacySettingsDto>('PUT', '/api/v1/users/me/settings', patch),
+    );
   }
 
   public async listBlockedUsers(): Promise<UserProfile[]> {
@@ -2007,6 +2235,8 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     return this.requestJson<UserPreKeyBundlesResponse>(
       'GET',
       `/api/v1/e2ee/users/${userId}/prekeys`,
+    ).catch(() =>
+      this.requestJson<UserPreKeyBundlesResponse>('GET', `/api/v1/e2ee/prekeys/${userId}`),
     );
   }
 
@@ -2030,6 +2260,8 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     const res = await this.requestJson<{ bots?: BotRegistryEntry[] } | BotRegistryEntry[]>(
       'GET',
       '/api/v1/bots',
+    ).catch(() =>
+      this.requestJson<{ bots?: BotRegistryEntry[] } | BotRegistryEntry[]>('GET', '/api/v1/bots/my'),
     );
     return Array.isArray(res) ? res : (res.bots ?? []);
   }
@@ -2333,9 +2565,9 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     return {
       presets: (raw.presets as MagpiePreset[]) ?? [],
       providers: (raw.providers as MagpieProviderView[]) ?? [],
-      activeProvider: String(raw.active_provider ?? raw.activeProvider ?? 'openai'),
-      activeModel: String(raw.active_model ?? raw.activeModel ?? 'gpt-4o-mini'),
-      allowLocalFallback: Boolean(raw.allow_local_fallback ?? raw.allowLocalFallback ?? true),
+      activeProvider: String(raw.active_provider ?? raw.activeProvider ?? ''),
+      activeModel: String(raw.active_model ?? raw.activeModel ?? ''),
+      allowLocalFallback: Boolean(raw.allow_local_fallback ?? raw.allowLocalFallback ?? false),
       routingGroups: (raw.routing_groups ?? raw.routingGroups ?? []) as MagpieRoutingGroup[],
       routingStrategy: String(raw.routing_strategy ?? raw.routingStrategy ?? 'smart'),
       masking: (raw.masking as MagpieMaskingConfig) ?? {
@@ -2353,6 +2585,8 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     const raw = await this.requestJson<Record<string, unknown>>(
       'GET',
       '/api/v1/hermes/magpie/config',
+    ).catch(() =>
+      this.requestJson<Record<string, unknown>>('GET', '/api/v1/hermes/magpie/state'),
     );
     return this.mapMagpieSnapshot(raw);
   }
@@ -2360,6 +2594,13 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   public async updateMagpieConfig(patch: Record<string, unknown>): Promise<MagpieConfigSnapshot> {
     if (patch.upsertProvider && typeof patch.upsertProvider === 'object') {
       await this.requestJson('POST', '/api/v1/hermes/magpie/providers', patch.upsertProvider);
+      return this.getMagpieConfig();
+    }
+    if (typeof patch.deleteProviderId === 'string') {
+      await this.requestJson(
+        'DELETE',
+        `/api/v1/hermes/magpie/providers/${encodeURIComponent(patch.deleteProviderId)}`,
+      );
       return this.getMagpieConfig();
     }
     const raw = await this.requestJson<Record<string, unknown>>(
@@ -2375,6 +2616,37 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       },
     );
     return this.mapMagpieSnapshot(raw);
+  }
+
+  public async probeMagpieProvider(providerId: string): Promise<{
+    ok: boolean;
+    latency_ms?: number;
+    models?: string[];
+    error?: string;
+  }> {
+    return this.requestJson(
+      'POST',
+      `/api/v1/hermes/magpie/providers/${encodeURIComponent(providerId)}/probe`,
+      {},
+    );
+  }
+
+  public async scanMagpieSubscriptions(): Promise<{
+    subscriptions: Array<Record<string, unknown>>;
+  }> {
+    const res = await this.requestJson<{
+      subscriptions?: Array<Record<string, unknown>>;
+      detected?: Array<Record<string, unknown>>;
+    }>('POST', '/api/v1/hermes/magpie/subscriptions/scan', {});
+    return { subscriptions: res.subscriptions ?? res.detected ?? [] };
+  }
+
+  public async importMagpieConfig(payload: {
+    raw_text?: string;
+    providers?: Array<Record<string, unknown>>;
+  }): Promise<MagpieConfigSnapshot> {
+    await this.requestJson('POST', '/api/v1/hermes/magpie/import', payload);
+    return this.getMagpieConfig();
   }
 
   public async getMagpieUsage(): Promise<MagpieUsageLedgerSummary> {
@@ -2444,6 +2716,25 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     return Array.isArray(res) ? res : (res.servers ?? []);
   }
 
+  public async registerMcpServer(req: {
+    name: string;
+    transport: string;
+    url?: string;
+    command?: string;
+    args?: string[];
+  }): Promise<McpServerDto> {
+    const res = await this.requestJson<McpServerDto & { server?: McpServerDto }>(
+      'POST',
+      '/api/v1/mcp/servers',
+      req,
+    );
+    return res.server ?? res;
+  }
+
+  public async deleteMcpServer(serverId: string): Promise<void> {
+    await this.requestJson('DELETE', `/api/v1/mcp/servers/${encodeURIComponent(serverId)}`);
+  }
+
   public async listMcpTools(): Promise<{
     tools: McpToolDto[];
     approvals: McpPendingApprovalDto[];
@@ -2464,19 +2755,29 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     arguments?: Record<string, unknown>;
     forceApprove?: boolean;
   }): Promise<Record<string, unknown>> {
-    return this.requestJson<Record<string, unknown>>('POST', '/api/v1/mcp/invoke', {
+    const payload = {
       tool_id: req.toolId,
       tool_name: req.toolName,
       arguments: req.arguments ?? {},
       force_approve: req.forceApprove,
-    });
+    };
+    return this.requestJson<Record<string, unknown>>('POST', '/api/v1/mcp/invoke', payload).catch(
+      () => this.requestJson<Record<string, unknown>>('POST', '/api/v1/mcp/call', payload),
+    );
   }
 
   public async approveMcpToolCall(requestId: string, allow: boolean): Promise<void> {
     await this.requestJson('POST', '/api/v1/mcp/approve', {
       request_id: requestId,
       allow,
-    });
+      approved: allow,
+    }).catch(() =>
+      this.requestJson('POST', '/api/v1/mcp/permission/approve', {
+        request_id: requestId,
+        allow,
+        approved: allow,
+      }),
+    );
   }
 
   public async startTalkSession(): Promise<TalkSessionDto> {
@@ -2490,7 +2791,9 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async bargeInTalkSession(): Promise<TalkSessionDto> {
-    return this.requestJson<TalkSessionDto>('POST', '/api/v1/talk/barge-in', {});
+    return this.requestJson<TalkSessionDto>('POST', '/api/v1/talk/barge-in', {}).catch(() =>
+      this.requestJson<TalkSessionDto>('POST', '/api/v1/talk/barge_in', {}),
+    );
   }
 
   public async stopTalkSession(): Promise<TalkSessionDto> {
@@ -2512,6 +2815,38 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     };
   }
 
+  public async createCloudComputer(req: {
+    display_name: string;
+    host: string;
+    port?: number;
+    ssh_user: string;
+    secret?: string;
+    run_policy?: ComputerRunPolicy;
+  }): Promise<ComputerNodeDto> {
+    const res = await this.requestJson<ComputerNodeDto & { computer?: ComputerNodeDto }>(
+      'POST',
+      '/api/v1/computers/cloud',
+      req,
+    );
+    return res.computer ?? res;
+  }
+
+  public async testComputerConnection(nodeId: string): Promise<{
+    ok: boolean;
+    latency_ms?: number;
+    message?: string;
+  }> {
+    return this.requestJson(
+      'POST',
+      `/api/v1/computers/${encodeURIComponent(nodeId)}/test`,
+      {},
+    );
+  }
+
+  public async deleteComputer(nodeId: string): Promise<void> {
+    await this.requestJson('DELETE', `/api/v1/computers/${encodeURIComponent(nodeId)}`);
+  }
+
   public async executeComputerOp(
     nodeId: string,
     operation: Record<string, unknown>,
@@ -2524,6 +2859,12 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         ...operation,
         caller_label: callerLabel,
       },
+    ).catch(() =>
+      this.requestJson<Record<string, unknown>>('POST', '/api/v1/computers/exec', {
+        node_id: nodeId,
+        ...operation,
+        caller_label: callerLabel,
+      }),
     );
   }
 
@@ -2535,6 +2876,12 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       'POST',
       `/api/v1/computers/commands/${encodeURIComponent(commandId)}/decide`,
       { approve, approved: approve },
+    ).catch(() =>
+      this.requestJson<PendingComputerCommandDto>(
+        'POST',
+        `/api/v1/computers/commands/${encodeURIComponent(commandId)}/approve`,
+        { approve, approved: approve },
+      ),
     );
   }
 
@@ -2551,15 +2898,16 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async emergencyTakeoverComputer(
-    nodeId = 'sandbox:default',
+    nodeId = '',
   ): Promise<{ status: string; newGeneration: number; latencySub10ms: boolean }> {
+    const target = nodeId || 'default';
     const res = await this.requestJson<{
       status?: string;
       new_generation?: number;
       newGeneration?: number;
       latency_sub10ms?: boolean;
       latencySub10ms?: boolean;
-    }>('POST', `/api/v1/computers/${encodeURIComponent(nodeId)}/takeover`, {});
+    }>('POST', `/api/v1/computers/${encodeURIComponent(target)}/takeover`, {});
     return {
       status: res.status ?? 'revoked',
       newGeneration: Number(res.new_generation ?? res.newGeneration ?? 2),
@@ -2568,11 +2916,38 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async getTailnetStatus(): Promise<TailnetStatusDto> {
-    return this.requestJson<TailnetStatusDto>('GET', '/api/v1/tailnet/status');
+    return this.requestJson<TailnetStatusDto>('GET', '/api/v1/tailnet/status').catch(() =>
+      this.requestJson<TailnetStatusDto>('GET', '/api/v1/tailnet/netmap'),
+    );
   }
 
   public async getWalletState(): Promise<WalletStateDto> {
-    return this.requestJson<WalletStateDto>('GET', '/api/v1/wallet');
+    return this.requestJson<WalletStateDto>('GET', '/api/v1/wallet').catch(async () => {
+      const [bal, txs] = await Promise.all([
+        this.requestJson<{
+          user_id?: number;
+          stars_balance?: number;
+          balance?: number;
+          ton_nano?: number;
+          ton_balance?: string;
+        }>('GET', '/api/v1/wallet/balance'),
+        this.requestJson<{ transactions?: WalletStateDto['transactions'] }>(
+          'GET',
+          '/api/v1/wallet/transactions',
+        ).catch(() => ({ transactions: [] })),
+      ]);
+      const tonNano = Number(bal.ton_nano ?? 0);
+      const starsBal = Number(bal.stars_balance ?? bal.balance ?? 0);
+      return {
+        user_id: Number(bal.user_id ?? this.currentUserId),
+        balance: starsBal,
+        stars_balance: starsBal,
+        ton_nano: tonNano,
+        ton_balance: bal.ton_balance ?? (tonNano / 1e9).toFixed(4),
+        updated_at_ms: Date.now(),
+        transactions: txs.transactions ?? [],
+      };
+    });
   }
 
   public async topUpStars(amount: number): Promise<WalletStateDto> {

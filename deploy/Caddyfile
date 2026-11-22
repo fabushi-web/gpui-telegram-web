@@ -1,0 +1,24 @@
+# Caddy v2 automatic-HTTPS reverse proxy configuration for ombhrum.com Web Edition
+# Usage:
+#   caddy run --config deploy/Caddyfile
+#
+# Ensure `gpui-telegram-web` is running on 127.0.0.1:4173 (either standalone Node.js
+# production mode OR with UPSTREAM_SERVER_URL=http://<rust-server>:8080).
+
+web.ombhrum.com {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # SSE streams & real-time WebSockets require zero response buffering
+    reverse_proxy 127.0.0.1:4173 {
+        flush_interval -1
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}

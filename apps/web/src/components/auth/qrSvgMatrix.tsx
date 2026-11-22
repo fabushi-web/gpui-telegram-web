@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { encodeQrMatrix } from '@gpui-telegram/protocol';
 
 export interface QrMatrixSvgProps {
   id?: string;
@@ -7,122 +8,73 @@ export interface QrMatrixSvgProps {
   foreground?: string;
   background?: string;
   accentColor?: string;
+  badge?: 'alipay' | 'telegram' | 'none';
   className?: string;
 }
 
-const MATRIX_DIM = 25;
-const QUIET_ZONE = 2;
+const QUIET_ZONE = 4;
 
-function hashSeed(input: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < input.length; i += 1) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0 || 0x9e3779b9;
-}
-
-function nextXorShift(state: number): number {
-  let x = state >>> 0 || 1;
-  x ^= x << 13;
-  x ^= x >>> 17;
-  x ^= x << 5;
-  return x >>> 0;
-}
-
-function isInFinderZone(r: number, c: number, top: number, left: number): boolean {
-  return r >= top - 1 && r <= top + 7 && c >= left - 1 && c <= left + 7;
-}
-
-function finderModuleDark(r: number, c: number, top: number, left: number): { dark: boolean; center: boolean } {
-  const dr = r - top;
-  const dc = c - left;
-  if (dr < 0 || dr > 6 || dc < 0 || dc > 6) {
-    return { dark: false, center: false };
-  }
-  if (dr === 0 || dr === 6 || dc === 0 || dc === 6) {
-    return { dark: true, center: false };
-  }
-  if (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4) {
-    return { dark: true, center: true };
-  }
-  return { dark: false, center: false };
-}
-
+/**
+ * Generates a genuine ISO/IEC 18004 scannable QR code matrix with Error Correction Level Q (25%),
+ * matching the GPUI desktop client's `QrCode::with_error_correction_level(..., EcLevel::Q)`.
+ */
 export function buildDeterministicQrMatrix(
   payload: string,
 ): Array<Array<{ dark: boolean; accent: boolean }>> {
-  const grid: Array<Array<{ dark: boolean; accent: boolean }>> = Array.from(
-    { length: MATRIX_DIM },
-    () => Array.from({ length: MATRIX_DIM }, () => ({ dark: false, accent: false })),
+  const { size, modules } = encodeQrMatrix(payload, 'Q');
+  const isFinderCenter = (r: number, c: number): boolean => {
+    const inTopLeft = r >= 2 && r <= 4 && c >= 2 && c <= 4;
+    const inTopRight = r >= 2 && r <= 4 && c >= size - 5 && c <= size - 3;
+    const inBottomLeft = r >= size - 5 && r <= size - 3 && c >= 2 && c <= 4;
+    return inTopLeft || inTopRight || inBottomLeft;
+  };
+
+  return modules.map((row, r) =>
+    row.map((dark, c) => ({
+      dark,
+      accent: dark && isFinderCenter(r, c),
+    })),
   );
-
-  let rng = hashSeed(payload || 'gpui-telegram-qr');
-
-  for (let r = 0; r < MATRIX_DIM; r += 1) {
-    for (let c = 0; c < MATRIX_DIM; c += 1) {
-      // Three 7x7 finder patterns with 1-cell quiet separator
-      if (isInFinderZone(r, c, 0, 0)) {
-        const m = finderModuleDark(r, c, 0, 0);
-        grid[r][c] = { dark: m.dark, accent: m.center };
-        continue;
-      }
-      if (isInFinderZone(r, c, 0, MATRIX_DIM - 7)) {
-        const m = finderModuleDark(r, c, 0, MATRIX_DIM - 7);
-        grid[r][c] = { dark: m.dark, accent: m.center };
-        continue;
-      }
-      if (isInFinderZone(r, c, MATRIX_DIM - 7, 0)) {
-        const m = finderModuleDark(r, c, MATRIX_DIM - 7, 0);
-        grid[r][c] = { dark: m.dark, accent: m.center };
-        continue;
-      }
-
-      // Timing lines on row 6 and column 6
-      if (r === 6) {
-        grid[r][c] = { dark: c % 2 === 0, accent: false };
-        continue;
-      }
-      if (c === 6) {
-        grid[r][c] = { dark: r % 2 === 0, accent: false };
-        continue;
-      }
-
-      // 5x5 alignment square at (16..20, 16..20)
-      if (r >= 16 && r <= 20 && c >= 16 && c <= 20) {
-        const ar = r - 16;
-        const ac = c - 16;
-        const border = ar === 0 || ar === 4 || ac === 0 || ac === 4;
-        const center = ar === 2 && ac === 2;
-        grid[r][c] = { dark: border || center, accent: center };
-        continue;
-      }
-
-      // Deterministic payload bit mixing
-      const charBit =
-        payload.length > 0
-          ? (payload.charCodeAt((r * MATRIX_DIM + c) % payload.length) >> ((r + c) % 7)) & 1
-          : 0;
-      rng = nextXorShift(rng ^ ((r + 1) * 73856093) ^ ((c + 1) * 19349663));
-      const dark = ((rng & 1) ^ charBit) === 1;
-      grid[r][c] = { dark, accent: false };
-    }
-  }
-
-  return grid;
 }
 
 export const QrMatrixSvg: React.FC<QrMatrixSvgProps> = ({
   id,
   value,
-  size = 200,
+  size = 216,
   foreground = '#0F172A',
   background = '#FFFFFF',
-  accentColor = '#3390EC',
+  accentColor = '#0F172A',
+  badge = 'none',
   className,
 }) => {
-  const matrix = useMemo(() => buildDeterministicQrMatrix(value), [value]);
-  const totalView = MATRIX_DIM + QUIET_ZONE * 2;
+  const { matrixDim, pathD, accentPathD } = useMemo(() => {
+    const grid = buildDeterministicQrMatrix(value);
+    const dim = grid.length;
+    const mainParts: string[] = [];
+    const accentParts: string[] = [];
+    for (let r = 0; r < dim; r += 1) {
+      const row = grid[r]!;
+      for (let c = 0; c < dim; c += 1) {
+        const cell = row[c]!;
+        if (!cell.dark) continue;
+        const cmd = `M${c + QUIET_ZONE},${r + QUIET_ZONE}h1v1h-1z`;
+        if (cell.accent && accentColor !== foreground) {
+          accentParts.push(cmd);
+        } else {
+          mainParts.push(cmd);
+        }
+      }
+    }
+    return {
+      matrixDim: dim,
+      pathD: mainParts.join(''),
+      accentPathD: accentParts.join(''),
+    };
+  }, [value, accentColor, foreground]);
+
+  const totalView = matrixDim + QUIET_ZONE * 2;
+  const center = totalView / 2;
+  const badgeBox = Math.max(5, Math.round(matrixDim * 0.2));
 
   return (
     <svg
@@ -132,8 +84,10 @@ export const QrMatrixSvg: React.FC<QrMatrixSvgProps> = ({
       height={size}
       viewBox={`0 0 ${totalView} ${totalView}`}
       role="img"
-      aria-label="QR Pairing Code"
+      aria-label={badge === 'alipay' ? 'Alipay OAuth QR Code' : 'QR Pairing Code'}
       data-qr-value={value}
+      data-qr-standard="ISO-18004"
+      data-qr-ec="Q"
       style={{
         display: 'block',
         width: `${size}px`,
@@ -144,19 +98,38 @@ export const QrMatrixSvg: React.FC<QrMatrixSvgProps> = ({
       }}
     >
       <rect x={0} y={0} width={totalView} height={totalView} fill={background} rx={1.5} />
-      {matrix.map((row, r) =>
-        row.map((cell, c) =>
-          cell.dark ? (
-            <rect
-              key={`${r}-${c}`}
-              x={c + QUIET_ZONE}
-              y={r + QUIET_ZONE}
-              width={1}
-              height={1}
-              fill={cell.accent ? accentColor : foreground}
-            />
-          ) : null,
-        ),
+      <path d={pathD} fill={foreground} />
+      {accentPathD && <path d={accentPathD} fill={accentColor} />}
+      {badge === 'alipay' && (
+        <g shapeRendering="geometricPrecision">
+          <rect
+            x={center - badgeBox / 2 - 0.8}
+            y={center - badgeBox / 2 - 0.8}
+            width={badgeBox + 1.6}
+            height={badgeBox + 1.6}
+            rx={1.8}
+            fill="#FFFFFF"
+          />
+          <rect
+            x={center - badgeBox / 2}
+            y={center - badgeBox / 2}
+            width={badgeBox}
+            height={badgeBox}
+            rx={1.4}
+            fill="#1677FF"
+          />
+          <text
+            x={center}
+            y={center + badgeBox * 0.26}
+            textAnchor="middle"
+            fill="#FFFFFF"
+            fontFamily="system-ui, -apple-system, 'PingFang SC', sans-serif"
+            fontSize={badgeBox * 0.68}
+            fontWeight={700}
+          >
+            支
+          </text>
+        </g>
       )}
     </svg>
   );

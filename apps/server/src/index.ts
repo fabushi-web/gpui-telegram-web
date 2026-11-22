@@ -13,11 +13,13 @@ import {
   registerBotsMiniAppsAndFabushiRoutes,
 } from './routes/botsMiniApps.js';
 import { registerChatAndSocialRoutes } from './routes/chats.js';
+import { registerFabushiMiniAppRoutes } from './routes/fabushiMiniApp.js';
 import {
   executeSlashCommandInternal,
+  getHermesMemoryState,
   registerHermesStudioRoutes,
 } from './routes/hermes.js';
-import { registerMagpieGatewayRoutes } from './routes/magpie.js';
+import { registerMagpieGatewayRoutes, runConfiguredLlmCompletion } from './routes/magpie.js';
 import { registerMediaStoriesE2eeAndCallRoutes } from './routes/media.js';
 import { registerMessageAndSearchRoutes } from './routes/messages.js';
 import {
@@ -25,6 +27,7 @@ import {
   registerBrowserControlRoutes,
 } from './routes/browserControl.js';
 import { registerWorkspaceTailnetAndWalletRoutes } from './routes/workspace.js';
+import { proxyHttpRequest, proxyWebSocketUpgrade, shouldProxyPathname } from './proxy.js';
 import { serveStaticSpa } from './staticHost.js';
 import {
   ApiError,
@@ -51,7 +54,7 @@ export function createTelegramServer(
 ): TelegramServerInstance {
   const config = resolveServerConfig(overrides);
   const db = openSqliteWalDatabase(config.dataDir);
-  seedDatabaseIfEmpty(db);
+  seedDatabaseIfEmpty(db, { seedDemoData: config.seedDemoData });
 
   const hub = new RealtimeGatewayHub(db);
   const browserBridge = new BrowserControlBridge(db);
@@ -105,12 +108,37 @@ export function createTelegramServer(
             senderId: 777000,
             text: slashRes.response_text,
           });
-        } else {
+        } else if (config.seedDemoData) {
+          // Preserve fast synchronous reply in automated test/sandbox mode
           createMessageAtomic(db, deferredBotSink, {
             chatId,
             senderId: 777000,
             text: `🤖 **Hermes AI**: Processed "${trimmed.slice(0, 160)}". Open **Hermes 6-Tab Studio** for full SSE reasoning & tool traces.`,
           });
+        } else {
+          // Real async LLM completion via user's Magpie provider or ombhrum.com AI gateway
+          void (async () => {
+            try {
+              const mem = getHermesMemoryState(db, senderId);
+              const llmRes = await runConfiguredLlmCompletion(db, config, senderId, [
+                { role: 'system', content: mem.soul },
+                { role: 'user', content: trimmed },
+              ]);
+              const replyText =
+                llmRes.usedUpstream && llmRes.text
+                  ? llmRes.text
+                  : llmRes.error
+                    ? `⚠️ **Hermes AI** 调用模型失败（${llmRes.providerId}）：${llmRes.error}。请检查 **Magpie LLM 网关** 配置。`
+                    : `尚未配置可用的 AI 模型提供商。请点击左侧栏的 **Magpie LLM 网关** 添加并启用 API Key 后，即可与 @HermesAgent 进行真实对话。`;
+              createMessageAtomic(db, hub, {
+                chatId,
+                senderId: 777000,
+                text: replyText,
+              });
+            } catch {
+              // Ignore if DB closed during server teardown
+            }
+          })();
         }
       }
     } catch {
@@ -126,20 +154,23 @@ export function createTelegramServer(
 
   hub.setBotTriggerHook(dispatchBotReplyIfApplicable);
 
-  // Health, Readiness, Version & Deterministic Test Reset
+  // Health, Readiness, Status, Version & Deterministic Test Reset
   const handleHealth = (ctx: RequestContext): void => {
     const dbOk = Boolean(db.prepare(`SELECT 1 AS ok`).get());
     sendJson(ctx.res, 200, {
       ok: dbOk,
       status: 'ok',
+      server: 'gpui_telegram_server',
       service: 'gpui-telegram-server',
-      version: '1.2.0',
+      version: '1.3.0',
+      mode: config.upstreamServerUrl ? 'proxy' : config.seedDemoData ? 'sandbox' : 'production',
       db: dbOk ? 'wal_ready' : 'error',
       uptime_secs: Math.floor((Date.now() - startedAtMs) / 1000),
       online_users: hub.getOnlineUsersCount(),
     });
   };
   router.get('/api/v1/health', handleHealth);
+  router.get('/api/v1/status', handleHealth);
   router.get('/api/v1/ready', handleHealth);
   router.get('/healthz', handleHealth);
   router.get('/health', handleHealth);
@@ -147,7 +178,8 @@ export function createTelegramServer(
   router.get('/api/v1/version', (ctx) => {
     sendJson(ctx.res, 200, {
       name: '@gpui-telegram/server',
-      version: '1.2.0',
+      server: 'gpui_telegram_server',
+      version: '1.3.0',
       node: process.version,
     });
   });
@@ -173,12 +205,13 @@ export function createTelegramServer(
   });
 
   // Register all domain route suites
-  registerAuthAndUserRoutes(router, db, hub);
+  registerAuthAndUserRoutes(router, db, hub, config);
   registerChatAndSocialRoutes(router, db, hub);
-  registerMessageAndSearchRoutes(router, db, hub, dispatchBotReplyIfApplicable);
+  registerMessageAndSearchRoutes(router, db, hub, dispatchBotReplyIfApplicable, config);
   registerMediaStoriesE2eeAndCallRoutes(router, db, config, hub);
-  registerBotsMiniAppsAndFabushiRoutes(router, db, hub);
-  registerHermesStudioRoutes(router, db, hub);
+  registerBotsMiniAppsAndFabushiRoutes(router, db, hub, config);
+  registerFabushiMiniAppRoutes(router, db, config, hub);
+  registerHermesStudioRoutes(router, db, config, hub);
   registerMagpieGatewayRoutes(router, db, config);
   registerWorkspaceTailnetAndWalletRoutes(router, db, config, hub, browserBridge);
   registerBrowserControlRoutes(router, db, browserBridge);
@@ -186,8 +219,13 @@ export function createTelegramServer(
   const httpServer = http.createServer(async (req, res) => {
     setCorsHeaders(res);
     const allowHeaders = res.getHeader('Access-Control-Allow-Headers');
-    if (typeof allowHeaders === 'string' && !allowHeaders.includes('X-Desktop-Browser-Token')) {
-      res.setHeader('Access-Control-Allow-Headers', `${allowHeaders}, X-Desktop-Browser-Token`);
+    if (typeof allowHeaders === 'string') {
+      const extras = ['X-Desktop-Browser-Token', 'X-Telegram-Init-Data'].filter(
+        (h) => !allowHeaders.includes(h),
+      );
+      if (extras.length > 0) {
+        res.setHeader('Access-Control-Allow-Headers', `${allowHeaders}, ${extras.join(', ')}`);
+      }
     }
     if (req.method === 'OPTIONS') {
       res.statusCode = 204;
@@ -197,6 +235,13 @@ export function createTelegramServer(
 
     try {
       const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+
+      // Transparent reverse proxy to real upstream Rust `gpui_telegram_server` when UPSTREAM_SERVER_URL is set
+      if (config.upstreamServerUrl && shouldProxyPathname(reqUrl.pathname)) {
+        proxyHttpRequest(config.upstreamServerUrl, req, res);
+        return;
+      }
+
       const matched = router.match(req.method ?? 'GET', reqUrl.pathname);
 
       if (matched) {
@@ -231,7 +276,13 @@ export function createTelegramServer(
     }
   });
 
-  hub.attachToServer(httpServer);
+  if (config.upstreamServerUrl) {
+    httpServer.on('upgrade', (req, socket, head) => {
+      proxyWebSocketUpgrade(config.upstreamServerUrl!, req, socket, head);
+    });
+  } else {
+    hub.attachToServer(httpServer);
+  }
 
   let isClosed = false;
 

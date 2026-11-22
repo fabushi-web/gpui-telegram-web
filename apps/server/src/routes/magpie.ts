@@ -78,6 +78,173 @@ function saveMagpieState(db: DatabaseSync, userId: number, state: MagpieStateBlo
   `).run(userId, JSON.stringify(state), Date.now());
 }
 
+export async function runConfiguredLlmCompletion(
+  db: DatabaseSync,
+  config: ServerConfig,
+  userId: number,
+  messages: Array<{ role: string; content: string }>,
+  opts?: { providerId?: string; model?: string },
+): Promise<{ text: string; usedUpstream: boolean; providerId: string; model: string; error?: string }> {
+  const state = getMagpieState(db, userId);
+  const providerId = opts?.providerId ?? state.active_provider;
+  const model = opts?.model ?? state.active_model;
+
+  // Try user's active configured provider first, or any enabled provider with a real upstream URL
+  let provRow = db
+    .prepare(
+      `SELECT provider_id, provider_json, encrypted_api_key, key_nonce
+       FROM magpie_providers
+       WHERE user_id = ? AND provider_id = ?`,
+    )
+    .get(userId, providerId) as
+    | { provider_id: string; provider_json: string; encrypted_api_key: string | null; key_nonce: string | null }
+    | undefined;
+
+  if (!provRow || provRow.provider_id === 'local_hermes') {
+    provRow = db
+      .prepare(
+        `SELECT provider_id, provider_json, encrypted_api_key, key_nonce
+         FROM magpie_providers
+         WHERE user_id = ? AND provider_id != 'local_hermes'
+         ORDER BY updated_at_ms DESC LIMIT 1`,
+      )
+      .get(userId) as
+      | { provider_id: string; provider_json: string; encrypted_api_key: string | null; key_nonce: string | null }
+      | undefined;
+  }
+
+  if (!provRow) {
+    const gatewayKey = process.env.AI_GATEWAY_API_KEY?.trim();
+    if (gatewayKey && /^https?:\/\//i.test(config.aiGatewayUrl)) {
+      try {
+        const base = config.aiGatewayUrl.replace(/\/+$/, '');
+        const effectiveModel =
+          opts?.model && opts.model !== 'hermes-local-v1'
+            ? opts.model
+            : process.env.AI_GATEWAY_MODEL?.trim() || 'gpt-4o-mini';
+        const res = await fetch(`${base}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${gatewayKey}`,
+          },
+          body: JSON.stringify({ model: effectiveModel, messages, stream: false }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as {
+            choices?: Array<{ message?: { content?: string } }>;
+          };
+          const text = json.choices?.[0]?.message?.content ?? '';
+          if (text) {
+            return { text, usedUpstream: true, providerId: 'ombhrum_gateway', model: effectiveModel };
+          }
+        }
+      } catch {
+        // Fall through to unconfigured result
+      }
+    }
+    return { text: '', usedUpstream: false, providerId, model };
+  }
+
+  const prov = JSON.parse(provRow.provider_json) as MagpieProviderView;
+  if (prov.enabled === false || prov.api_mode === 'local_hermes' || !/^https?:\/\//i.test(prov.base_url)) {
+    return { text: '', usedUpstream: false, providerId: prov.provider_id, model: prov.default_model };
+  }
+
+  try {
+    const apiKey =
+      provRow.encrypted_api_key && provRow.key_nonce
+        ? decryptSecretAtRest(
+            config.masterSecret,
+            `magpie:${userId}:${prov.provider_id}`,
+            provRow.encrypted_api_key,
+            provRow.key_nonce,
+          )
+        : '';
+
+    const effectiveModel = opts?.model && opts.model !== 'hermes-local-v1' ? opts.model : prov.default_model;
+    const base = prov.base_url.replace(/\/+$/, '');
+    let upstreamUrl = `${base}/chat/completions`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    let reqPayload: Record<string, unknown> = {
+      model: effectiveModel,
+      messages,
+      stream: false,
+    };
+
+    if (prov.api_mode === 'anthropic_messages') {
+      upstreamUrl = `${base}/messages`;
+      if (apiKey) headers['x-api-key'] = apiKey;
+      headers['anthropic-version'] = '2023-06-01';
+      const sysMsg = messages.find((m) => m.role === 'system')?.content;
+      reqPayload = {
+        model: effectiveModel,
+        max_tokens: 1024,
+        ...(sysMsg ? { system: sysMsg } : {}),
+        messages: messages.filter((m) => m.role !== 'system'),
+      };
+    } else if (prov.api_mode === 'gemini_generate_content') {
+      upstreamUrl = `${base}/models/${encodeURIComponent(effectiveModel)}:generateContent${apiKey ? `?key=${encodeURIComponent(apiKey)}` : ''}`;
+      reqPayload = {
+        contents: messages
+          .filter((m) => m.role !== 'system')
+          .map((m) => ({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }],
+          })),
+      };
+    } else if (prov.api_mode === 'codex_responses') {
+      upstreamUrl = `${base}/responses`;
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      reqPayload = { model: effectiveModel, input: messages };
+    } else if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const upstreamRes = await fetch(upstreamUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(reqPayload),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!upstreamRes.ok) {
+      return {
+        text: '',
+        usedUpstream: false,
+        providerId: prov.provider_id,
+        model: effectiveModel,
+        error: `Upstream ${prov.provider_id} returned HTTP ${upstreamRes.status}`,
+      };
+    }
+
+    const upstreamJson = (await upstreamRes.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      content?: Array<{ text?: string }>;
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      output_text?: string;
+      output?: Array<{ content?: Array<{ text?: string }> }>;
+    };
+    const text =
+      upstreamJson.choices?.[0]?.message?.content ??
+      upstreamJson.content?.[0]?.text ??
+      upstreamJson.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ??
+      upstreamJson.output_text ??
+      upstreamJson.output?.[0]?.content?.[0]?.text ??
+      '';
+
+    return { text, usedUpstream: true, providerId: prov.provider_id, model: effectiveModel };
+  } catch (err) {
+    return {
+      text: '',
+      usedUpstream: false,
+      providerId: prov.provider_id,
+      model: prov.default_model,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export function registerMagpieGatewayRoutes(
   router: HttpRouter,
   db: DatabaseSync,

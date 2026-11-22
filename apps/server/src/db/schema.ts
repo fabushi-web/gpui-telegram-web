@@ -616,8 +616,8 @@ export function initDatabaseSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS wallet_accounts (
       user_id INTEGER PRIMARY KEY,
-      stars_balance INTEGER NOT NULL DEFAULT 2500,
-      ton_nano INTEGER NOT NULL DEFAULT 12500000000,
+      stars_balance INTEGER NOT NULL DEFAULT 0,
+      ton_nano INTEGER NOT NULL DEFAULT 0,
       updated_at_ms INTEGER NOT NULL
     );
 
@@ -636,5 +636,75 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       created_at_ms INTEGER NOT NULL,
       PRIMARY KEY (user_id, idempotency_key)
     );
+
+    CREATE TABLE IF NOT EXISTS fabushi_profiles (
+      user_id INTEGER PRIMARY KEY,
+      username TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      avatar_url TEXT NOT NULL DEFAULT '',
+      bio TEXT NOT NULL DEFAULT '',
+      user_no INTEGER NOT NULL,
+      is_vip INTEGER NOT NULL DEFAULT 0,
+      vip_plan TEXT NOT NULL DEFAULT 'free',
+      vip_expires_at TEXT,
+      is_admin INTEGER NOT NULL DEFAULT 0,
+      locale TEXT NOT NULL DEFAULT 'zh-CN',
+      total_transfer_bytes INTEGER NOT NULL DEFAULT 0,
+      total_transfer_count INTEGER NOT NULL DEFAULT 0,
+      total_practice_sessions INTEGER NOT NULL DEFAULT 0,
+      total_practice_minutes INTEGER NOT NULL DEFAULT 0,
+      total_practice_chants INTEGER NOT NULL DEFAULT 0,
+      consecutive_days INTEGER NOT NULL DEFAULT 0,
+      locked_practice_json TEXT,
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS fabushi_practice_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      sutra_name TEXT NOT NULL,
+      sutra_source TEXT NOT NULL DEFAULT 'built_in',
+      duration_minutes INTEGER NOT NULL DEFAULT 0,
+      chant_count INTEGER NOT NULL DEFAULT 0,
+      record_date TEXT NOT NULL,
+      local_time TEXT NOT NULL,
+      is_manual INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      start_time TEXT,
+      end_time TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_fabushi_practice_user ON fabushi_practice_records(user_id, record_date DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS fabushi_transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      content_title TEXT NOT NULL,
+      content_kind TEXT NOT NULL DEFAULT 'sutra',
+      target_countries_json TEXT NOT NULL DEFAULT '["ALL"]',
+      bytes_sent INTEGER NOT NULL DEFAULT 0,
+      beam_count INTEGER NOT NULL DEFAULT 1,
+      created_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS fabushi_follows (
+      follower_user_id INTEGER NOT NULL,
+      target_user_id INTEGER NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (follower_user_id, target_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS fabushi_online_heartbeats (
+      user_id INTEGER NOT NULL,
+      activity_type TEXT NOT NULL,
+      last_seen_ms INTEGER NOT NULL,
+      PRIMARY KEY (user_id, activity_type)
+    );
   `);
+
+  // Safe idempotent column migration for existing SQLite databases
+  const alipayCols = db.prepare(`PRAGMA table_info(alipay_sessions)`).all() as Array<{ name: string }>;
+  if (!alipayCols.some((c) => c.name === 'upstream_attempt_id')) {
+    db.exec(`ALTER TABLE alipay_sessions ADD COLUMN upstream_attempt_id TEXT;`);
+  }
 }

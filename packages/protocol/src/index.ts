@@ -8,3 +8,4 @@ export * from './aiContracts.js';
 export * from './sync.js';
 export * from './ports.js';
 export * from './browserControl.js';
+export * from './qr.js';

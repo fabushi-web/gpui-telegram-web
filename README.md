@@ -48,20 +48,27 @@ gpui-telegram-web/
 ## Quick Start
 
 ### Prerequisites
-- **Node.js `>= 24.0.0`** (uses built-in `node:sqlite` — zero native C++ addon compilation required)
+- **Node.js `>= 22.13.0`** (uses built-in `node:sqlite` — zero native C++ addon compilation required)
 - **npm `>= 10`**
 
-### Install, Build & Launch
+### Install, Build & Launch (Clean Production Mode — Zero Fake Data)
 
 ```bash
 npm install
 npm run build
-PORT=4173 HOST=127.0.0.1 DATA_DIR=./data npm start
+SESSION_SECRET=$(openssl rand -hex 32) \
+PORT=4173 HOST=0.0.0.0 DATA_DIR=./data npm start
 ```
 
 Open `http://127.0.0.1:4173` in your browser:
-- **Full-Stack Server Mode**: `http://127.0.0.1:4173`
-- **Standalone Offline Sandbox Mode (Zero Backend Needed)**: `http://127.0.0.1:4173/?mode=sandbox`
+- **Production Mode (Default)**: Clean SQLite database with zero mock users/chats/wallets, real ISO/IEC 18004 QR codes, real Alipay OAuth (`api.ombhrum.com`), real 833KB Rust-compiled Fabushi 3D WASM Mini App, and real Magpie multi-provider LLM routing.
+- **Reverse Proxy Mode (Pair with Rust `gpui_telegram_server`)**:
+  ```bash
+  UPSTREAM_SERVER_URL=http://34.46.77.133:8080 \
+  PORT=4173 HOST=0.0.0.0 npm start
+  ```
+  Serves the Web SPA + static Fabushi WASM bundle while transparently proxying `/api/*` (HTTP, SSE, HTTP 206 Range) and WebSockets (`/api/v1/ws`, `/api/v1/browser/ws`) to your live Rust backend.
+- **Developer Sandbox Mode (Opt-In Only)**: Append `?mode=sandbox` or `?dev=1` locally (disabled by default in production).
 
 ---
 
@@ -133,37 +140,36 @@ Point any MCP host (including `gpui-telegram` Hermes/MCP runtime, Claude Desktop
 
 ---
 
-## Production Deployment
+## Production Deployment (`ombhrum.com`)
 
-- **Live Standalone Web Edition (GitHub Pages HTTPS)**:
-  - **https://fabushi-web.github.io/gpui-telegram-web/**
-  - Automatically runs in standalone `sandbox` mode (`LocalSandboxAdapter` + `BroadcastChannel` multi-tab sync) with zero backend dependency, or connects to any deployed full-stack server via `?mode=server&server=https://your-server.example.com`.
-  - Re-publish anytime via `npm run deploy:pages`.
-- **Docker & Docker Compose (Full-Stack Node.js 24 + SQLite WAL + Headless Chromium CDP + MCP Host)**:
-  ```bash
-  docker compose up -d --build
-  ```
-  Persists SQLite WAL databases and content-addressed media in the `gpui_telegram_data` volume (`/data`) with built-in `/api/v1/health` healthcheck.
-- **One-Click Cloud PaaS**:
-  - **Render**: Blueprint ready in `render.yaml` (persistent disk `/data` + Docker healthcheck).
-  - **Railway**: Configured in `railway.json` (`Dockerfile` builder + `/api/v1/health`).
-  - **Fly.io**: Configured in `fly.toml` (`fly volumes create gpui_telegram_data --size 2 && fly deploy`).
+1. **Docker & Docker Compose (Recommended — Full-Stack or Reverse Proxy to Rust `gpui_telegram_server`)**:
+   ```bash
+   cp .env.example .env
+   # Set SESSION_SECRET (and optionally UPSTREAM_SERVER_URL=http://<rust-server>:8080)
+   docker compose up -d --build
+   ```
+   Persists SQLite WAL databases and content-addressed media in the `gpui_telegram_data` volume (`/data`) with built-in `/api/v1/health` healthcheck and `SEED_DEMO_DATA=0` / `ALLOW_DEMO_AUTH=0`.
+2. **HTTPS Edge Reverse Proxy (`web.ombhrum.com`)**:
+   - **Caddy (Auto-HTTPS)**: `caddy run --config deploy/Caddyfile`
+   - **Nginx**: copy `deploy/nginx.ombhrum.conf` to `/etc/nginx/sites-enabled/` (includes WebSocket upgrades, unbuffered SSE, HTTP 206 Range, and `application/wasm` MIME type).
+3. **Static Hosting / GitHub Pages (connects to `https://api.ombhrum.com`)**:
+   - Build & publish via `VITE_DEFAULT_SERVER_URL=https://api.ombhrum.com npm run deploy:pages`.
+4. **Cloud PaaS Blueprints**:
+   - **Render**: `render.yaml` (persistent disk `/data` + Docker healthcheck).
+   - **Railway**: `railway.json` (`Dockerfile` builder + `/api/v1/health`).
+   - **Fly.io**: `fly.toml` (`fly volumes create gpui_telegram_data --size 2 && fly deploy`).
 
 ---
 
 ## Verification & Testing
 
 ```bash
-# 1. Strict TypeScript check across protocol, server, web, and E2E suites
+# 1. Strict TypeScript check across protocol, server, and web
 npm run typecheck
-./node_modules/.bin/tsc -p e2e/tsconfig.json --noEmit
 
 # 2. Production bundle build
 npm run build
 
-# 3. Vitest unit & full-stack integration suite (26 tests across 4 suites)
+# 3. Vitest unit, protocol, production-mode & browser bridge integration suites
 npm run test:unit
-
-# 4. Playwright Chromium End-to-End suite (17 spec files, 97 tests covering F1–F17)
-cd e2e && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_WORKERS=1 ./node_modules/.bin/playwright test
 ```

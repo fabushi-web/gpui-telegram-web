@@ -14,6 +14,16 @@ services:
         value: "4173"
       - key: DATA_DIR
         value: /data
+      - key: OMBHRUM_API_URL
+        value: https://api.ombhrum.com
+      - key: AI_GATEWAY_URL
+        value: https://api.ombhrum.com/v1
+      - key: SEED_DEMO_DATA
+        value: "0"
+      - key: ALLOW_DEMO_AUTH
+        value: "0"
+      - key: EXPOSE_DEV_OTP_CODE
+        value: "0"
       - key: ENABLE_TEST_RESET
         value: "0"
     disk:

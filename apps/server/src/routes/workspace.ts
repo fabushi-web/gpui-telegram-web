@@ -271,7 +271,7 @@ export function registerWorkspaceTailnetAndWalletRoutes(
     });
   });
 
-  router.post('/api/v1/mcp/invoke', async (ctx) => {
+  const handleMcpInvoke = async (ctx: RequestContext): Promise<void> => {
     const auth = browserBridge ? browserBridge.requireBrowserAuth(ctx) : requireAuth(db, ctx);
     const body = await readJsonBody<{
       tool_id?: string;
@@ -335,7 +335,9 @@ export function registerWorkspaceTailnetAndWalletRoutes(
       tool_name: tool.name,
       output: { ok: true, result: `Executed MCP tool ${tool.name}` },
     });
-  });
+  };
+  router.post('/api/v1/mcp/invoke', handleMcpInvoke);
+  router.post('/api/v1/mcp/call', handleMcpInvoke);
 
   const handleMcpApprovalDecision = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
@@ -356,6 +358,7 @@ export function registerWorkspaceTailnetAndWalletRoutes(
     sendJson(ctx.res, 200, item);
   };
   router.post('/api/v1/mcp/approve', handleMcpApprovalDecision);
+  router.post('/api/v1/mcp/permission/approve', handleMcpApprovalDecision);
   router.post('/api/v1/mcp/approvals/:requestId/resolve', handleMcpApprovalDecision);
 
   // ==========================================================================
@@ -407,7 +410,7 @@ export function registerWorkspaceTailnetAndWalletRoutes(
   router.post('/api/v1/talk/audio', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const raw = await readRawBody(ctx.req);
-    let transcript = 'Hello Hermes voice assistant';
+    let transcript = '';
     if ((ctx.req.headers['content-type'] ?? '').includes('application/json') && raw.length > 0) {
       try {
         const parsed = JSON.parse(raw.toString('utf8')) as { transcript?: string };
@@ -423,15 +426,15 @@ export function registerWorkspaceTailnetAndWalletRoutes(
       state: 'speaking',
       signal_seq: cur.signal_seq + 1,
       buffered_chunks: cur.buffered_chunks + 1,
-      last_transcript: transcript,
-      last_reply: `Voice reply (#${cur.generation}): Heard "${transcript}".`,
-      tts_segments: [`Heard "${transcript}".`, 'Ready for follow-up or barge-in.'],
+      last_transcript: transcript || undefined,
+      last_reply: transcript ? `Heard "${transcript}".` : 'Audio frame received.',
+      tts_segments: transcript ? [`Heard "${transcript}".`] : [],
     };
     saveTalkSession(auth.userId, updated);
     sendJson(ctx.res, 200, updated);
   });
 
-  router.post('/api/v1/talk/barge-in', (ctx) => {
+  const handleTalkBargeIn = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const cur = getOrInitTalkSession(auth.userId);
     const updated: TalkSessionDto = {
@@ -444,7 +447,9 @@ export function registerWorkspaceTailnetAndWalletRoutes(
     };
     saveTalkSession(auth.userId, updated);
     sendJson(ctx.res, 200, updated);
-  });
+  };
+  router.post('/api/v1/talk/barge-in', handleTalkBargeIn);
+  router.post('/api/v1/talk/barge_in', handleTalkBargeIn);
 
   router.post('/api/v1/talk/stop', (ctx) => {
     const auth = requireAuth(db, ctx);
@@ -463,6 +468,7 @@ export function registerWorkspaceTailnetAndWalletRoutes(
   // 4. Remote Computer Workbench & `<10ms` Emergency Lease Takeover
   // ==========================================================================
   const ensureDefaultComputerNode = (userId: number): void => {
+    if (!config.seedDemoData) return;
     const existing = db
       .prepare(`SELECT 1 FROM computer_nodes WHERE user_id = ? AND node_id = 'sandbox:default'`)
       .get(userId);
@@ -653,23 +659,43 @@ export function registerWorkspaceTailnetAndWalletRoutes(
     });
   };
   router.post('/api/v1/computers/:nodeId/commands', handleComputerCommand);
+  router.post('/api/v1/computers/exec', handleComputerCommand);
   router.post('/api/v1/computer/action', handleComputerCommand);
 
-  router.post('/api/v1/computers/commands/:commandId/decide', async (ctx) => {
+  const handleDecideComputerCommand = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
-    const body = await readJsonBody<{ approve?: boolean }>(ctx.req);
+    const body = await readJsonBody<{ approve?: boolean; approved?: boolean }>(ctx.req);
     const row = db
       .prepare(`SELECT cmd_json FROM computer_commands WHERE command_id = ? AND user_id = ?`)
       .get(ctx.params.commandId!, auth.userId) as { cmd_json: string } | undefined;
     if (!row) throw new ApiError(404, 'command_not_found', 'Pending command not found');
 
     const cmd = JSON.parse(row.cmd_json) as PendingComputerCommandDto;
-    cmd.status = body.approve === false ? 'denied' : 'approved';
+    const isApproved = body.approve !== undefined ? body.approve !== false : body.approved !== false;
+    cmd.status = isApproved ? 'approved' : 'denied';
     db.prepare(`UPDATE computer_commands SET cmd_json = ? WHERE command_id = ?`).run(
       JSON.stringify(cmd),
       cmd.command_id,
     );
     sendJson(ctx.res, 200, cmd);
+  };
+  router.post('/api/v1/computers/commands/:commandId/decide', handleDecideComputerCommand);
+  router.post('/api/v1/computers/commands/:commandId/approve', handleDecideComputerCommand);
+
+  router.post('/api/v1/computers/:nodeId/test', (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const row = db
+      .prepare(`SELECT node_json FROM computer_nodes WHERE node_id = ? AND user_id = ?`)
+      .get(ctx.params.nodeId!, auth.userId) as { node_json: string } | undefined;
+    if (!row) throw new ApiError(404, 'computer_not_found', 'Computer node not found');
+    const node = JSON.parse(row.node_json) as ComputerNodeDto;
+    sendJson(ctx.res, 200, {
+      ok: node.online,
+      node_id: node.node_id,
+      host: node.host,
+      online: node.online,
+      checked_at_ms: Date.now(),
+    });
   });
 
   // `<10ms` Synchronous Atomic Emergency Lease Takeover!
@@ -844,10 +870,12 @@ export function registerWorkspaceTailnetAndWalletRoutes(
   // ==========================================================================
   function buildWalletState(userId: number): WalletStateDto {
     const now = Date.now();
+    const initialStars = config.seedDemoData ? 500 : 0;
+    const initialTonNano = config.seedDemoData ? 1000000000 : 0;
     db.prepare(`
       INSERT OR IGNORE INTO wallet_accounts (user_id, stars_balance, ton_nano, updated_at_ms)
-      VALUES (?, 500, 1000000000, ?)
-    `).run(userId, now);
+      VALUES (?, ?, ?, ?)
+    `).run(userId, initialStars, initialTonNano, now);
 
     const acc = db
       .prepare(`SELECT stars_balance, ton_nano, updated_at_ms FROM wallet_accounts WHERE user_id = ?`)
@@ -964,9 +992,10 @@ export function registerWorkspaceTailnetAndWalletRoutes(
       return;
     }
 
-    const recipientId = Number(body.to_user_id ?? body.recipient_id ?? 1002);
+    const rawRecipient = body.to_user_id ?? body.recipient_id ?? (config.seedDemoData ? 1002 : undefined);
+    const recipientId = Number(rawRecipient);
     if (!Number.isInteger(recipientId) || recipientId <= 0) {
-      throw new ApiError(400, 'invalid_recipient', 'Invalid recipient user ID');
+      throw new ApiError(400, 'invalid_recipient', 'A valid recipient user ID is required');
     }
     if (recipientId === auth.userId) {
       throw new ApiError(400, 'self_transfer_not_allowed', 'Cannot transfer or gift Stars to yourself');

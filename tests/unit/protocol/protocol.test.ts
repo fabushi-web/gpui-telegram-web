@@ -15,6 +15,7 @@ import {
   deriveSharedAesGcmKey,
   detectPtsGap,
   domSelector,
+  encodeQrMatrix,
   encodeWaveform5Bit,
   encodeWaveformBase64,
   encryptSecretMessage,
@@ -31,6 +32,7 @@ import {
   mapStoryDtoToDomain,
   parseMarkdownEntities,
   renderEntitiesToSafeHtml,
+  renderQrCodeSvg,
   serializeEntitiesToMarkdown,
   signPreKeyPublic,
   verifyPreKeySignature,
@@ -475,5 +477,38 @@ describe('@gpui-telegram/protocol — WebCrypto E2EE & PTS Sync Invariants', () 
     expect(isPtsStaleOrDuplicate({ pts: 5, pts_count: 1 }, 5)).toBe(true);
     expect(clampGenerativeProgress(50, 0)).toBe(0);
     expect(clampGenerativeProgress(75, 100)).toBe(0.75);
+  });
+
+  it('encodes real ISO/IEC 18004 scannable QR code matrices and SVGs with valid finder patterns', () => {
+    const payload = 'https://api.ombhrum.com/api/auth/oauth/start?provider=alipay&attempt=abc123';
+    const mat = encodeQrMatrix(payload, 'Q');
+
+    // ISO/IEC 18004 sizes are always 17 + 4*version (21, 25, 29, ...)
+    expect(mat.size).toBeGreaterThanOrEqual(21);
+    expect((mat.size - 17) % 4).toBe(0);
+    expect(mat.modules.length).toBe(mat.size);
+
+    // Top-left 7x7 finder pattern must be dark on border, white on inner ring, dark on 3x3 core
+    expect(mat.modules[0][0]).toBe(true);
+    expect(mat.modules[0][6]).toBe(true);
+    expect(mat.modules[1][1]).toBe(false);
+    expect(mat.modules[3][3]).toBe(true);
+    // Separator around top-left finder
+    expect(mat.modules[0][7]).toBe(false);
+    expect(mat.modules[7][0]).toBe(false);
+
+    // Top-right & bottom-left finder centers
+    expect(mat.modules[3][mat.size - 4]).toBe(true);
+    expect(mat.modules[mat.size - 4][3]).toBe(true);
+
+    // Alternating timing pattern along row 6
+    expect(mat.modules[6][8]).toBe(true);
+    expect(mat.modules[6][9]).toBe(false);
+
+    // SVG rendering produces crisp <svg> with <path> and proper viewBox
+    const svg = renderQrCodeSvg(payload, { sizePx: 240, ecLevel: 'Q' });
+    expect(svg).toContain('<svg');
+    expect(svg).toContain('<path');
+    expect(svg).toContain('width="240"');
   });
 });

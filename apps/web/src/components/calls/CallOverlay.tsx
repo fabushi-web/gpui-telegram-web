@@ -198,9 +198,6 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
         });
       }
     }
-    if (fallback.length < 2) {
-      fallback.push({ userId: 2002, name: 'Group Member', isSelf: false });
-    }
     return fallback;
   }, [isGroupCall, chat, membersByChat, currentUser, contacts, peersById]);
 
@@ -393,6 +390,22 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
                   ? t('call.ringing', language)
                   : `${t('call.connected', language)} · ${formatDurationClock(elapsedSec)}`}
               </div>
+              {liveRuntime.mediaError && (
+                <div
+                  role="alert"
+                  style={{
+                    marginTop: '8px',
+                    padding: '6px 12px',
+                    borderRadius: '8px',
+                    background: 'rgba(229, 160, 48, 0.16)',
+                    border: '1px solid rgba(229, 160, 48, 0.45)',
+                    color: '#F5C469',
+                    fontSize: '12px',
+                  }}
+                >
+                  ⚠️ {liveRuntime.mediaError}
+                </div>
+              )}
             </div>
 
             {/* Group Call Participant Grid */}

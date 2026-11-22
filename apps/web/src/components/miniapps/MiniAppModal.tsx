@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { DOM_IDS, type MiniAppThemeParams } from '@gpui-telegram/protocol';
 import { getClientAdapter } from '../../adapters';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
+import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { registerUiEscapeHooks, useUiStore } from '../../store/useUiStore';
@@ -99,6 +100,8 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
   const setMiniAppIframeRef = useAiWorkspaceStore((s) => s.setMiniAppIframeRef);
   const closeMiniApp = useAiWorkspaceStore((s) => s.closeMiniApp);
 
+  const serverUrl = useAuthStore((s) => s.serverUrl);
+  const authToken = useAuthStore((s) => s.token);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const theme = useSettingsStore((s) => s.theme);
   const accentColor = useSettingsStore((s) => s.accentColor);
@@ -145,11 +148,26 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
     const basePrefix = (
       (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL || '/'
     ).replace(/\/$/, '');
-    if (basePrefix && raw.startsWith('/miniapps/')) {
-      return `${basePrefix}${raw}`;
+    const withBase =
+      basePrefix && raw.startsWith('/miniapps/') ? `${basePrefix}${raw}` : raw;
+
+    const hashIdx = withBase.indexOf('#');
+    const beforeHash = hashIdx >= 0 ? withBase.slice(0, hashIdx) : withBase;
+    const hashParams = new URLSearchParams(hashIdx >= 0 ? withBase.slice(hashIdx + 1) : '');
+    if (activeMiniApp?.init_data && !hashParams.has('tgWebAppData')) {
+      hashParams.set('tgWebAppData', activeMiniApp.init_data);
     }
-    return raw;
-  }, [activeMiniApp?.launch_url]);
+    const effectiveApiBase =
+      serverUrl || (typeof window !== 'undefined' ? window.location.origin : '');
+    if (effectiveApiBase && !hashParams.has('api_base')) {
+      hashParams.set('api_base', effectiveApiBase);
+    }
+    if (authToken && !hashParams.has('auth_token')) {
+      hashParams.set('auth_token', authToken);
+    }
+    const nextHash = hashParams.toString();
+    return nextHash ? `${beforeHash}#${nextHash}` : beforeHash;
+  }, [activeMiniApp?.launch_url, activeMiniApp?.init_data, serverUrl, authToken]);
 
   const effectiveSrc = useMemo(() => {
     if (reloadNonce === 0) return baseLaunchUrl;

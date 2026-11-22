@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webDistDir = path.join(rootDir, 'apps', 'web', 'dist');
 const basePath = process.env.VITE_BASE_PATH || '/gpui-telegram-web/';
+const defaultServerUrl = process.env.VITE_DEFAULT_SERVER_URL || 'https://web.ombhrum.com';
 
 function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, {
@@ -32,10 +33,16 @@ const gitEmail = execFileSync('git', ['config', 'user.email'], {
   encoding: 'utf8',
 }).trim();
 
-console.log(`[deploy:pages] Building @gpui-telegram/protocol & @gpui-telegram/web with VITE_BASE_PATH=${basePath}...`);
+console.log(
+  `[deploy:pages] Building @gpui-telegram/protocol & @gpui-telegram/web with VITE_BASE_PATH=${basePath}, VITE_DEFAULT_SERVER_URL=${defaultServerUrl}...`,
+);
 run('npm', ['run', 'build', '--workspace=@gpui-telegram/protocol']);
 run('npm', ['run', 'build', '--workspace=@gpui-telegram/web'], {
-  env: { ...process.env, VITE_BASE_PATH: basePath },
+  env: {
+    ...process.env,
+    VITE_BASE_PATH: basePath,
+    VITE_DEFAULT_SERVER_URL: defaultServerUrl,
+  },
 });
 
 const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpui-tg-pages-'));

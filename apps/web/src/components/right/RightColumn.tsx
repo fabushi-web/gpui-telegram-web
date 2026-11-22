@@ -76,7 +76,7 @@ const SLOW_MODE_PRESETS: Array<{ label: string; seconds: number }> = [
 ];
 
 function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '1.2 KB';
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
@@ -148,55 +148,6 @@ function extractUrlsFromMessage(msg: MessageItem): string[] {
   return Array.from(urls);
 }
 
-function buildFallbackStatistics(chatId: number, title: string, memberCount: number, msgCount: number): ChannelStatisticsDto {
-  const now = Date.now();
-  const baseMembers = Math.max(1, memberCount || 12);
-  const baseMsgs = Math.max(1, msgCount || 4);
-  const daily_series = Array.from({ length: 7 }, (_, idx) => {
-    const dayOffset = 6 - idx;
-    const ts = now - dayOffset * 86_400_000;
-    const d = new Date(ts);
-    const label = `${d.getMonth() + 1}/${d.getDate()}`;
-    return {
-      day: label,
-      date: label,
-      timestamp_ms: ts,
-      messages: Math.max(1, Math.round(baseMsgs * (0.5 + idx * 0.14))),
-      views: Math.max(4, Math.round(baseMsgs * 9 + idx * 14)),
-      members: Math.max(1, baseMembers + idx * 2),
-      reactions: Math.max(1, idx * 3 + 2),
-      active_senders: Math.max(1, Math.min(baseMembers, 2 + (idx % 4))),
-    };
-  });
-
-  return {
-    chat_id: chatId,
-    title,
-    member_count: baseMembers,
-    total_messages: baseMsgs,
-    messages_last_7d: baseMsgs,
-    views_per_post: Math.max(12, baseMsgs * 11),
-    shares_per_post: Math.max(2, Math.round(baseMsgs * 1.5)),
-    enabled_notifications_pct: 78.4,
-    boosts_count: 6,
-    total_reactions: Math.max(5, baseMsgs * 3),
-    active_posters_7d: Math.max(1, Math.min(baseMembers, 4)),
-    growth_rate_pct: 14.8,
-    daily_series,
-    daily_growth: daily_series.map((pt) => ({
-      date: pt.day,
-      members: pt.members,
-      views: pt.views,
-    })),
-    top_emojis: [
-      ['👍', 18],
-      ['🔥', 12],
-      ['🎉', 9],
-      ['🚀', 7],
-    ],
-  };
-}
-
 export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const language = useSettingsStore((s) => s.language);
   const isRightOpen = useUiStore((s) => s.isRightOpen);
@@ -251,10 +202,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const [secretFingerprint, setSecretFingerprint] = useState<{
     emojis: [string, string, string, string];
     hex: string;
-  }>({
-    emojis: ['🔐', '🐬', '🚀', '💎'],
-    hex: 'A1B2:C3D4:E5F6:7890:1234:5678:9ABC:DEF0',
-  });
+  } | null>(null);
 
   const [showAddMemberPicker, setShowAddMemberPicker] = useState(false);
   const [inviteJoinInput, setInviteJoinInput] = useState('');
@@ -329,16 +277,11 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   useEffect(() => {
     if (!isRightOpen || !chat?.isSecret) return;
     let cancelled = false;
-    const seedEmojis: [string, string, string, string] = [
-      chat.emojiFingerprint?.[0] ?? '🔐',
-      chat.emojiFingerprint?.[1] ?? '🐬',
-      chat.emojiFingerprint?.[2] ?? '🚀',
-      chat.emojiFingerprint?.[3] ?? '💎',
-    ];
-    setSecretFingerprint((prev) => ({ ...prev, emojis: seedEmojis }));
+    setSecretFingerprint(null);
 
+    if (!currentUser?.userId) return;
     void ensureSecretChatKeyMaterial({
-      localUserId: currentUser?.userId ?? 1001,
+      localUserId: currentUser.userId,
       chatId: chat.chatId,
       peerUserId: effectivePeerUserId ?? chat.chatId,
     })
@@ -355,7 +298,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
     return () => {
       cancelled = true;
     };
-  }, [isRightOpen, chat?.chatId, chat?.isSecret, chat?.emojiFingerprint, currentUser?.userId, effectivePeerUserId]);
+  }, [isRightOpen, chat?.chatId, chat?.isSecret, currentUser?.userId, effectivePeerUserId]);
 
   // Strictly scoped messages ONLY for activeChatId — zero cross-chat leakage!
   const scopedMessages = useMemo(() => {
@@ -601,16 +544,8 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
 
   const effectiveStats = useMemo<ChannelStatisticsDto | null>(() => {
     if (!chat) return null;
-    return (
-      statsByChat[chat.chatId] ??
-      buildFallbackStatistics(
-        chat.chatId,
-        chat.title,
-        chat.memberCount || memberList.length,
-        scopedMessages.length,
-      )
-    );
-  }, [chat, statsByChat, memberList.length, scopedMessages.length]);
+    return statsByChat[chat.chatId] ?? null;
+  }, [chat, statsByChat]);
 
   if (!isRightOpen) {
     return null;
@@ -712,15 +647,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   };
 
   const renderStatisticsCharts = (stats: ChannelStatisticsDto) => {
-    const series =
-      stats.daily_series && stats.daily_series.length >= 2
-        ? stats.daily_series
-        : buildFallbackStatistics(
-            stats.chat_id,
-            stats.title,
-            stats.member_count,
-            stats.total_messages,
-          ).daily_series;
+    const series = stats.daily_series ?? [];
 
     const svgW = 316;
     const svgH = 148;
@@ -742,7 +669,10 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
       })
       .join(' ');
 
-    const areaPoints = `${padL},${padT + plotH} ${memberPoints} ${padL + plotW},${padT + plotH}`;
+    const areaPoints =
+      series.length >= 2
+        ? `${padL},${padT + plotH} ${memberPoints} ${padL + plotW},${padT + plotH}`
+        : '';
 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '12px' }}>
@@ -1200,14 +1130,18 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   }}
                 >
                   <span style={{ fontSize: '20px', letterSpacing: '4px' }}>
-                    {secretFingerprint.emojis.join(' ')}
+                    {secretFingerprint ? secretFingerprint.emojis.join(' ') : '…'}
                   </span>
                   <code style={{ fontSize: '11px', color: 'var(--tg-text-secondary)' }}>
-                    {secretFingerprint.hex.slice(0, 19)}
+                    {secretFingerprint
+                      ? secretFingerprint.hex.slice(0, 19)
+                      : isZh
+                        ? '正在计算密钥指纹…'
+                        : 'Computing…'}
                   </code>
                 </div>
 
-                {showFingerprintHex && (
+                {showFingerprintHex && secretFingerprint && (
                   <div
                     style={{
                       fontFamily: 'var(--tg-font-mono)',
@@ -1998,7 +1932,22 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
             )}
 
             {/* 6. Channel & Group Statistics (#right-tab-stats) */}
-            {effectiveTab === 'statistics' && effectiveStats && renderStatisticsCharts(effectiveStats)}
+            {effectiveTab === 'statistics' &&
+              (effectiveStats ? (
+                renderStatisticsCharts(effectiveStats)
+              ) : (
+                <div
+                  data-testid="empty-channel-stats"
+                  style={{
+                    padding: '28px 16px',
+                    textAlign: 'center',
+                    color: 'var(--tg-text-secondary)',
+                    fontSize: '13px',
+                  }}
+                >
+                  {isZh ? '暂无会话统计数据或正在加载…' : 'Loading or no statistics available for this chat yet.'}
+                </div>
+              ))}
           </div>
         </>
       )}

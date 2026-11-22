@@ -39,12 +39,31 @@ import {
 } from '../utils/http.js';
 import type { IncomingMessage } from 'node:http';
 
-export const CHROMIUM_BINARY_PATH = '/usr/lib/chromium/chromium';
+const CHROMIUM_CANDIDATE_PATHS = [
+  process.env.CHROMIUM_PATH,
+  '/usr/lib/chromium/chromium',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+].filter((p): p is string => Boolean(p && p.trim()));
+
+export function resolveChromiumBinaryPath(): string | null {
+  for (const candidate of CHROMIUM_CANDIDATE_PATHS) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export const CHROMIUM_BINARY_PATH =
+  resolveChromiumBinaryPath() ?? '/usr/lib/chromium/chromium';
 
 export function isChromiumBinaryAvailable(): boolean {
   return (
     process.env.BROWSER_HEADLESS_MODE !== 'fallback' &&
-    fs.existsSync(CHROMIUM_BINARY_PATH)
+    resolveChromiumBinaryPath() !== null
   );
 }
 

@@ -49,7 +49,9 @@ import {
   type HttpRouter,
   type RequestContext,
 } from '../utils/http.js';
+import type { ServerConfig } from '../config.js';
 import type { RealtimeGatewayHub } from '../ws/hub.js';
+import { runConfiguredLlmCompletion } from './magpie.js';
 
 export type BotMessageInterceptor = (
   chatId: number,
@@ -62,6 +64,7 @@ export function registerMessageAndSearchRoutes(
   db: DatabaseSync,
   hub: RealtimeGatewayHub,
   onBotMessage: BotMessageInterceptor,
+  config?: ServerConfig,
 ): void {
   // 1. Sync State & Difference Endpoints
   router.get('/api/v1/sync/state', (ctx) => {
@@ -312,21 +315,28 @@ export function registerMessageAndSearchRoutes(
     sendJson(ctx.res, 200, { ok: true, pts: res.pts, tombstone: res.tombstone });
   });
 
-  router.post('/api/v1/chats/:chatId/messages/delete-batch', async (ctx) => {
+  const handleDeleteBatch = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
-    const chatId = Number(ctx.params.chatId);
+    const body = await readJsonBody<{
+      chat_id?: number;
+      message_ids?: number[];
+      for_everyone?: boolean;
+      revoke?: boolean;
+    }>(ctx.req);
+    const chatId = Number(ctx.params.chatId ?? body.chat_id);
     ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ message_ids?: number[]; for_everyone?: boolean }>(ctx.req);
     const res = deleteMessagesAtomic(
       db,
       hub,
       chatId,
       auth.userId,
       body.message_ids ?? [],
-      Boolean(body.for_everyone),
+      Boolean(body.for_everyone ?? body.revoke),
     );
     sendJson(ctx.res, 200, { ok: true, deleted_ids: res.deletedIds, pts: res.pts });
-  });
+  };
+  router.post('/api/v1/chats/:chatId/messages/delete-batch', handleDeleteBatch);
+  router.post('/api/v1/messages/delete', handleDeleteBatch);
 
   // 6. Forward Messages (`hide_sender`, `comment`)
   const handleForwardMessages = async (ctx: RequestContext): Promise<void> => {
@@ -465,12 +475,12 @@ export function registerMessageAndSearchRoutes(
     sendJson(ctx.res, 200, { pinned_ids: pinnedIds, messages });
   });
 
-  router.post('/api/v1/chats/:chatId/messages/:messageId/pin', async (ctx) => {
+  const handlePinMessage = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    const messageId = Number(ctx.params.messageId);
     ensureChatMembership(db, chatId, auth.userId);
-    await readJsonBody(ctx.req);
+    const body = await readJsonBody<{ message_id?: number }>(ctx.req);
+    const messageId = Number(ctx.params.messageId ?? body.message_id);
 
     const msg = getMessageById(db, chatId, messageId, auth.userId);
     if (!msg) throw new ApiError(404, 'message_not_found', 'Message not found');
@@ -490,9 +500,11 @@ export function registerMessageAndSearchRoutes(
       data: { chat_id: chatId, pinned_ids: pinnedIds },
     });
     sendJson(ctx.res, 200, { ok: true, pinned_ids: pinnedIds, pts: ptsUpdate.pts });
-  });
+  };
+  router.post('/api/v1/chats/:chatId/messages/:messageId/pin', handlePinMessage);
+  router.post('/api/v1/chats/:chatId/pins', handlePinMessage);
 
-  router.delete('/api/v1/chats/:chatId/messages/:messageId/pin', (ctx) => {
+  const handleUnpinMessage = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
@@ -509,6 +521,25 @@ export function registerMessageAndSearchRoutes(
       data: { chat_id: chatId, pinned_ids: pinnedIds },
     });
     sendJson(ctx.res, 200, { ok: true, pinned_ids: pinnedIds, pts: ptsUpdate.pts });
+  };
+  router.delete('/api/v1/chats/:chatId/messages/:messageId/pin', handleUnpinMessage);
+  router.delete('/api/v1/chats/:chatId/pins/:messageId', handleUnpinMessage);
+
+  // Desktop inline keyboard callback query
+  router.post('/api/v1/chats/:chatId/callback', async (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId);
+    ensureChatMembership(db, chatId, auth.userId);
+    const body = await readJsonBody<{ message_id?: number; callback_data?: string; data?: string }>(ctx.req);
+    const cbData = String(body.callback_data ?? body.data ?? '');
+    sendJson(ctx.res, 200, {
+      ok: true,
+      chat_id: chatId,
+      message_id: body.message_id ?? 0,
+      callback_data: cbData,
+      text: cbData ? `Callback "${cbData}" received` : 'OK',
+      show_alert: false,
+    });
   });
 
   // 9. Reactions (`GET` details & `POST` toggle/add/remove)
@@ -905,11 +936,11 @@ export function registerMessageAndSearchRoutes(
     try {
       db.prepare(`
         INSERT OR IGNORE INTO wallet_accounts (user_id, stars_balance, ton_nano, updated_at_ms)
-        VALUES (?, 500, 1000000000, ?)
+        VALUES (?, 0, 0, ?)
       `).run(auth.userId, now);
       db.prepare(`
         INSERT OR IGNORE INTO wallet_accounts (user_id, stars_balance, ton_nano, updated_at_ms)
-        VALUES (?, 500, 1000000000, ?)
+        VALUES (?, 0, 0, ?)
       `).run(payeeUserId, now);
 
       const payerWallet = db
@@ -1233,12 +1264,56 @@ export function registerMessageAndSearchRoutes(
   router.get('/api/v1/search', handleSearch);
   router.get('/api/v1/search/messages', handleSearch);
 
-  // AI Compose Assist & Voice Transcription Convenience Endpoints (F8 / F12)
+  // AI Compose Assist Endpoint (uses real configured Magpie/Gateway LLM in production)
   router.post('/api/v1/messages/ai-compose', async (ctx) => {
-    requireAuth(db, ctx);
+    const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{ text?: string; mode?: string }>(ctx.req);
     const text = (body.text ?? '').trim();
     const mode = body.mode ?? 'improve';
+    if (!text) {
+      throw new ApiError(400, 'empty_text', 'text is required');
+    }
+
+    const modeInstruction: Record<string, string> = {
+      translate_zh: 'Translate the following message accurately into natural Simplified Chinese. Output only the translation.',
+      translate_en: 'Translate the following message accurately into natural English. Output only the translation.',
+      shorter: 'Rewrite the following message to be concise while preserving the original meaning and language. Output only the rewritten message.',
+      formal: 'Rewrite the following message in a polite, professional tone in the same language. Output only the rewritten message.',
+      improve: 'Polish and improve the clarity of the following message in the same language. Output only the improved message.',
+    };
+
+    if (config) {
+      const llmRes = await runConfiguredLlmCompletion(
+        db,
+        config,
+        auth.userId,
+        [
+          { role: 'system', content: modeInstruction[mode] ?? modeInstruction.improve },
+          { role: 'user', content: text },
+        ],
+      );
+      if (llmRes.usedUpstream && llmRes.text) {
+        sendJson(ctx.res, 200, {
+          ok: true,
+          mode,
+          original: text,
+          result: llmRes.text.trim(),
+          provider_id: llmRes.providerId,
+          model: llmRes.model,
+        });
+        return;
+      }
+      if (!config.seedDemoData) {
+        throw new ApiError(
+          503,
+          'ai_provider_unconfigured',
+          llmRes.error
+            ? `AI 写作助手调用模型失败：${llmRes.error}`
+            : '请先在 Magpie LLM 网关配置并启用可用的模型提供商后再使用 AI 写作助手。',
+        );
+      }
+    }
+
     let result = text;
     if (mode === 'translate_zh') {
       result = `[中文翻译] ${text}`;

@@ -7,6 +7,7 @@ import type {
   TwoFactorStatusDto,
   UserPrivacySettingsDto,
 } from '@gpui-telegram/protocol';
+import type { ServerConfig } from '../config.js';
 import { buildComputerViewportSvg, DEFAULT_PRIVACY_SETTINGS } from '../db/seed.js';
 import { getChatDetailDto, getUserProfileDto, mapUserRowToDto } from '../db/queries.js';
 import { escapeSqlLikePattern } from '../utils/cjkSearch.js';
@@ -31,8 +32,9 @@ import type { RealtimeGatewayHub } from '../ws/hub.js';
 function issueSessionForUser(
   db: DatabaseSync,
   userId: number,
-  deviceName = 'Telegram Web (Linux Chrome)',
+  deviceName = 'Telegram Web (Browser)',
   ipAddress = '127.0.0.1',
+  seedDemoResources = false,
 ): AuthResponse {
   const userDto = getUserProfileDto(db, userId);
   if (!userDto) {
@@ -50,8 +52,8 @@ function issueSessionForUser(
     ) VALUES (?, ?, ?, ?, 'web', ?, ?, ?, ?, 0)
   `).run(sessionId, userId, tokenHash, deviceName, ipAddress, now, now, expiresAtMs);
 
-  // Ensure user has a Saved Messages self-chat & wallet account
-  ensureUserBootstrapResources(db, userId);
+  // Ensure user has Saved Messages self-chat & clean wallet account (zero balance in production!)
+  ensureUserBootstrapResources(db, userId, { seedDemoResources });
 
   return {
     user_id: userId,
@@ -65,7 +67,11 @@ function issueSessionForUser(
   };
 }
 
-export function ensureUserBootstrapResources(db: DatabaseSync, userId: number): number {
+export function ensureUserBootstrapResources(
+  db: DatabaseSync,
+  userId: number,
+  options: { seedDemoResources?: boolean } = {},
+): number {
   const now = Date.now();
   const savedRow = db
     .prepare(`SELECT chat_id FROM chats WHERE kind = 'saved' AND creator_id = ? LIMIT 1`)
@@ -93,39 +99,43 @@ export function ensureUserBootstrapResources(db: DatabaseSync, userId: number): 
     `).run(userId, savedChatId);
   }
 
+  const initialStars = options.seedDemoResources ? 500 : 0;
+  const initialTonNano = options.seedDemoResources ? 1000000000 : 0;
   db.prepare(`
     INSERT OR IGNORE INTO wallet_accounts (user_id, stars_balance, ton_nano, updated_at_ms)
-    VALUES (?, 500, 1000000000, ?)
-  `).run(userId, now);
+    VALUES (?, ?, ?, ?)
+  `).run(userId, initialStars, initialTonNano, now);
 
   db.prepare(`
     INSERT OR IGNORE INTO account_privacy (user_id, settings_json)
     VALUES (?, ?)
   `).run(userId, JSON.stringify(DEFAULT_PRIVACY_SETTINGS));
 
-  const sandboxNode: ComputerNodeDto = {
-    node_id: 'sandbox:default',
-    display_name: 'Cloud Sandbox (Ubuntu 24.04)',
-    kind: 'cloud_sandbox',
-    tier_badge: '免费',
-    host: '100.64.0.1',
-    os_name: 'Linux 6.8 x86_64',
-    resolution: '1280x720',
-    online: true,
-    run_policy: 'allow_read_only',
-    has_saved_credential: false,
-    lease_state: 'idle',
-    lease_generation: 1,
-    frame_svg_data_url: buildComputerViewportSvg(
-      'sandbox:default — Cloud Workbench',
-      'Ready · Policy: allow_read_only · Generation #1',
-    ),
-    updated_at_ms: now,
-  };
-  db.prepare(`
-    INSERT OR IGNORE INTO computer_nodes (node_id, user_id, node_json, encrypted_secret, secret_nonce, updated_at_ms)
-    VALUES ('sandbox:default', ?, ?, NULL, NULL, ?)
-  `).run(userId, JSON.stringify(sandboxNode), now);
+  if (options.seedDemoResources) {
+    const sandboxNode: ComputerNodeDto = {
+      node_id: 'sandbox:default',
+      display_name: 'Cloud Sandbox (Ubuntu 24.04)',
+      kind: 'cloud_sandbox',
+      tier_badge: '免费',
+      host: '100.64.0.1',
+      os_name: 'Linux 6.8 x86_64',
+      resolution: '1280x720',
+      online: true,
+      run_policy: 'allow_read_only',
+      has_saved_credential: false,
+      lease_state: 'idle',
+      lease_generation: 1,
+      frame_svg_data_url: buildComputerViewportSvg(
+        'sandbox:default — Cloud Workbench',
+        'Ready · Policy: allow_read_only · Generation #1',
+      ),
+      updated_at_ms: now,
+    };
+    db.prepare(`
+      INSERT OR IGNORE INTO computer_nodes (node_id, user_id, node_json, encrypted_secret, secret_nonce, updated_at_ms)
+      VALUES ('sandbox:default', ?, ?, NULL, NULL, ?)
+    `).run(userId, JSON.stringify(sandboxNode), now);
+  }
 
   return savedChatId;
 }
@@ -162,14 +172,30 @@ export function registerAuthAndUserRoutes(
   router: HttpRouter,
   db: DatabaseSync,
   hub: RealtimeGatewayHub,
+  config: ServerConfig,
 ): void {
-  // 1. 1-Click Demo / Sandbox Login
+  const seedDemo = config.seedDemoData;
+
+  // 1. 1-Click Demo / Sandbox Login (strictly disabled in production unless ALLOW_DEMO_AUTH=1 / ENABLE_TEST_RESET=1)
   const handleDemoLogin = async (ctx: RequestContext): Promise<void> => {
+    if (!config.allowDemoAuth) {
+      throw new ApiError(
+        403,
+        'demo_auth_disabled',
+        'Demo/sandbox quick login is disabled in production. Please sign in with your account.',
+      );
+    }
     const body = await readJsonBody<{ slot?: number; user_id?: number; device_name?: string }>(ctx.req);
     const slotMap = [1001, 1002, 1003, 1004];
     const targetUserId =
       body.user_id ?? (body.slot !== undefined ? (slotMap[body.slot % slotMap.length] ?? 1001) : 1001);
-    const auth = issueSessionForUser(db, Number(targetUserId), body.device_name ?? 'Demo Web Client');
+    const auth = issueSessionForUser(
+      db,
+      Number(targetUserId),
+      body.device_name ?? 'Demo Web Client',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
+    );
     sendJson(ctx.res, 200, auth);
   };
   router.post('/api/v1/auth/demo', handleDemoLogin);
@@ -203,10 +229,31 @@ export function registerAuthAndUserRoutes(
     }
 
     const challengeId = `pch_${crypto.randomBytes(10).toString('hex')}`;
-    const code = '12345';
-    const cooldownMs = body.cooldown_ms !== undefined ? Math.max(0, Number(body.cooldown_ms)) : 3000;
+    const code = config.exposeDevOtpCode
+      ? '12345'
+      : String(crypto.randomInt(100000, 1000000));
+    const cooldownMs = body.cooldown_ms !== undefined ? Math.max(0, Number(body.cooldown_ms)) : (config.exposeDevOtpCode ? 3000 : 60_000);
     const resendAfterMs = cooldownMs > 0 ? now + cooldownMs : now;
-    const expiresAtMs = now + 120_000;
+    const expiresAtMs = now + 300_000;
+
+    if (!config.exposeDevOtpCode) {
+      if (!config.smsWebhookUrl) {
+        throw new ApiError(
+          503,
+          'sms_gateway_not_configured',
+          'SMS verification provider is not configured on this server. Please use Password, Email, or Alipay login.',
+        );
+      }
+      const smsRes = await fetch(config.smsWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, code, expires_in_secs: 300 }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!smsRes.ok) {
+        throw new ApiError(502, 'sms_delivery_failed', `SMS gateway returned HTTP ${smsRes.status}`);
+      }
+    }
 
     db.prepare(`
       INSERT INTO otp_challenges (
@@ -214,17 +261,20 @@ export function registerAuthAndUserRoutes(
       ) VALUES (?, 'phone', ?, ?, 0, ?, ?, ?)
     `).run(challengeId, phone, code, resendAfterMs, expiresAtMs, now);
 
-    sendJson(ctx.res, 200, {
+    const payload: Record<string, unknown> = {
       ok: true,
       sent: true,
       phone_code_hash: challengeId,
-      timeout_secs: 120,
-      code_length: 5,
+      timeout_secs: 300,
+      code_length: code.length,
       expires_at_ms: expiresAtMs,
       resend_after_ms: resendAfterMs,
-      dev_code: code,
-      debug_code: code,
-    });
+    };
+    if (config.exposeDevOtpCode) {
+      payload.dev_code = code;
+      payload.debug_code = code;
+    }
+    sendJson(ctx.res, 200, payload);
   };
   router.post('/api/v1/auth/phone/send-code', handlePhoneSendCode);
   router.post('/api/v1/auth/send-code', handlePhoneSendCode);
@@ -339,7 +389,13 @@ export function registerAuthAndUserRoutes(
       }
     }
 
-    const auth = issueSessionForUser(db, userId, body.device_name ?? 'Telegram Web Phone');
+    const auth = issueSessionForUser(
+      db,
+      userId,
+      body.device_name ?? 'Telegram Web Phone',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
+    );
     sendJson(ctx.res, 200, auth);
   };
   router.post('/api/v1/auth/phone/verify', makePhoneVerifyHandler(false));
@@ -470,6 +526,8 @@ export function registerAuthAndUserRoutes(
       db,
       Number(ch.user_id),
       body.device_name ?? ch.device_name ?? 'Web Client',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      config.seedDemoData,
     );
     sendJson(ctx.res, 200, auth);
   });
@@ -523,6 +581,13 @@ export function registerAuthAndUserRoutes(
       }
       approverUserId = callerSession.userId;
     } else {
+      if (!config.allowDemoAuth) {
+        throw new ApiError(
+          401,
+          'unauthorized',
+          'Bearer authentication from an already signed-in device is required to approve QR pairing',
+        );
+      }
       if (body.user_id !== undefined && Number(body.user_id) !== 1001) {
         throw new ApiError(
           401,
@@ -544,6 +609,8 @@ export function registerAuthAndUserRoutes(
       db,
       approverUserId,
       String(row.device_name ?? 'Telegram Web QR'),
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
     );
 
     db.prepare(`
@@ -671,7 +738,13 @@ export function registerAuthAndUserRoutes(
       now,
     );
 
-    const auth = issueSessionForUser(db, newUserId, body.device_name ?? 'Web Password Register');
+    const auth = issueSessionForUser(
+      db,
+      newUserId,
+      body.device_name ?? 'Web Password Register',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
+    );
     sendJson(ctx.res, 201, auth);
   });
 
@@ -720,11 +793,17 @@ export function registerAuthAndUserRoutes(
       }
     }
 
-    const auth = issueSessionForUser(db, userId, body.device_name ?? 'Web Password Login');
+    const auth = issueSessionForUser(
+      db,
+      userId,
+      body.device_name ?? 'Web Password Login',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
+    );
     sendJson(ctx.res, 200, auth);
   });
 
-  // 7. Email OTP Flow
+  // 7. Email OTP Flow (aligned with desktop `/api/v1/auth/email/send-code` & `/email/register`)
   router.post('/api/v1/auth/email/send-code', async (ctx) => {
     const body = await readJsonBody<{ email?: string }>(ctx.req);
     const email = (body.email ?? '').trim().toLowerCase();
@@ -733,19 +812,44 @@ export function registerAuthAndUserRoutes(
     }
     const now = Date.now();
     const challengeId = `ech_${crypto.randomBytes(10).toString('hex')}`;
-    const code = '123456';
+    const code = config.exposeDevOtpCode
+      ? '123456'
+      : String(crypto.randomInt(100000, 1000000));
+
+    if (!config.exposeDevOtpCode) {
+      if (!config.mailWebhookUrl) {
+        throw new ApiError(
+          503,
+          'email_gateway_not_configured',
+          'Email OTP delivery is not configured on this server. Please configure AUTH_SYSTEM_MAIL_URL or connect UPSTREAM_SERVER_URL.',
+        );
+      }
+      const mailRes = await fetch(config.mailWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code, expires_in_secs: 300 }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!mailRes.ok) {
+        throw new ApiError(502, 'email_delivery_failed', `Mail gateway returned HTTP ${mailRes.status}`);
+      }
+    }
+
     db.prepare(`
       INSERT INTO otp_challenges (
         challenge_id, channel, target, code, attempts, resend_after_ms, expires_at_ms, created_at_ms
       ) VALUES (?, 'email', ?, ?, 0, ?, ?, ?)
-    `).run(challengeId, email, code, now, now + 300_000, now);
+    `).run(challengeId, email, code, now + 60_000, now + 300_000, now);
 
-    sendJson(ctx.res, 200, {
+    const resp: Record<string, unknown> = {
       ok: true,
       email_code_hash: challengeId,
       timeout_secs: 300,
-      dev_code: code,
-    });
+    };
+    if (config.exposeDevOtpCode) {
+      resp.dev_code = code;
+    }
+    sendJson(ctx.res, 200, resp);
   });
 
   const handleEmailVerify = async (ctx: RequestContext): Promise<void> => {
@@ -753,7 +857,10 @@ export function registerAuthAndUserRoutes(
       email?: string;
       code?: string;
       email_code_hash?: string;
+      username?: string;
+      password?: string;
       first_name?: string;
+      last_name?: string;
       device_name?: string;
     }>(ctx.req);
     const email = (body.email ?? '').trim().toLowerCase();
@@ -764,9 +871,16 @@ export function registerAuthAndUserRoutes(
       body.email_code_hash
         ? db.prepare(`SELECT * FROM otp_challenges WHERE challenge_id = ? AND target = ?`).get(body.email_code_hash, email)
         : db.prepare(`SELECT * FROM otp_challenges WHERE channel = 'email' AND target = ? ORDER BY created_at_ms DESC LIMIT 1`).get(email)
-    ) as { challenge_id: string; code: string; expires_at_ms: number } | undefined;
+    ) as { challenge_id: string; code: string; attempts: number; expires_at_ms: number } | undefined;
 
-    if (!ch || ch.expires_at_ms < now || ch.code !== code) {
+    if (!ch || ch.expires_at_ms < now) {
+      throw new ApiError(401, 'invalid_email_code', 'Invalid or expired email verification code');
+    }
+    if (Number(ch.attempts ?? 0) >= 5) {
+      throw new ApiError(429, 'too_many_attempts', 'Too many failed verification attempts');
+    }
+    if (ch.code !== code) {
+      db.prepare(`UPDATE otp_challenges SET attempts = attempts + 1 WHERE challenge_id = ?`).run(ch.challenge_id);
       throw new ApiError(401, 'invalid_email_code', 'Invalid or expired email verification code');
     }
     db.prepare(`DELETE FROM otp_challenges WHERE challenge_id = ?`).run(ch.challenge_id);
@@ -777,41 +891,124 @@ export function registerAuthAndUserRoutes(
     if (!userRow) {
       const newUserId = getNextUserId(db);
       const localPart = email.split('@')[0]?.replace(/[^A-Za-z0-9_]/g, '_') || `user_${newUserId}`;
+      const desiredUsername = body.username?.trim().replace(/^@/, '') || `${localPart}_${newUserId}`;
+      if (!/^[A-Za-z0-9_]{3,32}$/.test(desiredUsername)) {
+        throw new ApiError(400, 'invalid_username', 'Username must be 3–32 alphanumeric/underscore characters');
+      }
+      const dupU = db
+        .prepare(`SELECT user_id FROM users WHERE LOWER(username) = LOWER(?)`)
+        .get(desiredUsername);
+      if (dupU) {
+        throw new ApiError(409, 'username_taken', `Username @${desiredUsername} is already taken`);
+      }
+
+      let saltHex: string | null = null;
+      let hashHex: string | null = null;
+      if (body.password && body.password.length >= 6) {
+        const hashed = hashSecretScrypt(body.password);
+        saltHex = hashed.saltHex;
+        hashHex = hashed.hashHex;
+      }
+
       db.prepare(`
         INSERT INTO users (
-          user_id, username, first_name, email, is_bot, is_verified, is_premium, status, last_seen_ms, created_at_ms
-        ) VALUES (?, ?, ?, ?, 0, 0, 0, 'online', ?, ?)
-      `).run(newUserId, `${localPart}_${newUserId}`, body.first_name?.trim() || localPart, email, now, now);
+          user_id, username, first_name, last_name, email, password_salt, password_hash,
+          is_bot, is_verified, is_premium, status, last_seen_ms, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'online', ?, ?)
+      `).run(
+        newUserId,
+        desiredUsername,
+        body.first_name?.trim() || localPart,
+        body.last_name?.trim() ?? null,
+        email,
+        saltHex,
+        hashHex,
+        now,
+        now,
+      );
       userRow = { user_id: newUserId };
     }
 
-    const auth = issueSessionForUser(db, Number(userRow.user_id), body.device_name ?? 'Web Email OTP');
+    const auth = issueSessionForUser(
+      db,
+      Number(userRow.user_id),
+      body.device_name ?? 'Web Email OTP',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
+    );
     sendJson(ctx.res, 200, auth);
   };
   router.post('/api/v1/auth/email/verify', handleEmailVerify);
   router.post('/api/v1/auth/email/register', handleEmailVerify);
 
-  // 8. Alipay QR Flow
+  // 8. Real Alipay OAuth QR Flow (bridged to official `https://api.ombhrum.com` gateway matching desktop `server.rs:2031-2260`)
   const handleAlipayStart = async (ctx: RequestContext): Promise<void> => {
     await readJsonBody(ctx.req);
-    const sessionId = `ali_${crypto.randomBytes(10).toString('hex')}`;
-    const qrUrl = `alipays://platformapi/startapp?appId=20000067&session=${sessionId}`;
-    const svg = generateQrCodeSvg(qrUrl);
+    const sessionId = `ali_${crypto.randomBytes(12).toString('hex')}`;
     const now = Date.now();
-    const expiresAtMs = now + 180_000;
+    const expiresAtMs = now + 600_000;
+    let upstreamAttemptId: string | null = null;
+    let qrUrl: string;
+
+    if (!config.allowDemoAuth) {
+      // Production: call official ombhrum.com Alipay OAuth start endpoint just like desktop gpui_telegram_server
+      const startEndpoint = `${config.oauthGatewayUrl}/api/auth/oauth/start`;
+      try {
+        const upRes = await fetch(startEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            provider: 'alipay',
+            platform: 'web',
+            deviceId: 'gpui-telegram-web',
+          }),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!upRes.ok) {
+          throw new Error(`OAuth gateway returned HTTP ${upRes.status}`);
+        }
+        const val = (await upRes.json()) as {
+          attemptId?: string;
+          authorizationUrl?: string;
+        };
+        if (!val.attemptId || !val.authorizationUrl) {
+          throw new Error('OAuth gateway returned incomplete Alipay authorization payload');
+        }
+        upstreamAttemptId = val.attemptId;
+        const parsedAuth = new URL(val.authorizationUrl);
+        const stateParam = parsedAuth.searchParams.get('state');
+        qrUrl = stateParam
+          ? `https://openauth.alipay.com/oauth2/publicAppAuthorize.htm?app_id=2021005193647715&scope=auth_user&redirect_uri=${encodeURIComponent(`${config.oauthGatewayUrl}/api/auth/alipay/callback`)}&state=${encodeURIComponent(stateParam)}`
+          : val.authorizationUrl;
+      } catch (err) {
+        throw new ApiError(
+          502,
+          'alipay_oauth_unavailable',
+          `Failed to initiate Alipay OAuth via ${config.oauthGatewayUrl}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else {
+      qrUrl = `https://openauth.alipay.com/oauth2/publicAppAuthorize.htm?app_id=2021005193647715&scope=auth_user&redirect_uri=${encodeURIComponent(`${config.oauthGatewayUrl}/api/auth/alipay/callback`)}&state=${encodeURIComponent(sessionId)}`;
+    }
+
+    const svg = generateQrCodeSvg(qrUrl);
 
     db.prepare(`
       INSERT INTO alipay_sessions (
-        session_id, qr_url, svg, status, expires_at_ms, created_at_ms
-      ) VALUES (?, ?, ?, 'pending', ?, ?)
-    `).run(sessionId, qrUrl, svg, expiresAtMs, now);
+        session_id, qr_url, svg, status, expires_at_ms, created_at_ms, upstream_attempt_id
+      ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
+    `).run(sessionId, qrUrl, svg, expiresAtMs, now, upstreamAttemptId);
 
     sendJson(ctx.res, 200, {
       session_id: sessionId,
+      attempt_id: sessionId,
+      auth_url: qrUrl,
       qr_url: qrUrl,
+      qr_payload: qrUrl,
       svg,
       status: 'pending',
       expires_at_ms: expiresAtMs,
+      poll_after_ms: 1000,
     });
   };
   router.post('/api/v1/auth/alipay/start', handleAlipayStart);
@@ -839,6 +1036,13 @@ export function registerAuthAndUserRoutes(
       }
       targetUserId = callerSession.userId;
     } else {
+      if (!config.allowDemoAuth) {
+        throw new ApiError(
+          403,
+          'alipay_simulated_confirm_disabled',
+          'Simulated Alipay confirmation is disabled in production. Please scan the QR code with the Alipay app.',
+        );
+      }
       if (body.user_id !== undefined && Number(body.user_id) !== 1001) {
         throw new ApiError(
           401,
@@ -852,7 +1056,13 @@ export function registerAuthAndUserRoutes(
       targetUserId = 1001;
     }
 
-    const auth = issueSessionForUser(db, targetUserId, 'Alipay Web Auth');
+    const auth = issueSessionForUser(
+      db,
+      targetUserId,
+      'Alipay Web Auth',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
+    );
     db.prepare(`
       UPDATE alipay_sessions
       SET status = 'confirmed', approved_user_id = ?, issued_token = ?, issued_session_id = ?
@@ -864,7 +1074,7 @@ export function registerAuthAndUserRoutes(
   router.post('/api/v1/auth/alipay/confirm', handleAlipayConfirm);
   router.post('/api/v1/auth/alipay/:sessionId/confirm', handleAlipayConfirm);
 
-  const handleAlipayPoll = (ctx: RequestContext): void => {
+  const handleAlipayPoll = async (ctx: RequestContext): Promise<void> => {
     const sessionId = ctx.params.sessionId ?? ctx.query.get('session_id') ?? '';
     const row = db
       .prepare(`SELECT * FROM alipay_sessions WHERE session_id = ?`)
@@ -872,18 +1082,112 @@ export function registerAuthAndUserRoutes(
     if (!row) {
       throw new ApiError(404, 'alipay_session_not_found', 'Alipay session not found');
     }
-    if (row.status === 'confirmed' && row.approved_user_id && row.issued_token) {
+
+    const now = Date.now();
+    if (Number(row.expires_at_ms) < now && row.status === 'pending') {
+      db.prepare(`UPDATE alipay_sessions SET status = 'expired' WHERE session_id = ?`).run(sessionId);
+      sendJson(ctx.res, 200, { status: 'expired', session_id: sessionId });
+      return;
+    }
+
+    // If pending and linked to real ombhrum.com upstream attempt, poll upstream OAuth gateway!
+    if (row.status === 'pending' && typeof row.upstream_attempt_id === 'string' && row.upstream_attempt_id) {
+      try {
+        const pollRes = await fetch(
+          `${config.oauthGatewayUrl}/api/auth/oauth/attempts/${encodeURIComponent(row.upstream_attempt_id)}`,
+          { method: 'GET', headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(5000) },
+        );
+        if (pollRes.ok) {
+          const val = (await pollRes.json()) as {
+            status?: string;
+            session?: { user?: Record<string, unknown> };
+            user?: Record<string, unknown>;
+          };
+          if (val.status === 'completed' || val.status === 'complete') {
+            const uObj = val.session?.user ?? val.user ?? {};
+            const alipayUid = String(
+              uObj.alipayUserId ?? uObj.id ?? `alipay_${row.upstream_attempt_id.slice(0, 12)}`,
+            );
+            const nickname = String(
+              uObj.alipayNickname ?? uObj.nickname ?? uObj.username ?? '支付宝用户',
+            ).trim() || '支付宝用户';
+            const cleanUsername = `ali_${alipayUid.replace(/[^A-Za-z0-9_]/g, '').slice(-16) || sessionId.slice(-8)}`;
+
+            let userRow = db
+              .prepare(`SELECT user_id FROM users WHERE LOWER(username) = LOWER(?)`)
+              .get(cleanUsername) as { user_id: number } | undefined;
+            if (!userRow) {
+              const newUserId = getNextUserId(db);
+              db.prepare(`
+                INSERT INTO users (
+                  user_id, username, first_name, is_bot, is_verified, is_premium,
+                  status, last_seen_ms, created_at_ms
+                ) VALUES (?, ?, ?, 0, 0, 0, 'online', ?, ?)
+              `).run(newUserId, cleanUsername, nickname, now, now);
+              userRow = { user_id: newUserId };
+            }
+
+            const auth = issueSessionForUser(
+              db,
+              Number(userRow.user_id),
+              'Alipay OAuth Web',
+              ctx.req.socket.remoteAddress ?? '127.0.0.1',
+              seedDemo,
+            );
+            db.prepare(`
+              UPDATE alipay_sessions
+              SET status = 'confirmed', approved_user_id = ?, issued_token = ?, issued_session_id = ?
+              WHERE session_id = ?
+            `).run(auth.user_id, auth.token, auth.session_id, sessionId);
+
+            sendJson(ctx.res, 200, {
+              status: 'completed',
+              token: auth.token,
+              user_id: auth.user_id,
+              username: auth.username,
+              session_id: auth.session_id,
+              auth,
+              session: auth,
+              user: auth.user,
+            });
+            return;
+          }
+          if (val.status === 'expired' || val.status === 'failed' || val.status === 'cancelled') {
+            db.prepare(`UPDATE alipay_sessions SET status = ? WHERE session_id = ?`).run(val.status, sessionId);
+            sendJson(ctx.res, 200, { status: val.status, session_id: sessionId });
+            return;
+          }
+        }
+      } catch {
+        // Keep pending on transient upstream timeout
+      }
+    }
+
+    if ((row.status === 'confirmed' || row.status === 'completed') && row.approved_user_id && row.issued_token) {
       const user = getUserProfileDto(db, Number(row.approved_user_id));
+      const session: AuthResponse = {
+        user_id: Number(row.approved_user_id),
+        username: user?.username ?? `user${row.approved_user_id}`,
+        session_id: String(row.issued_session_id ?? ''),
+        token: String(row.issued_token),
+        first_name: user?.first_name,
+        last_name: user?.last_name,
+        user: user ?? undefined,
+      };
       sendJson(ctx.res, 200, {
         status: 'confirmed',
-        token: row.issued_token,
-        user_id: Number(row.approved_user_id),
+        token: session.token,
+        user_id: session.user_id,
+        username: session.username,
+        session_id: session.session_id,
+        auth: session,
+        session,
         user,
       });
       return;
     }
     sendJson(ctx.res, 200, {
-      status: Number(row.expires_at_ms) < Date.now() ? 'expired' : String(row.status),
+      status: String(row.status),
       session_id: sessionId,
     });
   };
@@ -897,6 +1201,7 @@ export function registerAuthAndUserRoutes(
     const challengeId = `pkc_${crypto.randomBytes(10).toString('hex')}`;
     const challenge = crypto.randomBytes(32).toString('base64url');
     const now = Date.now();
+    const hostHeader = String(ctx.req.headers.host ?? 'localhost').split(':')[0] || 'localhost';
     db.prepare(`
       INSERT INTO passkey_challenges (challenge_id, challenge, username, expires_at_ms)
       VALUES (?, ?, ?, ?)
@@ -905,7 +1210,7 @@ export function registerAuthAndUserRoutes(
     sendJson(ctx.res, 200, {
       challenge_id: challengeId,
       challenge,
-      rp_id: 'localhost',
+      rp_id: hostHeader,
       timeout_ms: 60_000,
     });
   });
@@ -914,10 +1219,13 @@ export function registerAuthAndUserRoutes(
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
       cred_id?: string;
+      credential_id?: string;
       label?: string;
+      device_name?: string;
       public_key_b64?: string;
+      public_key?: string;
     }>(ctx.req);
-    const credId = body.cred_id?.trim() || `cred_${crypto.randomBytes(12).toString('hex')}`;
+    const credId = (body.cred_id ?? body.credential_id)?.trim() || `cred_${crypto.randomBytes(12).toString('hex')}`;
     const existingCred = db
       .prepare(`SELECT user_id FROM account_passkeys WHERE cred_id = ?`)
       .get(credId) as { user_id: number } | undefined;
@@ -925,13 +1233,13 @@ export function registerAuthAndUserRoutes(
       throw new ApiError(409, 'credential_conflict', 'Passkey credential ID already registered');
     }
 
-    const label = body.label?.trim() || 'Platform Passkey';
+    const label = (body.label ?? body.device_name)?.trim() || 'Platform Passkey';
     const now = Date.now();
 
     db.prepare(`
       INSERT OR REPLACE INTO account_passkeys (cred_id, user_id, label, public_key_b64, created_at_ms, last_used_ms)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(credId, auth.userId, label, body.public_key_b64 ?? null, now, now);
+    `).run(credId, auth.userId, label, body.public_key_b64 ?? body.public_key ?? null, now, now);
 
     sendJson(ctx.res, 201, {
       cred_id: credId,
@@ -961,7 +1269,8 @@ export function registerAuthAndUserRoutes(
     db.prepare(`DELETE FROM passkey_challenges WHERE challenge_id = ?`).run(challengeId);
 
     const effectiveCredId =
-      body.credential_id?.trim() || (body.simulate === true ? 'cred_alice_default' : '');
+      body.credential_id?.trim() ||
+      (config.allowDemoAuth && body.simulate === true ? 'cred_alice_default' : '');
     if (!effectiveCredId) {
       throw new ApiError(401, 'invalid_passkey_credential', 'Registered passkey credential_id is required');
     }
@@ -988,7 +1297,13 @@ export function registerAuthAndUserRoutes(
       effectiveCredId,
     );
 
-    const auth = issueSessionForUser(db, targetUserId, body.device_name ?? 'WebAuthn Passkey');
+    const auth = issueSessionForUser(
+      db,
+      targetUserId,
+      body.device_name ?? 'WebAuthn Passkey',
+      ctx.req.socket.remoteAddress ?? '127.0.0.1',
+      seedDemo,
+    );
     sendJson(ctx.res, 200, auth);
   });
 
@@ -1092,7 +1407,7 @@ export function registerAuthAndUserRoutes(
     sendJson(ctx.res, 200, user);
   });
 
-  router.patch('/api/v1/users/me', async (ctx) => {
+  const handleUpdateMe = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
       first_name?: string;
@@ -1142,7 +1457,9 @@ export function registerAuthAndUserRoutes(
 
     const updated = getUserProfileDto(db, auth.userId)!;
     sendJson(ctx.res, 200, updated);
-  });
+  };
+  router.patch('/api/v1/users/me', handleUpdateMe);
+  router.put('/api/v1/users/me', handleUpdateMe);
 
   const handleGetPrivacy = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
@@ -1156,6 +1473,7 @@ export function registerAuthAndUserRoutes(
   };
   router.get('/api/v1/account/privacy', handleGetPrivacy);
   router.get('/api/v1/users/me/privacy', handleGetPrivacy);
+  router.get('/api/v1/users/me/settings', handleGetPrivacy);
 
   const handleUpdatePrivacy = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
@@ -1175,6 +1493,8 @@ export function registerAuthAndUserRoutes(
   };
   router.put('/api/v1/account/privacy', handleUpdatePrivacy);
   router.put('/api/v1/users/me/privacy', handleUpdatePrivacy);
+  router.put('/api/v1/users/me/settings', handleUpdatePrivacy);
+  router.patch('/api/v1/users/me/settings', handleUpdatePrivacy);
 
   router.get('/api/v1/users/search', (ctx) => {
     requireAuth(db, ctx);

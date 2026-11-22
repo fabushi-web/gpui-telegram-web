@@ -6,6 +6,7 @@ import {
   type MagpieRoutingStrategy,
 } from '@gpui-telegram/protocol';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
+import { isDemoUiEnabled, useAuthStore } from '../../store/useAuthStore';
 import { useUiStore } from '../../store/useUiStore';
 
 export interface MagpieGatewayPanelProps {
@@ -13,55 +14,6 @@ export interface MagpieGatewayPanelProps {
   asModal?: boolean;
   onClose?: () => void;
 }
-
-interface CanonicalProviderSpec {
-  provider_id: string;
-  name: string;
-  api_mode: MagpieApiMode;
-  base_url: string;
-  default_model: string;
-  no_key_required: boolean;
-  badge: string;
-}
-
-const CANONICAL_PROVIDERS: CanonicalProviderSpec[] = [
-  {
-    provider_id: 'local_hermes',
-    name: 'Local Magpie Smart · 零订阅内置模型',
-    api_mode: 'local_hermes',
-    base_url: 'local://magpie-smart',
-    default_model: 'hermes-local-v1',
-    no_key_required: true,
-    badge: 'Zero-Subscription · 免密钥',
-  },
-  {
-    provider_id: 'openai',
-    name: 'OpenAI (GPT-4o / Codex)',
-    api_mode: 'chat_completions',
-    base_url: 'https://api.openai.com/v1',
-    default_model: 'gpt-4o',
-    no_key_required: false,
-    badge: 'OpenAI API',
-  },
-  {
-    provider_id: 'anthropic',
-    name: 'Anthropic Claude',
-    api_mode: 'anthropic_messages',
-    base_url: 'https://api.anthropic.com/v1',
-    default_model: 'claude-3-5-sonnet',
-    no_key_required: false,
-    badge: 'Anthropic Messages',
-  },
-  {
-    provider_id: 'gemini',
-    name: 'Google Gemini',
-    api_mode: 'gemini_generate_content',
-    base_url: 'https://generativelanguage.googleapis.com/v1beta',
-    default_model: 'gemini-2.5-pro',
-    no_key_required: false,
-    badge: 'Google AI Studio',
-  },
-];
 
 const ROUTING_STRATEGY_OPTIONS: Array<{
   value: MagpieRoutingStrategy;
@@ -116,20 +68,44 @@ export function MagpieGatewayPanel({
   asModal = false,
   onClose,
 }: MagpieGatewayPanelProps = {}): React.JSX.Element {
+  const adapterMode = useAuthStore((s) => s.adapterMode);
+  const demoAllowed = isDemoUiEnabled(adapterMode);
+
   const magpieConfig = useAiWorkspaceStore((s) => s.magpieConfig);
   const magpieUsage = useAiWorkspaceStore((s) => s.magpieUsage);
   const maskPreview = useAiWorkspaceStore((s) => s.maskPreview);
   const loadMagpie = useAiWorkspaceStore((s) => s.loadMagpie);
   const updateMagpie = useAiWorkspaceStore((s) => s.updateMagpie);
   const previewMask = useAiWorkspaceStore((s) => s.previewMask);
+  const probeMagpieProvider = useAiWorkspaceStore((s) => s.probeMagpieProvider);
+  const scanMagpieSubscriptions = useAiWorkspaceStore((s) => s.scanMagpieSubscriptions);
+  const importMagpieConfig = useAiWorkspaceStore((s) => s.importMagpieConfig);
 
   const pushToast = useUiStore((s) => s.pushToast);
 
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
   const [modelInputs, setModelInputs] = useState<Record<string, string>>({});
+  const [baseUrlInputs, setBaseUrlInputs] = useState<Record<string, string>>({});
   const [savingProviderId, setSavingProviderId] = useState<string | null>(null);
+  const [probingProviderId, setProbingProviderId] = useState<string | null>(null);
+  const [probeResults, setProbeResults] = useState<
+    Record<string, { ok: boolean; latencyMs?: number; detail?: string }>
+  >({});
+
+  // Add Provider from Server Presets (51 desktop presets)
+  const [selectedPresetId, setSelectedPresetId] = useState('openai');
+  const [newProviderKey, setNewProviderKey] = useState('');
+  const [newProviderModel, setNewProviderModel] = useState('');
+  const [newProviderBaseUrl, setNewProviderBaseUrl] = useState('');
+  const [addingProvider, setAddingProvider] = useState(false);
+
+  // Import URI / JSON & Scan Subscriptions
+  const [importRaw, setImportRaw] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [scanningSubs, setScanningSubs] = useState(false);
+
   const [samplePiiText, setSamplePiiText] = useState(
-    'Contact alice@example.com or +1-415-555-2671 with key sk-live-9876543210abcdef',
+    'Contact user@ombhrum.com or +1-415-555-2671 with key sk-live-9876543210abcdef',
   );
   const [localRedactedOutput, setLocalRedactedOutput] = useState<string | null>(null);
   const [testingMask, setTestingMask] = useState(false);
@@ -138,51 +114,36 @@ export function MagpieGatewayPanel({
     void loadMagpie().catch(() => undefined);
   }, [loadMagpie]);
 
+  const serverPresets = useMemo(() => {
+    const raw = magpieConfig?.presets ?? [];
+    return demoAllowed ? raw : raw.filter((p) => p.id !== 'local_hermes');
+  }, [magpieConfig?.presets, demoAllowed]);
+
   const providersList = useMemo<Array<MagpieProviderView & { badge?: string }>>(() => {
-    const existingById = new Map<string, MagpieProviderView>();
-    for (const p of magpieConfig?.providers ?? []) {
-      existingById.set(p.provider_id.toLowerCase(), p);
+    const serverProviders = magpieConfig?.providers ?? [];
+    if (serverProviders.length > 0) {
+      return serverProviders
+        .filter((p) => demoAllowed || p.provider_id !== 'local_hermes' || p.enabled)
+        .map((p) => ({
+          ...p,
+          badge: p.no_key_required ? 'No Key' : p.api_mode,
+        }));
     }
+    return [];
+  }, [magpieConfig?.providers, demoAllowed]);
 
-    const merged: Array<MagpieProviderView & { badge?: string }> = CANONICAL_PROVIDERS.map(
-      (spec) => {
-        const found =
-          existingById.get(spec.provider_id) ||
-          (spec.provider_id === 'local_hermes' ? existingById.get('local_smart') : undefined);
-        if (found) {
-          return { ...found, badge: spec.badge };
-        }
-        return {
-          provider_id: spec.provider_id,
-          preset_id: spec.provider_id,
-          name: spec.name,
-          api_mode: spec.api_mode,
-          base_url: spec.base_url,
-          default_model: spec.default_model,
-          enabled: spec.no_key_required,
-          no_key_required: spec.no_key_required,
-          has_api_key: false,
-          masked_key: null,
-          custom_headers: {},
-          updated_at_ms: 0,
-          badge: spec.badge,
-        };
-      },
-    );
+  const selectedPresetObj = useMemo(
+    () => serverPresets.find((p) => p.id === selectedPresetId) ?? serverPresets[0] ?? null,
+    [serverPresets, selectedPresetId],
+  );
 
-    const canonicalIds = new Set(['local_hermes', 'local_smart', 'openai', 'anthropic', 'gemini']);
-    for (const p of magpieConfig?.providers ?? []) {
-      if (!canonicalIds.has(p.provider_id.toLowerCase())) {
-        merged.push(p);
-      }
-    }
-    return merged;
-  }, [magpieConfig?.providers]);
-
-  const activeProvider = magpieConfig?.activeProvider || 'local_hermes';
-  const activeModel = magpieConfig?.activeModel || 'hermes-local-v1';
+  const activeProvider = magpieConfig?.activeProvider || '';
+  const activeModel = magpieConfig?.activeModel || '';
   const routingStrategy = (magpieConfig?.routingStrategy || 'smart') as MagpieRoutingStrategy;
   const maskingEnabled = magpieConfig?.masking?.enabled ?? true;
+  const hasLocalHermes = (magpieConfig?.providers ?? []).some(
+    (p) => p.provider_id === 'local_hermes' || p.provider_id === 'local_smart',
+  );
   const isZeroSubActive =
     activeProvider === 'local_hermes' || activeProvider === 'local_smart';
 
@@ -194,9 +155,43 @@ export function MagpieGatewayPanel({
         routingStrategy: 'smart',
         allowLocalFallback: true,
       });
-      pushToast('Activated Zero-Subscription Local Smart Preset · 已启用零订阅内置模型', 'success');
+      pushToast('Activated Local Smart Preset · 已启用本地预设', 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const handleAddFromPreset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const preset = selectedPresetObj;
+    const providerId = preset?.id || selectedPresetId.trim();
+    if (!providerId) return;
+    setAddingProvider(true);
+    try {
+      const model = newProviderModel.trim() || preset?.default_model || '';
+      const baseUrl = newProviderBaseUrl.trim() || preset?.base_url || '';
+      await updateMagpie({
+        upsertProvider: {
+          provider_id: providerId,
+          preset_id: providerId,
+          name: preset?.name || providerId,
+          api_mode: (preset?.api_mode || 'chat_completions') as MagpieApiMode,
+          base_url: baseUrl,
+          default_model: model,
+          enabled: true,
+          ...(newProviderKey.trim() ? { api_key: newProviderKey.trim() } : {}),
+        },
+        activeProvider: providerId,
+        activeModel: model,
+      });
+      setNewProviderKey('');
+      setNewProviderModel('');
+      setNewProviderBaseUrl('');
+      pushToast(`已添加并启用模型供应商：${preset?.name || providerId}`, 'success');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setAddingProvider(false);
     }
   };
 
@@ -205,13 +200,14 @@ export function MagpieGatewayPanel({
     try {
       const apiKey = keyInputs[provider.provider_id]?.trim();
       const nextModel = modelInputs[provider.provider_id]?.trim() || provider.default_model;
+      const nextBaseUrl = baseUrlInputs[provider.provider_id]?.trim() || provider.base_url;
       await updateMagpie({
         upsertProvider: {
           provider_id: provider.provider_id,
           preset_id: provider.preset_id || provider.provider_id,
           name: provider.name,
           api_mode: provider.api_mode,
-          base_url: provider.base_url,
+          base_url: nextBaseUrl,
           default_model: nextModel,
           enabled: true,
           ...(apiKey ? { api_key: apiKey } : {}),
@@ -225,6 +221,84 @@ export function MagpieGatewayPanel({
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
       setSavingProviderId(null);
+    }
+  };
+
+  const handleDeleteProvider = async (providerId: string) => {
+    try {
+      await updateMagpie({ deleteProviderId: providerId });
+      pushToast(`已移除模型供应商：${providerId}`, 'info');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const handleProbeProvider = async (providerId: string) => {
+    setProbingProviderId(providerId);
+    try {
+      const res = await probeMagpieProvider(providerId);
+      setProbeResults((prev) => ({
+        ...prev,
+        [providerId]: {
+          ok: res.ok,
+          latencyMs: res.latency_ms,
+          detail:
+            res.error ||
+            (res.ok
+              ? res.models?.length
+                ? `${res.models.length} models`
+                : 'OK'
+              : 'Probe failed'),
+        },
+      }));
+      pushToast(
+        res.ok
+          ? `连通性检测通过：${providerId} (${res.latency_ms ?? 0}ms)`
+          : `连通性检测失败：${res.error || '不可达'}`,
+        res.ok ? 'success' : 'warning',
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setProbeResults((prev) => ({
+        ...prev,
+        [providerId]: { ok: false, detail: msg },
+      }));
+      pushToast(msg, 'error');
+    } finally {
+      setProbingProviderId(null);
+    }
+  };
+
+  const handleScanSubscriptions = async () => {
+    setScanningSubs(true);
+    try {
+      const detected = await scanMagpieSubscriptions();
+      pushToast(
+        detected.length > 0
+          ? `检测到 ${detected.length} 个可用订阅/环境变量凭证`
+          : '未在服务端检测到自动订阅凭证，可手动添加 API Key',
+        'info',
+      );
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setScanningSubs(false);
+    }
+  };
+
+  const handleImportConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = importRaw.trim();
+    if (!raw) return;
+    setImporting(true);
+    try {
+      const snap = await importMagpieConfig({ raw_text: raw });
+      setImportRaw('');
+      pushToast(`已成功导入配置（当前共 ${snap.providers.length} 个模型供应商）`, 'success');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -290,187 +364,339 @@ export function MagpieGatewayPanel({
       {/* Header */}
       <div className="tg-workspace-header">
         <div>
-          <div style={{ fontSize: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ fontSize: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             <span>🧭 Magpie Multi-Provider LLM Gateway · 模型路由与隐私网关</span>
             <span
               style={{
                 fontSize: '11.5px',
                 padding: '2px 8px',
                 borderRadius: '999px',
-                backgroundColor: 'var(--tg-success-soft)',
-                color: 'var(--tg-success)',
+                backgroundColor: activeProvider ? 'var(--tg-success-soft)' : 'var(--tg-warning-soft)',
+                color: activeProvider ? 'var(--tg-success)' : 'var(--tg-warning)',
                 fontWeight: 600,
               }}
             >
-              Active: {activeProvider} ({activeModel})
+              {activeProvider
+                ? `Active: ${activeProvider}${activeModel ? ` (${activeModel})` : ''}`
+                : '未配置默认模型 · Unconfigured'}
             </span>
           </div>
           <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '2px' }}>
-            Zero-Subscription Local Smart Engine · OpenAI / Anthropic / Gemini Failover · Outbound PII Redaction
+            OpenAI / Anthropic / Gemini / DeepSeek / Ollama 多模型路由 · 实时连通检测 · 出站 PII 隐私脱敏
           </div>
         </div>
 
-        {onClose && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button
             type="button"
             className="tg-btn tg-btn--secondary"
-            aria-label="Close Magpie Gateway 关闭模型网关"
-            onClick={onClose}
+            disabled={scanningSubs}
+            onClick={() => void handleScanSubscriptions()}
           >
-            ← Back · 关闭
+            {scanningSubs ? '扫描中…' : '🔍 扫描环境凭证'}
           </button>
-        )}
+          {onClose && (
+            <button
+              type="button"
+              className="tg-btn tg-btn--secondary"
+              aria-label="Close Magpie Gateway 关闭模型网关"
+              onClick={onClose}
+            >
+              ← Back · 关闭
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="tg-workspace-content">
-        {/* 1. Zero-Subscription Local Smart Preset */}
-        <section
-          className="tg-surface-card"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '14px',
-            flexWrap: 'wrap',
-            borderColor: isZeroSubActive ? 'var(--tg-success)' : 'var(--tg-border)',
-          }}
-        >
-          <div>
-            <div style={{ fontSize: '14.5px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span>⚡ Zero-Subscription Local Smart Preset · 零订阅内置智能预设</span>
-              {isZeroSubActive && (
-                <span
-                  style={{
-                    fontSize: '11px',
-                    padding: '2px 8px',
-                    borderRadius: '999px',
-                    backgroundColor: 'var(--tg-success-soft)',
-                    color: 'var(--tg-success)',
-                  }}
-                >
-                  Selected · 当前生效
-                </span>
-              )}
-            </div>
-            <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', marginTop: '4px' }}>
-              Works immediately out-of-the-box with zero external API keys, zero subscription fees, and automatic local fallback.
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className={isZeroSubActive ? 'tg-btn tg-btn--secondary' : 'tg-btn tg-btn--primary'}
-            onClick={() => void handleActivateZeroSubscription()}
-          >
-            {isZeroSubActive
-              ? '✓ Zero-Subscription Local Smart Active · 已启用内置模型'
-              : 'Use Zero-Subscription Local Smart Preset · 一键启用零订阅模型'}
-          </button>
-        </section>
-
-        {/* 2. Multi-Provider Configuration Cards */}
-        <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
-            🔌 Multi-Provider Credentials &amp; Models · 多模型供应商配置 (Local / OpenAI / Anthropic / Google Gemini)
-          </div>
-
-          <div
+        {/* 1. Local Smart Preset (only shown in dev/sandbox mode or if server exposes local_hermes) */}
+        {(demoAllowed || hasLocalHermes) && (
+          <section
+            className="tg-surface-card"
             style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-              gap: '12px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '14px',
+              flexWrap: 'wrap',
+              borderColor: isZeroSubActive ? 'var(--tg-success)' : 'var(--tg-border)',
             }}
           >
-            {providersList.map((prov) => {
-              const isCurrent =
-                activeProvider === prov.provider_id ||
-                (prov.provider_id === 'local_hermes' && activeProvider === 'local_smart');
-              return (
-                <div
-                  key={prov.provider_id}
-                  data-provider-id={prov.provider_id}
-                  style={{
-                    padding: '12px',
-                    borderRadius: '10px',
-                    backgroundColor: 'var(--tg-bg-elevated)',
-                    border: isCurrent
-                      ? '1px solid var(--tg-accent)'
-                      : '1px solid var(--tg-border)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
-                    <div style={{ fontWeight: 600, fontSize: '13.5px' }}>{prov.name}</div>
-                    <span
-                      style={{
-                        fontSize: '11px',
-                        padding: '1px 7px',
-                        borderRadius: '999px',
-                        backgroundColor: isCurrent ? 'var(--tg-accent-soft)' : 'var(--tg-bg-surface)',
-                        color: isCurrent ? 'var(--tg-accent)' : 'var(--tg-text-secondary)',
-                      }}
-                    >
-                      {isCurrent ? 'Active · 当前' : prov.badge || prov.api_mode}
-                    </span>
-                  </div>
+            <div>
+              <div style={{ fontSize: '14.5px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span>⚡ Local Smart Preset · 本地/测试智能预设</span>
+                {isZeroSubActive && (
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      padding: '2px 8px',
+                      borderRadius: '999px',
+                      backgroundColor: 'var(--tg-success-soft)',
+                      color: 'var(--tg-success)',
+                    }}
+                  >
+                    Selected · 当前生效
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', marginTop: '4px' }}>
+                Use built-in local preset without external API credentials (for local/dev setups).
+              </div>
+            </div>
 
-                  <div style={{ fontSize: '11.5px', color: 'var(--tg-text-secondary)' }}>
-                    Key Status:{' '}
-                    <code>
-                      {prov.no_key_required
-                        ? 'No API Key Required · 免密钥'
-                        : prov.masked_key || 'Not Set · 未配置密钥'}
-                    </code>
-                  </div>
+            <button
+              type="button"
+              className={isZeroSubActive ? 'tg-btn tg-btn--secondary' : 'tg-btn tg-btn--primary'}
+              onClick={() => void handleActivateZeroSubscription()}
+            >
+              {isZeroSubActive ? '✓ Local Preset Active' : 'Activate Local Preset'}
+            </button>
+          </section>
+        )}
 
-                  <input
-                    type="text"
-                    className="tg-input"
-                    aria-label={`${prov.name} Default Model`}
-                    placeholder={`Model (${prov.default_model})`}
-                    value={modelInputs[prov.provider_id] ?? prov.default_model}
-                    onChange={(e) =>
-                      setModelInputs((prev) => ({ ...prev, [prov.provider_id]: e.target.value }))
-                    }
-                    style={{ padding: '6px 10px', fontSize: '12.5px' }}
-                  />
+        {/* 2. Add New Provider from Server Presets (51 Desktop Presets) */}
+        <form
+          onSubmit={(e) => void handleAddFromPreset(e)}
+          className="tg-surface-card"
+          style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
+        >
+          <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
+            ➕ 添加真实模型供应商 ({serverPresets.length || 51} 种桌面端预设)
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '8px' }}>
+            <select
+              className="tg-select"
+              aria-label="选择模型供应商预设"
+              value={selectedPresetId}
+              onChange={(e) => setSelectedPresetId(e.target.value)}
+            >
+              {serverPresets.length > 0 ? (
+                serverPresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name} ({preset.default_model})
+                  </option>
+                ))
+              ) : (
+                <>
+                  <option value="openai">OpenAI (gpt-4o)</option>
+                  <option value="anthropic">Anthropic Claude (claude-3-5-sonnet-20241022)</option>
+                  <option value="gemini">Google Gemini (gemini-2.5-pro)</option>
+                  <option value="deepseek">DeepSeek (deepseek-chat)</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="ollama">Ollama (Local)</option>
+                </>
+              )}
+            </select>
 
-                  {!prov.no_key_required && (
+            <input
+              type="text"
+              className="tg-input"
+              aria-label="模型名称"
+              placeholder={selectedPresetObj?.default_model || 'Model ID (e.g. gpt-4o)'}
+              value={newProviderModel}
+              onChange={(e) => setNewProviderModel(e.target.value)}
+            />
+
+            <input
+              type="text"
+              className="tg-input"
+              aria-label="API Base URL"
+              placeholder={selectedPresetObj?.base_url || 'https://api.openai.com/v1'}
+              value={newProviderBaseUrl}
+              onChange={(e) => setNewProviderBaseUrl(e.target.value)}
+            />
+
+            <input
+              type="password"
+              className="tg-input"
+              aria-label="API Key"
+              placeholder="sk-... / API Key"
+              value={newProviderKey}
+              onChange={(e) => setNewProviderKey(e.target.value)}
+            />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+            <span style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
+              密钥仅加密/掩码保存在服务端 SQLite，前端永远不回传明文 Key。
+            </span>
+            <button type="submit" className="tg-btn tg-btn--primary" disabled={addingProvider}>
+              {addingProvider ? '保存中…' : '保存并设为默认模型'}
+            </button>
+          </div>
+        </form>
+
+        {/* 3. Configured Multi-Provider Cards */}
+        <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
+            🔌 已配置的模型供应商 ({providersList.length})
+          </div>
+
+          {providersList.length === 0 ? (
+            <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', padding: '8px 2px' }}>
+              尚未配置任何外部模型供应商。请在上方选择一个预设（如 OpenAI、Anthropic、Gemini、DeepSeek、Ollama）并填入 API Key，或粘贴 <code>magpie://import?...</code> 链接导入。
+            </div>
+          ) : (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(265px, 1fr))',
+                gap: '12px',
+              }}
+            >
+              {providersList.map((prov) => {
+                const isCurrent =
+                  activeProvider === prov.provider_id ||
+                  (prov.provider_id === 'local_hermes' && activeProvider === 'local_smart');
+                const probe = probeResults[prov.provider_id];
+                return (
+                  <div
+                    key={prov.provider_id}
+                    data-provider-id={prov.provider_id}
+                    style={{
+                      padding: '12px',
+                      borderRadius: '10px',
+                      backgroundColor: 'var(--tg-bg-elevated)',
+                      border: isCurrent
+                        ? '1px solid var(--tg-accent)'
+                        : '1px solid var(--tg-border)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                      <div style={{ fontWeight: 600, fontSize: '13.5px' }}>{prov.name}</div>
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          padding: '1px 7px',
+                          borderRadius: '999px',
+                          backgroundColor: isCurrent ? 'var(--tg-accent-soft)' : 'var(--tg-bg-surface)',
+                          color: isCurrent ? 'var(--tg-accent)' : 'var(--tg-text-secondary)',
+                        }}
+                      >
+                        {isCurrent ? 'Active · 当前' : prov.badge || prov.api_mode}
+                      </span>
+                    </div>
+
+                    <div style={{ fontSize: '11.5px', color: 'var(--tg-text-secondary)' }}>
+                      Key Status:{' '}
+                      <code>
+                        {prov.no_key_required
+                          ? 'No API Key Required · 免密钥'
+                          : prov.masked_key || (prov.has_api_key ? 'Configured (masked)' : 'Not Set · 未配置密钥')}
+                      </code>
+                    </div>
+
                     <input
-                      type="password"
+                      type="text"
                       className="tg-input"
-                      aria-label={`${prov.name} API Key`}
-                      placeholder="sk-... / API Key (stored masked on server)"
-                      value={keyInputs[prov.provider_id] ?? ''}
+                      aria-label={`${prov.name} Base URL`}
+                      placeholder={prov.base_url}
+                      value={baseUrlInputs[prov.provider_id] ?? prov.base_url}
                       onChange={(e) =>
-                        setKeyInputs((prev) => ({ ...prev, [prov.provider_id]: e.target.value }))
+                        setBaseUrlInputs((prev) => ({ ...prev, [prov.provider_id]: e.target.value }))
+                      }
+                      style={{ padding: '6px 10px', fontSize: '12px' }}
+                    />
+
+                    <input
+                      type="text"
+                      className="tg-input"
+                      aria-label={`${prov.name} Default Model`}
+                      placeholder={`Model (${prov.default_model})`}
+                      value={modelInputs[prov.provider_id] ?? prov.default_model}
+                      onChange={(e) =>
+                        setModelInputs((prev) => ({ ...prev, [prov.provider_id]: e.target.value }))
                       }
                       style={{ padding: '6px 10px', fontSize: '12.5px' }}
                     />
-                  )}
 
-                  <button
-                    type="button"
-                    className="tg-btn tg-btn--secondary"
-                    disabled={savingProviderId === prov.provider_id}
-                    onClick={() => void handleSaveProvider(prov)}
-                    style={{ padding: '6px 10px', fontSize: '12.5px', marginTop: 'auto' }}
-                  >
-                    {savingProviderId === prov.provider_id
-                      ? 'Saving...'
-                      : isCurrent
-                        ? 'Update Provider · 更新配置'
-                        : 'Save & Activate · 保存并启用'}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
+                    {!prov.no_key_required && (
+                      <input
+                        type="password"
+                        className="tg-input"
+                        aria-label={`${prov.name} API Key`}
+                        placeholder="留空保持原密钥 / 输入新 API Key"
+                        value={keyInputs[prov.provider_id] ?? ''}
+                        onChange={(e) =>
+                          setKeyInputs((prev) => ({ ...prev, [prov.provider_id]: e.target.value }))
+                        }
+                        style={{ padding: '6px 10px', fontSize: '12.5px' }}
+                      />
+                    )}
+
+                    {probe && (
+                      <div
+                        style={{
+                          fontSize: '11.5px',
+                          color: probe.ok ? 'var(--tg-success)' : 'var(--tg-danger)',
+                        }}
+                      >
+                        {probe.ok
+                          ? `✓ 连通正常 (${probe.latencyMs ?? 0}ms)`
+                          : `✕ ${probe.detail || '连接失败'}`}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '6px', marginTop: 'auto', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--primary"
+                        disabled={savingProviderId === prov.provider_id}
+                        onClick={() => void handleSaveProvider(prov)}
+                        style={{ padding: '6px 10px', fontSize: '12px', flex: '1 1 auto' }}
+                      >
+                        {savingProviderId === prov.provider_id
+                          ? 'Saving...'
+                          : isCurrent
+                            ? '更新配置'
+                            : '保存并启用'}
+                      </button>
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--secondary"
+                        disabled={probingProviderId === prov.provider_id}
+                        onClick={() => void handleProbeProvider(prov.provider_id)}
+                        style={{ padding: '6px 9px', fontSize: '12px' }}
+                      >
+                        {probingProviderId === prov.provider_id ? '测速中…' : '检测'}
+                      </button>
+                      {prov.provider_id !== 'local_hermes' && (
+                        <button
+                          type="button"
+                          className="tg-btn tg-btn--danger-soft"
+                          onClick={() => void handleDeleteProvider(prov.provider_id)}
+                          style={{ padding: '6px 9px', fontSize: '12px' }}
+                        >
+                          删除
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Quick magpie:// URI / JSON Import */}
+          <form onSubmit={(e) => void handleImportConfig(e)} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              className="tg-input"
+              aria-label="导入 Magpie 配置 URI 或 JSON"
+              placeholder="magpie://import?preset=deepseek&api_key=sk-... 或 JSON 配置"
+              value={importRaw}
+              onChange={(e) => setImportRaw(e.target.value)}
+              style={{ flex: '1 1 280px', fontSize: '12.5px' }}
+            />
+            <button type="submit" className="tg-btn tg-btn--secondary" disabled={importing || !importRaw.trim()}>
+              {importing ? '导入中…' : '📥 导入配置'}
+            </button>
+          </form>
         </section>
 
-        {/* 3. Routing Strategy & Groups */}
+        {/* 4. Routing Strategy & Groups */}
         <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
             <div>
@@ -518,7 +744,7 @@ export function MagpieGatewayPanel({
           )}
         </section>
 
-        {/* 4. Interactive PII Privacy Masking Tester */}
+        {/* 5. Interactive PII Privacy Masking Tester */}
         <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
             <div>
@@ -585,7 +811,7 @@ export function MagpieGatewayPanel({
               }}
             >
               <div style={{ fontWeight: 600, color: 'var(--tg-info)' }}>
-                Redacted Output · 脱敏输出预览 ({maskPreview?.hit_count ?? 3} PII entities masked):
+                Redacted Output · 脱敏输出预览 ({maskPreview?.hit_count ?? 0} PII entities masked):
               </div>
               <code style={{ wordBreak: 'break-all', color: 'var(--tg-text-primary)' }}>
                 {effectiveRedactedText}

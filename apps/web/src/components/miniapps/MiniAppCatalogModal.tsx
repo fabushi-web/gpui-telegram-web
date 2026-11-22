@@ -9,39 +9,6 @@ export interface MiniAppCatalogModalProps {
   onClose?: () => void;
 }
 
-const FALLBACK_MINI_APPS: MiniAppEntry[] = [
-  {
-    app_id: 'app_fabushi_globe',
-    bot_user_id: 9002,
-    bot_username: 'FabushiBot',
-    short_name: 'fabushi-globe',
-    title: '全球法布施 · Global Dharma & Merit 3D WASM Globe',
-    description: 'Interactive 3D Rust/WASM Earth globe with real-time merit dedication & CloudStorage.',
-    category: 'community',
-    icon_emoji: '🌏',
-    web_url: '/miniapps/fabushi-globe/index.html',
-    has_wasm: true,
-    is_installed: true,
-    install_count: 1280,
-    created_at_ms: 1710000000000,
-  },
-  {
-    app_id: 'app_taskboard',
-    bot_user_id: 9003,
-    bot_username: 'TaskBoardBot',
-    short_name: 'taskboard',
-    title: 'Sprint TaskBoard · 敏捷任务看板',
-    description: 'Collaborative Telegram Mini App Kanban board with sendData & MainButton sync.',
-    category: 'productivity',
-    icon_emoji: '📋',
-    web_url: '/miniapps/taskboard/index.html',
-    has_wasm: false,
-    is_installed: true,
-    install_count: 860,
-    created_at_ms: 1710000000000,
-  },
-];
-
 export function MiniAppCatalogModal({
   isOpen,
   onClose,
@@ -81,17 +48,9 @@ export function MiniAppCatalogModal({
   }, [visible, loadMiniApps, loadBots]);
 
   const mergedApps = useMemo(() => {
-    const map = new Map<string, MiniAppEntry>();
-    for (const fallback of FALLBACK_MINI_APPS) {
-      map.set(`${fallback.bot_username.toLowerCase()}/${fallback.short_name.toLowerCase()}`, fallback);
-    }
-    for (const entry of miniApps) {
-      map.set(`${entry.bot_username.toLowerCase()}/${entry.short_name.toLowerCase()}`, entry);
-    }
-    const list = Array.from(map.values());
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter(
+    if (!q) return miniApps;
+    return miniApps.filter(
       (item) =>
         item.title.toLowerCase().includes(q) ||
         item.bot_username.toLowerCase().includes(q) ||

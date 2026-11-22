@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { DOM_IDS, type AdapterMode } from '@gpui-telegram/protocol';
 import { t } from '../../i18n';
-import { useAuthStore } from '../../store/useAuthStore';
+import { isDemoUiEnabled, useAuthStore } from '../../store/useAuthStore';
 import { useSettingsStore, type ThemeName } from '../../store/useSettingsStore';
 import { QrMatrixSvg } from './qrSvgMatrix';
 
@@ -9,7 +9,7 @@ export interface AuthScreenProps {
   className?: string;
 }
 
-type AuthTabId = 'phone' | 'qr' | 'password' | 'email' | 'alipay';
+type AuthTabId = 'password' | 'alipay' | 'email' | 'phone' | 'qr';
 
 interface CountryOption {
   code: string;
@@ -43,6 +43,12 @@ const ADAPTER_MODES: Array<{ id: AdapterMode; shortEn: string; shortZh: string }
   { id: 'mtproto', shortEn: 'MTProto', shortZh: 'MTProto' },
 ];
 
+const SERVER_PRESETS: Array<{ labelZh: string; labelEn: string; url: string }> = [
+  { labelZh: '当前站点', labelEn: 'Same Origin', url: '' },
+  { labelZh: 'web.ombhrum.com', labelEn: 'web.ombhrum.com', url: 'https://web.ombhrum.com' },
+  { labelZh: '桌面同源后端', labelEn: 'Desktop Cloud (34.46.77.133)', url: 'http://34.46.77.133:8080' },
+];
+
 export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const language = useSettingsStore((s) => s.language);
   const theme = useSettingsStore((s) => s.theme);
@@ -51,6 +57,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
 
   const adapterMode = useAuthStore((s) => s.adapterMode);
   const serverUrl = useAuthStore((s) => s.serverUrl);
+  const serverHealth = useAuthStore((s) => s.serverHealth);
   const mtprotoConfig = useAuthStore((s) => s.mtprotoConfig);
   const isAddingAccount = useAuthStore((s) => s.isAddingAccount);
   const isLoading = useAuthStore((s) => s.isLoading);
@@ -68,6 +75,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const clearError = useAuthStore((s) => s.clearError);
   const setAdapterMode = useAuthStore((s) => s.setAdapterMode);
   const setServerUrl = useAuthStore((s) => s.setServerUrl);
+  const probeServerHealth = useAuthStore((s) => s.probeServerHealth);
   const setMtprotoConfig = useAuthStore((s) => s.setMtprotoConfig);
   const loginDemo = useAuthStore((s) => s.loginDemo);
   const sendPhoneCode = useAuthStore((s) => s.sendPhoneCode);
@@ -80,13 +88,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const registerPassword = useAuthStore((s) => s.registerPassword);
   const sendEmailCode = useAuthStore((s) => s.sendEmailCode);
   const verifyEmailCode = useAuthStore((s) => s.verifyEmailCode);
+  const registerEmail = useAuthStore((s) => s.registerEmail);
   const startAlipay = useAuthStore((s) => s.startAlipay);
   const pollAlipay = useAuthStore((s) => s.pollAlipay);
   const confirmAlipay = useAuthStore((s) => s.confirmAlipay);
   const loginPasskey = useAuthStore((s) => s.loginPasskey);
   const cancelAddAccountFlow = useAuthStore((s) => s.cancelAddAccountFlow);
 
-  const [activeTab, setActiveTab] = useState<AuthTabId>('phone');
+  const demoAllowed = isDemoUiEnabled(adapterMode);
+  const [activeTab, setActiveTab] = useState<AuthTabId>(demoAllowed ? 'phone' : 'password');
   const [localError, setLocalError] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
@@ -112,13 +122,23 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [firstNameInput, setFirstNameInput] = useState<string>('');
 
-  // Email OTP state
+  // Email OTP / Registration state (aligned with desktop AuthWizardView)
   const [emailInput, setEmailInput] = useState<string>('');
   const [emailOtpInput, setEmailOtpInput] = useState<string>('');
+  const [emailRegisterMode, setEmailRegisterMode] = useState<boolean>(false);
+  const [emailRegUsername, setEmailRegUsername] = useState<string>('');
+  const [emailRegPassword, setEmailRegPassword] = useState<string>('');
+  const [emailRegFirstName, setEmailRegFirstName] = useState<string>('');
 
   useEffect(() => {
     setServerUrlDraft(serverUrl);
   }, [serverUrl]);
+
+  useEffect(() => {
+    if (adapterMode === 'server' && serverHealth.status === 'unknown') {
+      void probeServerHealth(serverUrl);
+    }
+  }, [adapterMode, serverHealth.status, serverUrl, probeServerHealth]);
 
   // Start & auto-poll QR pairing when QR tab is active
   useEffect(() => {
@@ -129,7 +149,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
     const timer = setInterval(() => {
       if (cancelled) return;
       void pollQrPairing().catch(() => undefined);
-    }, 1500);
+    }, 1800);
 
     return () => {
       cancelled = true;
@@ -146,7 +166,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
     const timer = setInterval(() => {
       if (cancelled) return;
       void pollAlipay().catch(() => undefined);
-    }, 1500);
+    }, 2000);
 
     return () => {
       cancelled = true;
@@ -315,23 +335,48 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
     }
 
     try {
-      await verifyEmailCode({
-        email: pendingEmail ?? emailInput.trim(),
-        code: cleanCode,
-      });
+      if (emailRegisterMode) {
+        const cleanUser = emailRegUsername.trim().replace(/^@/, '');
+        if (cleanUser.length < 2) {
+          setLocalError(language === 'zh-CN' ? '请设置至少 2 位用户名' : 'Username must be at least 2 characters.');
+          return;
+        }
+        if (emailRegPassword.length < 6) {
+          setLocalError(language === 'zh-CN' ? '请设置至少 6 位登录密码' : 'Password must be at least 6 characters.');
+          return;
+        }
+        await registerEmail({
+          email: pendingEmail ?? emailInput.trim(),
+          code: cleanCode,
+          username: cleanUser,
+          password: emailRegPassword,
+          firstName: emailRegFirstName.trim() || cleanUser,
+        });
+      } else {
+        await verifyEmailCode({
+          email: pendingEmail ?? emailInput.trim(),
+          code: cleanCode,
+        });
+      }
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const handleSaveServerUrl = (e?: React.FormEvent): void => {
+  const handleSaveServerUrl = async (e?: React.FormEvent, explicitUrl?: string): Promise<void> => {
     e?.preventDefault();
-    const trimmed = serverUrlDraft.trim();
-    setServerUrl(trimmed);
+    const target = (explicitUrl !== undefined ? explicitUrl : serverUrlDraft).trim();
+    setServerUrlDraft(target);
+    setServerUrl(target);
+    const snap = await probeServerHealth(target);
     setStatusNotice(
-      language === 'zh-CN'
-        ? `已应用服务器地址：${trimmed || '/'}`
-        : `Server URL saved: ${trimmed || '/'}`,
+      snap.ok
+        ? language === 'zh-CN'
+          ? `已连接服务器：${target || window.location.origin} (${snap.latencyMs}ms)`
+          : `Connected to ${target || window.location.origin} (${snap.latencyMs}ms)`
+        : language === 'zh-CN'
+          ? `服务器地址已保存，但连通性检测失败：${snap.error ?? '无法连接'}`
+          : `Server URL saved, probe failed: ${snap.error ?? 'Unreachable'}`,
     );
   };
 
@@ -367,6 +412,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const isPhoneCodeStep = Boolean(phoneCodeHash);
   const isEmailCodeStep = Boolean(emailCodeHash);
 
+  const tabs: Array<{ id: AuthTabId; domId: string; label: string }> = [
+    { id: 'password', domId: DOM_IDS.TAB_AUTH_PASSWORD, label: t('auth.tab.password', language) },
+    { id: 'alipay', domId: DOM_IDS.TAB_AUTH_ALIPAY, label: t('auth.tab.alipay', language) },
+    { id: 'email', domId: DOM_IDS.TAB_AUTH_EMAIL, label: t('auth.tab.email', language) },
+    { id: 'phone', domId: DOM_IDS.TAB_AUTH_PHONE, label: t('auth.tab.phone', language) },
+    { id: 'qr', domId: DOM_IDS.TAB_AUTH_QR, label: t('auth.tab.qr', language) },
+  ];
+
   return (
     <div
       id={DOM_IDS.AUTH_SCREEN}
@@ -379,11 +432,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
         paddingBottom: '32px',
       }}
     >
-      {/* Top Quick Controls Bar: Theme, Language, Adapter Mode, Server URL, MTProto Config */}
+      {/* Top Quick Controls Bar: Theme, Language, Server URL & Live Connection Status */}
       <header
         style={{
           width: '100%',
-          maxWidth: '920px',
+          maxWidth: '960px',
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'center',
@@ -432,45 +485,84 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           </button>
         </div>
 
-        {/* Adapter Mode Pill + Editable Server URL + MTProto Config Button */}
+        {/* Server Endpoint & Live Health Pill (Developer adapter modes shown ONLY in ?dev=1 / sandbox mode) */}
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
-          <div
-            role="group"
-            aria-label={t('auth.adapter.mode', language)}
-            style={{
-              display: 'inline-flex',
-              padding: '2px',
-              borderRadius: 'var(--tg-radius-pill)',
-              backgroundColor: 'var(--tg-bg-input)',
-              border: '1px solid var(--tg-border)',
-            }}
-          >
-            {ADAPTER_MODES.map((m) => {
-              const active = adapterMode === m.id;
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  data-adapter-mode={m.id}
-                  aria-pressed={active}
-                  onClick={() => void setAdapterMode(m.id)}
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: '11.5px',
-                    fontWeight: 600,
-                    borderRadius: 'var(--tg-radius-pill)',
-                    backgroundColor: active ? 'var(--tg-accent)' : 'transparent',
-                    color: active ? 'var(--tg-on-accent)' : 'var(--tg-text-secondary)',
-                  }}
-                >
-                  {language === 'zh-CN' ? m.shortZh : m.shortEn}
-                </button>
-              );
-            })}
-          </div>
+          {demoAllowed && (
+            <div
+              role="group"
+              aria-label={t('auth.adapter.mode', language)}
+              style={{
+                display: 'inline-flex',
+                padding: '2px',
+                borderRadius: 'var(--tg-radius-pill)',
+                backgroundColor: 'var(--tg-bg-input)',
+                border: '1px solid var(--tg-border)',
+              }}
+            >
+              {ADAPTER_MODES.map((m) => {
+                const active = adapterMode === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    data-adapter-mode={m.id}
+                    aria-pressed={active}
+                    onClick={() => void setAdapterMode(m.id)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: '11.5px',
+                      fontWeight: 600,
+                      borderRadius: 'var(--tg-radius-pill)',
+                      backgroundColor: active ? 'var(--tg-accent)' : 'transparent',
+                      color: active ? 'var(--tg-on-accent)' : 'var(--tg-text-secondary)',
+                    }}
+                  >
+                    {language === 'zh-CN' ? m.shortZh : m.shortEn}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {adapterMode === 'server' && (
+            <span
+              data-testid="server-health-pill"
+              style={{
+                fontSize: '11.5px',
+                fontWeight: 600,
+                padding: '4px 9px',
+                borderRadius: 'var(--tg-radius-pill)',
+                backgroundColor:
+                  serverHealth.status === 'online'
+                    ? 'var(--tg-success-soft)'
+                    : serverHealth.status === 'offline'
+                      ? 'var(--tg-danger-soft)'
+                      : 'var(--tg-info-soft)',
+                color:
+                  serverHealth.status === 'online'
+                    ? 'var(--tg-success)'
+                    : serverHealth.status === 'offline'
+                      ? 'var(--tg-danger)'
+                      : 'var(--tg-info)',
+              }}
+              title={serverHealth.error || serverHealth.server || ''}
+            >
+              {serverHealth.status === 'online'
+                ? language === 'zh-CN'
+                  ? `● 已连接${serverHealth.latencyMs ? ` ${serverHealth.latencyMs}ms` : ''}`
+                  : `● Connected${serverHealth.latencyMs ? ` ${serverHealth.latencyMs}ms` : ''}`
+                : serverHealth.status === 'offline'
+                  ? language === 'zh-CN'
+                    ? '● 无法连接'
+                    : '● Offline'
+                  : language === 'zh-CN'
+                    ? '○ 检测中...'
+                    : '○ Checking...'}
+            </span>
+          )}
 
           <form
-            onSubmit={handleSaveServerUrl}
+            onSubmit={(e) => void handleSaveServerUrl(e)}
             style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
           >
             <input
@@ -478,35 +570,41 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               type="text"
               value={serverUrlDraft}
               onChange={(e) => setServerUrlDraft(e.target.value)}
-              placeholder={t('auth.adapter.serverUrl', language)}
+              placeholder={
+                language === 'zh-CN'
+                  ? '服务器地址（留空即同源）'
+                  : 'Server URL (empty = same origin)'
+              }
               aria-label={t('auth.adapter.serverUrl', language)}
               className="tg-input"
-              style={{ width: '175px', padding: '5px 9px', fontSize: '12px' }}
+              style={{ width: '195px', padding: '5px 9px', fontSize: '12px' }}
             />
             <button
               type="submit"
               className="tg-btn tg-btn--secondary"
               style={{ padding: '5px 10px', fontSize: '12px' }}
             >
-              {t('common.save', language)}
+              {language === 'zh-CN' ? '连接' : 'Connect'}
             </button>
           </form>
 
-          <button
-            id={DOM_IDS.BTN_MTPROTO_CONFIG}
-            type="button"
-            aria-expanded={showMtprotoConfig}
-            onClick={() => setShowMtprotoConfig((v) => !v)}
-            className="tg-btn tg-btn--secondary"
-            style={{ padding: '5px 10px', fontSize: '12px' }}
-          >
-            MTProto {showMtprotoConfig ? '▲' : '⚙'}
-          </button>
+          {demoAllowed && (
+            <button
+              id={DOM_IDS.BTN_MTPROTO_CONFIG}
+              type="button"
+              aria-expanded={showMtprotoConfig}
+              onClick={() => setShowMtprotoConfig((v) => !v)}
+              className="tg-btn tg-btn--secondary"
+              style={{ padding: '5px 10px', fontSize: '12px' }}
+            >
+              MTProto {showMtprotoConfig ? '▲' : '⚙'}
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Collapsible Inline MTProto Configuration Form */}
-      {showMtprotoConfig && (
+      {/* Collapsible Inline MTProto Configuration Form (dev/mtproto mode only) */}
+      {demoAllowed && showMtprotoConfig && (
         <form
           onSubmit={handleSaveMtproto}
           data-testid="mtproto-config-form"
@@ -588,7 +686,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
         className="tg-surface-card"
         style={{
           width: '100%',
-          maxWidth: '460px',
+          maxWidth: '470px',
           margin: 'auto 0',
           padding: '28px 26px',
           borderRadius: 'var(--tg-radius-lg)',
@@ -653,26 +751,64 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           </p>
         </div>
 
-        {/* Prominent 1-Click Instant Demo Login */}
-        <button
-          id={DOM_IDS.BTN_DEMO_LOGIN}
-          type="button"
-          disabled={isLoading}
-          onClick={() => {
-            setLocalError(null);
-            clearError();
-            void loginDemo();
-          }}
-          className="tg-btn tg-btn--primary"
-          style={{
-            width: '100%',
-            padding: '11px 16px',
-            fontSize: '14.5px',
-            fontWeight: 600,
-          }}
-        >
-          ⚡ {t('auth.demoButton', language)}
-        </button>
+        {/* Quick Server Presets when offline or switching backend */}
+        {adapterMode === 'server' && serverHealth.status === 'offline' && (
+          <div
+            role="status"
+            style={{
+              padding: '10px 12px',
+              borderRadius: 'var(--tg-radius-sm)',
+              backgroundColor: 'var(--tg-warning-soft)',
+              border: '1px solid var(--tg-warning)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              fontSize: '12px',
+            }}
+          >
+            <div style={{ color: 'var(--tg-warning)', fontWeight: 600 }}>
+              {language === 'zh-CN'
+                ? `当前无法连接到后端服务 (${serverUrl || window.location.origin})，可快速切换或重测：`
+                : `Unable to reach server (${serverUrl || window.location.origin}). Choose an endpoint:`}
+            </div>
+            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+              {SERVER_PRESETS.map((preset) => (
+                <button
+                  key={preset.labelEn}
+                  type="button"
+                  className="tg-btn tg-btn--secondary"
+                  style={{ padding: '4px 8px', fontSize: '11.5px' }}
+                  onClick={() => void handleSaveServerUrl(undefined, preset.url)}
+                >
+                  {language === 'zh-CN' ? preset.labelZh : preset.labelEn}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 1-Click Demo Login — STRICTLY hidden in production builds unless ?mode=sandbox / ?dev=1 */}
+        {demoAllowed && (
+          <button
+            id={DOM_IDS.BTN_DEMO_LOGIN}
+            type="button"
+            disabled={isLoading}
+            onClick={() => {
+              setLocalError(null);
+              clearError();
+              void loginDemo();
+            }}
+            className="tg-btn tg-btn--primary"
+            style={{
+              width: '100%',
+              padding: '11px 16px',
+              fontSize: '14.5px',
+              fontWeight: 600,
+            }}
+          >
+            ⚡ {t('auth.demoButton', language)}
+          </button>
+        )}
 
         {/* Status / Error Alerts */}
         {statusNotice && !displayedError && (
@@ -770,7 +906,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           </form>
         ) : (
           <>
-            {/* 5 Canonical Auth Mode Tabs */}
+            {/* 5 Canonical Desktop-Aligned Auth Mode Tabs */}
             <div
               role="tablist"
               aria-label="Authentication Modes"
@@ -784,15 +920,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                 border: '1px solid var(--tg-border-subtle)',
               }}
             >
-              {(
-                [
-                  { id: 'phone', domId: DOM_IDS.TAB_AUTH_PHONE, label: t('auth.tab.phone', language) },
-                  { id: 'qr', domId: DOM_IDS.TAB_AUTH_QR, label: t('auth.tab.qr', language) },
-                  { id: 'password', domId: DOM_IDS.TAB_AUTH_PASSWORD, label: t('auth.tab.password', language) },
-                  { id: 'email', domId: DOM_IDS.TAB_AUTH_EMAIL, label: t('auth.tab.email', language) },
-                  { id: 'alipay', domId: DOM_IDS.TAB_AUTH_ALIPAY, label: t('auth.tab.alipay', language) },
-                ] as const
-              ).map((tab) => {
+              {tabs.map((tab) => {
                 const selected = activeTab === tab.id;
                 return (
                   <button
@@ -821,7 +949,324 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               })}
             </div>
 
-            {/* Tab 1: Phone + Country Selector + OTP */}
+            {/* Tab 1: Username & Password Login / Register */}
+            {activeTab === 'password' && (
+              <div role="tabpanel" aria-labelledby={DOM_IDS.TAB_AUTH_PASSWORD}>
+                <form
+                  onSubmit={(e) => void handlePasswordSubmit(e)}
+                  style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
+                >
+                  <input
+                    id={DOM_IDS.AUTH_USERNAME_INPUT}
+                    type="text"
+                    name="username"
+                    autoComplete="username"
+                    value={usernameInput}
+                    onChange={(e) => setUsernameInput(e.target.value)}
+                    placeholder={t('auth.password.username', language)}
+                    aria-label={t('auth.password.username', language)}
+                    className="tg-input"
+                  />
+
+                  {isRegisterMode && (
+                    <input
+                      type="text"
+                      name="firstName"
+                      value={firstNameInput}
+                      onChange={(e) => setFirstNameInput(e.target.value)}
+                      placeholder={t('auth.password.firstName', language)}
+                      aria-label={t('auth.password.firstName', language)}
+                      className="tg-input"
+                    />
+                  )}
+
+                  <input
+                    id={DOM_IDS.AUTH_PASSWORD_INPUT}
+                    type="password"
+                    name="password"
+                    autoComplete={isRegisterMode ? 'new-password' : 'current-password'}
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    placeholder={t('auth.password.password', language)}
+                    aria-label={t('auth.password.password', language)}
+                    className="tg-input"
+                  />
+
+                  <button
+                    id={DOM_IDS.BTN_AUTH_PASSWORD_SUBMIT}
+                    type="submit"
+                    disabled={isLoading}
+                    className="tg-btn tg-btn--primary"
+                    style={{ width: '100%', padding: '10px 16px' }}
+                  >
+                    {isRegisterMode
+                      ? t('auth.password.registerSubmit', language)
+                      : t('auth.password.loginSubmit', language)}
+                  </button>
+
+                  <button
+                    id={DOM_IDS.AUTH_MODE_REGISTER_TOGGLE}
+                    type="button"
+                    data-mode={isRegisterMode ? 'register' : 'login'}
+                    aria-pressed={isRegisterMode}
+                    onClick={() => {
+                      setIsRegisterMode((v) => !v);
+                      setLocalError(null);
+                      clearError();
+                    }}
+                    className="tg-btn tg-btn--ghost"
+                    style={{ width: '100%', fontSize: '13px' }}
+                  >
+                    {isRegisterMode
+                      ? t('auth.password.switchToLogin', language)
+                      : t('auth.password.switchToRegister', language)}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* Tab 2: Alipay OAuth Real Scannable QR Session (aligned with desktop auth_wizard_tabs_render.rs) */}
+            {activeTab === 'alipay' && (
+              <div
+                role="tabpanel"
+                aria-labelledby={DOM_IDS.TAB_AUTH_ALIPAY}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: '12px',
+                  textAlign: 'center',
+                }}
+              >
+                {alipaySession?.qr_url ? (
+                  <QrMatrixSvg
+                    id={DOM_IDS.QR_LOGIN_SVG}
+                    size={208}
+                    value={alipaySession.qr_url}
+                    accentColor="#1677FF"
+                    badge="alipay"
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: '208px',
+                      height: '208px',
+                      borderRadius: '14px',
+                      backgroundColor: 'var(--tg-bg-elevated)',
+                      border: '1px solid var(--tg-border)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '12.5px',
+                      color: 'var(--tg-text-secondary)',
+                      padding: '16px',
+                    }}
+                  >
+                    {language === 'zh-CN' ? '正在生成支付宝授权二维码...' : 'Loading Alipay QR...'}
+                  </div>
+                )}
+
+                <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
+                  {t('auth.alipay.title', language)}
+                </div>
+                <p style={{ margin: 0, fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
+                  {language === 'zh-CN'
+                    ? '打开支付宝 App 扫描上方二维码授权登录，或在浏览器中打开授权页面。'
+                    : 'Scan with Alipay App or open the Alipay authorization link in your browser.'}
+                </p>
+
+                <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
+                  {alipaySession?.qr_url && /^https?:\/\//i.test(alipaySession.qr_url) && (
+                    <a
+                      href={alipaySession.qr_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="tg-btn tg-btn--primary"
+                      style={{ flex: 1, textDecoration: 'none', padding: '9px 12px', fontSize: '13px' }}
+                    >
+                      {language === 'zh-CN' ? '在浏览器打开支付宝授权' : 'Open Alipay Auth'}
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    className="tg-btn tg-btn--secondary"
+                    disabled={isLoading}
+                    onClick={() => void startAlipay().catch(() => undefined)}
+                    style={{ padding: '9px 12px', fontSize: '13px' }}
+                  >
+                    ↻ {language === 'zh-CN' ? '刷新二维码' : 'Refresh'}
+                  </button>
+                </div>
+
+                {demoAllowed && (
+                  <button
+                    id={DOM_IDS.BTN_SIMULATE_QR_SCAN}
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => {
+                      setLocalError(null);
+                      clearError();
+                      void confirmAlipay(alipaySession?.session_id).catch((err) =>
+                        setLocalError(err instanceof Error ? err.message : String(err)),
+                      );
+                    }}
+                    className="tg-btn tg-btn--secondary"
+                    style={{ width: '100%', padding: '9px 14px' }}
+                  >
+                    ✓ {t('auth.alipay.confirm', language)}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Tab 3: Email OTP Sign-in & Full Desktop Email Registration */}
+            {activeTab === 'email' && (
+              <div role="tabpanel" aria-labelledby={DOM_IDS.TAB_AUTH_EMAIL}>
+                {!isEmailCodeStep ? (
+                  <form
+                    onSubmit={(e) => void handleSendEmailOtp(e)}
+                    style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
+                  >
+                    <input
+                      type="email"
+                      name="email"
+                      value={emailInput}
+                      onChange={(e) => setEmailInput(e.target.value)}
+                      placeholder="name@ombhrum.com"
+                      aria-label={t('auth.email.label', language)}
+                      className="tg-input"
+                    />
+                    <button
+                      id={DOM_IDS.BTN_AUTH_SEND_CODE}
+                      type="submit"
+                      disabled={isLoading}
+                      className="tg-btn tg-btn--primary"
+                      style={{ width: '100%', padding: '10px 16px' }}
+                    >
+                      {t('auth.email.sendCode', language)}
+                    </button>
+                  </form>
+                ) : (
+                  <form
+                    onSubmit={(e) => void handleVerifyEmailOtp(e)}
+                    style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        fontSize: '12.5px',
+                        color: 'var(--tg-text-secondary)',
+                      }}
+                    >
+                      <span>
+                        {t('auth.email.label', language)}: <strong>{pendingEmail ?? emailInput}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEmailOtpInput('');
+                          setLocalError(null);
+                          useAuthStore.setState({
+                            emailCodeHash: null,
+                            pendingEmail: null,
+                            devCodeHint: null,
+                            error: null,
+                          });
+                        }}
+                        className="tg-btn tg-btn--ghost"
+                        style={{ padding: '2px 8px', fontSize: '12px' }}
+                      >
+                        {t('common.back', language)}
+                      </button>
+                    </div>
+
+                    {devCodeHint && (
+                      <div
+                        data-testid="dev-email-otp-hint"
+                        style={{
+                          padding: '6px 10px',
+                          borderRadius: 'var(--tg-radius-sm)',
+                          backgroundColor: 'var(--tg-accent-soft)',
+                          color: 'var(--tg-accent)',
+                          fontSize: '12.5px',
+                          fontWeight: 600,
+                        }}
+                      >
+                        Email Verification Code: {devCodeHint}
+                      </div>
+                    )}
+
+                    <input
+                      id={DOM_IDS.AUTH_CODE_INPUT}
+                      type="text"
+                      inputMode="numeric"
+                      autoFocus
+                      value={emailOtpInput}
+                      onChange={(e) => setEmailOtpInput(e.target.value)}
+                      placeholder={t('auth.phone.codePlaceholder', language)}
+                      aria-label={t('auth.phone.codeLabel', language)}
+                      className="tg-input"
+                    />
+
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
+                      <input
+                        type="checkbox"
+                        checked={emailRegisterMode}
+                        onChange={(e) => setEmailRegisterMode(e.target.checked)}
+                      />
+                      <span>
+                        {language === 'zh-CN'
+                          ? '新用户注册（同步设置用户名与密码）'
+                          : 'New account registration (set username & password)'}
+                      </span>
+                    </label>
+
+                    {emailRegisterMode && (
+                      <>
+                        <input
+                          type="text"
+                          value={emailRegUsername}
+                          onChange={(e) => setEmailRegUsername(e.target.value)}
+                          placeholder={t('auth.password.username', language)}
+                          className="tg-input"
+                        />
+                        <input
+                          type="text"
+                          value={emailRegFirstName}
+                          onChange={(e) => setEmailRegFirstName(e.target.value)}
+                          placeholder={t('auth.password.firstName', language)}
+                          className="tg-input"
+                        />
+                        <input
+                          type="password"
+                          value={emailRegPassword}
+                          onChange={(e) => setEmailRegPassword(e.target.value)}
+                          placeholder={language === 'zh-CN' ? '设置密码（至少 6 位）' : 'Password (min 6 chars)'}
+                          className="tg-input"
+                        />
+                      </>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={isLoading}
+                      className="tg-btn tg-btn--primary"
+                      style={{ width: '100%', padding: '10px 16px' }}
+                    >
+                      {emailRegisterMode
+                        ? language === 'zh-CN'
+                          ? '完成邮箱注册'
+                          : 'Complete Email Registration'
+                        : t('auth.email.verify', language)}
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
+
+            {/* Tab 4: Phone + Country Selector + OTP */}
             {activeTab === 'phone' && (
               <div role="tabpanel" aria-labelledby={DOM_IDS.TAB_AUTH_PHONE}>
                 {!isPhoneCodeStep ? (
@@ -940,7 +1385,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               </div>
             )}
 
-            {/* Tab 2: QR Code Login */}
+            {/* Tab 5: Real ISO/IEC 18004 QR Device Pairing */}
             {activeTab === 'qr' && (
               <div
                 role="tabpanel"
@@ -953,253 +1398,65 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                   textAlign: 'center',
                 }}
               >
-                <QrMatrixSvg
-                  id={DOM_IDS.QR_LOGIN_SVG}
-                  size={200}
-                  value={qrSession?.qr_url || 'tg://login?token=gpui-telegram-qr-session'}
-                  accentColor="#3390EC"
-                />
+                {qrSession?.qr_url ? (
+                  <QrMatrixSvg
+                    id={DOM_IDS.QR_LOGIN_SVG}
+                    size={208}
+                    value={qrSession.qr_url}
+                    accentColor="#3390EC"
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: '208px',
+                      height: '208px',
+                      borderRadius: '14px',
+                      backgroundColor: 'var(--tg-bg-elevated)',
+                      border: '1px solid var(--tg-border)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '12.5px',
+                      color: 'var(--tg-text-secondary)',
+                      padding: '16px',
+                    }}
+                  >
+                    {language === 'zh-CN' ? '正在生成设备配对二维码...' : 'Generating QR code...'}
+                  </div>
+                )}
                 <div style={{ fontSize: '13px', fontWeight: 600 }}>{t('auth.qr.title', language)}</div>
                 <p style={{ margin: 0, fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
-                  {t('auth.qr.instructions', language)}
+                  {language === 'zh-CN'
+                    ? '打开已登录的 GPUI Telegram 桌面端或移动端 → 设置 → 设备 → 扫描二维码确认登录。'
+                    : 'Open GPUI Telegram on an already signed-in device -> Settings -> Devices -> Scan QR.'}
                 </p>
                 <button
-                  id={DOM_IDS.BTN_SIMULATE_QR_SCAN}
                   type="button"
                   disabled={isLoading}
-                  onClick={() => {
-                    setLocalError(null);
-                    clearError();
-                    void simulateQrAccept(qrSession?.pair_id).catch((err) =>
-                      setLocalError(err instanceof Error ? err.message : String(err)),
-                    );
-                  }}
+                  onClick={() => void startQrPairing('GPUI Telegram Web').catch(() => undefined)}
                   className="tg-btn tg-btn--secondary"
                   style={{ width: '100%', padding: '9px 14px' }}
                 >
-                  📱 {t('auth.qr.simulateScan', language)}
+                  ↻ {language === 'zh-CN' ? '刷新配对二维码' : 'Refresh QR Code'}
                 </button>
-              </div>
-            )}
-
-            {/* Tab 3: Username & Password Login / Register */}
-            {activeTab === 'password' && (
-              <div role="tabpanel" aria-labelledby={DOM_IDS.TAB_AUTH_PASSWORD}>
-                <form
-                  onSubmit={(e) => void handlePasswordSubmit(e)}
-                  style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
-                >
-                  <input
-                    id={DOM_IDS.AUTH_USERNAME_INPUT}
-                    type="text"
-                    name="username"
-                    autoComplete="username"
-                    value={usernameInput}
-                    onChange={(e) => setUsernameInput(e.target.value)}
-                    placeholder={t('auth.password.username', language)}
-                    aria-label={t('auth.password.username', language)}
-                    className="tg-input"
-                  />
-
-                  {isRegisterMode && (
-                    <input
-                      type="text"
-                      name="firstName"
-                      value={firstNameInput}
-                      onChange={(e) => setFirstNameInput(e.target.value)}
-                      placeholder={t('auth.password.firstName', language)}
-                      aria-label={t('auth.password.firstName', language)}
-                      className="tg-input"
-                    />
-                  )}
-
-                  <input
-                    id={DOM_IDS.AUTH_PASSWORD_INPUT}
-                    type="password"
-                    name="password"
-                    autoComplete={isRegisterMode ? 'new-password' : 'current-password'}
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    placeholder={t('auth.password.password', language)}
-                    aria-label={t('auth.password.password', language)}
-                    className="tg-input"
-                  />
-
+                {demoAllowed && (
                   <button
-                    id={DOM_IDS.BTN_AUTH_PASSWORD_SUBMIT}
-                    type="submit"
-                    disabled={isLoading}
-                    className="tg-btn tg-btn--primary"
-                    style={{ width: '100%', padding: '10px 16px' }}
-                  >
-                    {isRegisterMode
-                      ? t('auth.password.registerSubmit', language)
-                      : t('auth.password.loginSubmit', language)}
-                  </button>
-
-                  <button
-                    id={DOM_IDS.AUTH_MODE_REGISTER_TOGGLE}
+                    id={DOM_IDS.BTN_SIMULATE_QR_SCAN}
                     type="button"
-                    data-mode={isRegisterMode ? 'register' : 'login'}
-                    aria-pressed={isRegisterMode}
+                    disabled={isLoading}
                     onClick={() => {
-                      setIsRegisterMode((v) => !v);
                       setLocalError(null);
                       clearError();
+                      void simulateQrAccept(qrSession?.pair_id).catch((err) =>
+                        setLocalError(err instanceof Error ? err.message : String(err)),
+                      );
                     }}
-                    className="tg-btn tg-btn--ghost"
-                    style={{ width: '100%', fontSize: '13px' }}
+                    className="tg-btn tg-btn--secondary"
+                    style={{ width: '100%', padding: '9px 14px' }}
                   >
-                    {isRegisterMode
-                      ? t('auth.password.switchToLogin', language)
-                      : t('auth.password.switchToRegister', language)}
+                    📱 {t('auth.qr.simulateScan', language)}
                   </button>
-                </form>
-              </div>
-            )}
-
-            {/* Tab 4: Email OTP */}
-            {activeTab === 'email' && (
-              <div role="tabpanel" aria-labelledby={DOM_IDS.TAB_AUTH_EMAIL}>
-                {!isEmailCodeStep ? (
-                  <form
-                    onSubmit={(e) => void handleSendEmailOtp(e)}
-                    style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
-                  >
-                    <input
-                      type="email"
-                      name="email"
-                      value={emailInput}
-                      onChange={(e) => setEmailInput(e.target.value)}
-                      placeholder="alice@example.com"
-                      aria-label={t('auth.email.label', language)}
-                      className="tg-input"
-                    />
-                    <button
-                      id={DOM_IDS.BTN_AUTH_SEND_CODE}
-                      type="submit"
-                      disabled={isLoading}
-                      className="tg-btn tg-btn--primary"
-                      style={{ width: '100%', padding: '10px 16px' }}
-                    >
-                      {t('auth.email.sendCode', language)}
-                    </button>
-                  </form>
-                ) : (
-                  <form
-                    onSubmit={(e) => void handleVerifyEmailOtp(e)}
-                    style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
-                  >
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        fontSize: '12.5px',
-                        color: 'var(--tg-text-secondary)',
-                      }}
-                    >
-                      <span>
-                        {t('auth.email.label', language)}: <strong>{pendingEmail ?? emailInput}</strong>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEmailOtpInput('');
-                          setLocalError(null);
-                          useAuthStore.setState({
-                            emailCodeHash: null,
-                            pendingEmail: null,
-                            devCodeHint: null,
-                            error: null,
-                          });
-                        }}
-                        className="tg-btn tg-btn--ghost"
-                        style={{ padding: '2px 8px', fontSize: '12px' }}
-                      >
-                        {t('common.back', language)}
-                      </button>
-                    </div>
-
-                    {devCodeHint && (
-                      <div
-                        data-testid="dev-email-otp-hint"
-                        style={{
-                          padding: '6px 10px',
-                          borderRadius: 'var(--tg-radius-sm)',
-                          backgroundColor: 'var(--tg-accent-soft)',
-                          color: 'var(--tg-accent)',
-                          fontSize: '12.5px',
-                          fontWeight: 600,
-                        }}
-                      >
-                        Email Verification Code: {devCodeHint}
-                      </div>
-                    )}
-
-                    <input
-                      id={DOM_IDS.AUTH_CODE_INPUT}
-                      type="text"
-                      inputMode="numeric"
-                      autoFocus
-                      value={emailOtpInput}
-                      onChange={(e) => setEmailOtpInput(e.target.value)}
-                      placeholder={t('auth.phone.codePlaceholder', language)}
-                      aria-label={t('auth.phone.codeLabel', language)}
-                      className="tg-input"
-                    />
-
-                    <button
-                      type="submit"
-                      disabled={isLoading}
-                      className="tg-btn tg-btn--primary"
-                      style={{ width: '100%', padding: '10px 16px' }}
-                    >
-                      {t('auth.email.verify', language)}
-                    </button>
-                  </form>
                 )}
-              </div>
-            )}
-
-            {/* Tab 5: Alipay QR Session */}
-            {activeTab === 'alipay' && (
-              <div
-                role="tabpanel"
-                aria-labelledby={DOM_IDS.TAB_AUTH_ALIPAY}
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  gap: '12px',
-                  textAlign: 'center',
-                }}
-              >
-                <QrMatrixSvg
-                  id={DOM_IDS.QR_LOGIN_SVG}
-                  size={200}
-                  value={alipaySession?.qr_url || 'https://qr.alipay.com/gpui-telegram-auth'}
-                  accentColor="#1687FF"
-                />
-                <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
-                  {t('auth.alipay.title', language)}
-                </div>
-                <button
-                  id={DOM_IDS.BTN_SIMULATE_QR_SCAN}
-                  type="button"
-                  disabled={isLoading}
-                  onClick={() => {
-                    setLocalError(null);
-                    clearError();
-                    void confirmAlipay(alipaySession?.session_id).catch((err) =>
-                      setLocalError(err instanceof Error ? err.message : String(err)),
-                    );
-                  }}
-                  className="tg-btn tg-btn--primary"
-                  style={{ width: '100%', padding: '10px 16px' }}
-                >
-                  ✓ {t('auth.alipay.confirm', language)}
-                </button>
               </div>
             )}
 
