@@ -1,24 +1,24 @@
 {
-  "name": "Telegram Web — GPUI Edition",
-  "short_name": "Telegram Web",
-  "description": "High-performance bilingual Telegram Web client with E2EE Secret Chats, WebRTC Calls, MiniApps, and AI Workspaces.",
-  "start_url": "/",
-  "scope": "/",
+  "name": "Fabushi Web v1.6.11",
+  "short_name": "Fabushi Web",
+  "description": "Fabushi Web v1.6.11 — High-performance bilingual web client with E2EE Vault & Secret Chats, WebRTC Calls, Fabushi 3D WASM + WebMCP Mini Apps, and AI Workspaces.",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#0E1621",
-  "theme_color": "#0E1621",
+  "background_color": "#0E0E0E",
+  "theme_color": "#0E0E0E",
   "lang": "zh-CN",
   "categories": ["social", "productivity", "communication"],
   "icons": [
     {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='42' fill='%230E1621'/%3E%3Ccircle cx='96' cy='96' r='74' fill='%233390EC'/%3E%3Cpath d='M133 63L52 94.5c-5.4 2.1-5.3 5.2-1 6.5l20.8 6.5 48.1-30.3c2.3-1.4 4.4-.6 2.7 1L83.6 113.4l-1.5 21.8c2.2 0 3.2-1 4.4-2.2l10.6-10.3 22 16.2c4.1 2.2 7 1.1 8-3.8L141.6 69c1.5-6-2.3-8.7-8.6-6z' fill='%23FFFFFF'/%3E%3C/svg%3E",
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='42' fill='%230E0E0E'/%3E%3Ccircle cx='96' cy='96' r='74' fill='%230A84FF'/%3E%3Cpath d='M133 63L52 94.5c-5.4 2.1-5.3 5.2-1 6.5l20.8 6.5 48.1-30.3c2.3-1.4 4.4-.6 2.7 1L83.6 113.4l-1.5 21.8c2.2 0 3.2-1 4.4-2.2l10.6-10.3 22 16.2c4.1 2.2 7 1.1 8-3.8L141.6 69c1.5-6-2.3-8.7-8.6-6z' fill='%23FFFFFF'/%3E%3C/svg%3E",
       "sizes": "192x192",
       "type": "image/svg+xml",
       "purpose": "any maskable"
     },
     {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%230E1621'/%3E%3Ccircle cx='256' cy='256' r='198' fill='%233390EC'/%3E%3Cpath d='M355 168L139 252c-14.4 5.6-14.1 13.9-2.7 17.3l55.5 17.3 128.3-80.8c6.1-3.7 11.7-1.6 7.2 2.7L223 302.4l-4 58.1c5.9 0 8.5-2.7 11.7-5.9l28.3-27.5 58.7 43.2c10.9 5.9 18.7 2.9 21.3-10.1L377.6 184c4-16-6.1-23.2-22.6-16z' fill='%23FFFFFF'/%3E%3C/svg%3E",
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%230E0E0E'/%3E%3Ccircle cx='256' cy='256' r='198' fill='%230A84FF'/%3E%3Cpath d='M355 168L139 252c-14.4 5.6-14.1 13.9-2.7 17.3l55.5 17.3 128.3-80.8c6.1-3.7 11.7-1.6 7.2 2.7L223 302.4l-4 58.1c5.9 0 8.5-2.7 11.7-5.9l28.3-27.5 58.7 43.2c10.9 5.9 18.7 2.9 21.3-10.1L377.6 184c4-16-6.1-23.2-22.6-16z' fill='%23FFFFFF'/%3E%3C/svg%3E",
       "sizes": "512x512",
       "type": "image/svg+xml",
       "purpose": "any maskable"

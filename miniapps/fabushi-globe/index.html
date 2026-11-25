@@ -3,47 +3,47 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>全球法布施 · Global Dharma</title>
-  <script src="/js/telegram-web-app.js" onerror="void 0"></script>
+  <title>全球法布施</title>
   <style>
-    :root{--bg:#0B111A;--bg2:#142234;--text:#E8EEF7;--accent:#2563EB;--cyan:#0EA5E9;--gold:#FFD700;--zen:#D4AF37;--glass:rgba(255,255,255,.10);--border:rgba(255,255,255,.16)}
+    :root{--bg:#0B0E14;--bg2:#1B263B;--text:#E8EAF6;--purple:#7B1FA2;--pink:#E91E63;--gold:#FFD700;--zen:#D4AF37;--glass:rgba(255,255,255,.10);--border:rgba(255,255,255,.15)}
     *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
     html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans SC",sans-serif}
-    #app{position:relative;width:100%;height:100%;display:flex;flex-direction:column;background:radial-gradient(circle at 50% 28%,#102A49 0%,var(--bg) 72%)}
+    #app{position:relative;width:100%;height:100%;display:flex;flex-direction:column;background:radial-gradient(circle at 50% 28%,#1A237E 0%,var(--bg) 70%)}
     #scene{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
     #hud{position:relative;flex:1;display:flex;flex-direction:column;justify-content:space-between;pointer-events:none;padding:12px 14px 8px;z-index:2;overflow-y:auto}
     .pe{pointer-events:auto}.row{display:flex;align-items:center;gap:8px}.col{display:flex;flex-direction:column;gap:8px}.wrap{display:flex;flex-wrap:wrap;gap:6px}.sp{justify-content:space-between}.grow{flex:1;min-width:0}
-    .glass{background:rgba(15,23,36,.72);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid var(--border);border-radius:18px;box-shadow:0 8px 28px rgba(0,0,0,.35)}
-    .pill{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:999px;background:rgba(11,17,26,.72);border:1px solid var(--border);color:var(--text);font-size:12px;font-weight:600;cursor:pointer}
-    .seg{display:inline-flex;padding:3px;border-radius:999px;background:rgba(0,0,0,.38);border:1px solid var(--border)}
-    .seg button{border:0;background:transparent;color:rgba(232,238,247,.72);padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;cursor:pointer}
-    .seg button.on{background:var(--accent);color:#fff}.zen-seg button.on{background:var(--zen);color:#000}
+    .glass{background:rgba(15,20,32,.68);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid var(--border);border-radius:18px;box-shadow:0 8px 28px rgba(0,0,0,.35)}
+    .pill{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:999px;background:rgba(11,14,20,.65);border:1px solid var(--border);color:var(--text);font-size:12px;font-weight:600;cursor:pointer}
+    .seg{display:inline-flex;padding:3px;border-radius:999px;background:rgba(0,0,0,.36);border:1px solid var(--border)}
+    .seg button{border:0;background:transparent;color:rgba(232,234,246,.72);padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;cursor:pointer}
+    .seg button.on{background:var(--purple);color:#fff}.zen-seg button.on{background:var(--zen);color:#000}
     .btn{border:1px solid var(--border);background:var(--glass);color:var(--text);padding:8px 14px;border-radius:12px;font-size:13px;font-weight:600;cursor:pointer}
     .btn-gold{background:linear-gradient(135deg,var(--zen),#A67C00);color:#111;border:0;font-weight:700}
     .btn-red{background:linear-gradient(135deg,#8B3A3A,#602020);color:#fff;border:0;font-weight:700}
-    .btn-primary{background:linear-gradient(135deg,#1D4ED8,#0EA5E9);color:#fff;border:0;font-weight:700}
-    .chip{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:999px;background:rgba(37,99,235,.22);border:1px solid rgba(255,215,0,.38);color:var(--gold);font-size:12px;font-weight:600;cursor:pointer}
-    .composer{background:rgba(20,27,38,.92);border:1px solid var(--border);border-radius:22px;padding:8px 10px}
+    .btn-purple{background:linear-gradient(135deg,var(--purple),var(--pink));color:#fff;border:0;font-weight:700}
+    .chip{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:999px;background:rgba(123,31,162,.22);border:1px solid rgba(255,215,0,.35);color:var(--gold);font-size:12px;font-weight:600;cursor:pointer}
+    .composer{background:rgba(26,28,36,.92);border:1px solid var(--border);border-radius:22px;padding:8px 10px}
     .inp{width:100%;background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:12px;color:#fff;padding:9px 12px;font-size:14px;outline:none}
     .inp-bare{flex:1;background:transparent;border:0;color:#fff;font-size:14px;outline:none;padding:6px 4px;min-width:0}
     .icon-btn{width:38px;height:38px;border-radius:50%;border:1px solid var(--border);background:var(--glass);color:#fff;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;flex-shrink:0}
     .chat-box{max-height:170px;overflow-y:auto;padding:8px;background:rgba(0,0,0,.25);border-radius:14px;border:1px solid rgba(255,255,255,.08)}
     .bub{max-width:86%;padding:8px 11px;border-radius:12px;font-size:12.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
-    .bub.u{align-self:flex-end;background:rgba(37,99,235,.38)}.bub.a{align-self:flex-start;background:rgba(255,255,255,.09)}
-    .menu{max-height:220px;overflow-y:auto;padding:10px;border-radius:16px;background:rgba(20,27,38,.96);border:1px solid var(--border)}
-    .zen-counter{align-self:center;text-align:center;padding:16px 28px;border-radius:26px;background:rgba(0,0,0,.44);border:1px solid rgba(212,175,55,.4)}
+    .bub.u{align-self:flex-end;background:rgba(123,31,162,.35)}.bub.a{align-self:flex-start;background:rgba(255,255,255,.09)}
+    .menu{max-height:220px;overflow-y:auto;padding:10px;border-radius:16px;background:rgba(24,26,34,.96);border:1px solid var(--border)}
+    .zen-counter{align-self:center;text-align:center;padding:16px 28px;border-radius:26px;background:rgba(0,0,0,.42);border:1px solid rgba(212,175,55,.35)}
     .zen-num{font-size:52px;font-weight:800;color:var(--zen);line-height:1}
-    .prog{height:5px;background:rgba(255,255,255,.15);border-radius:999px;overflow:hidden}.prog>i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--gold))}
+    .prog{height:5px;background:rgba(255,255,255,.15);border-radius:999px;overflow:hidden}.prog>i{display:block;height:100%;background:linear-gradient(90deg,var(--purple),var(--gold))}
     .card{padding:14px;border-radius:16px;background:var(--glass);border:1px solid var(--border);color:var(--text)}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
-    #tabs{position:relative;z-index:3;display:flex;height:62px;background:rgba(15,23,36,.88);backdrop-filter:blur(16px);border-top:1px solid var(--border)}
-    #tabs button{flex:1;border:0;background:transparent;color:rgba(232,238,247,.68);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:11px;font-weight:600;cursor:pointer}
-    #tabs button.on{color:var(--gold);background:rgba(37,99,235,.22)}
-    #sheet{position:fixed;inset:0;z-index:10;background:rgba(5,9,16,.7);backdrop-filter:blur(6px);display:none;align-items:flex-end;justify-content:center}#sheet.open{display:flex}
-    .sheet-card{width:100%;max-width:520px;max-height:84vh;display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:22px 22px 0 0;background:#131C2A;border-top:1px solid var(--border);overflow:hidden}
+    #tabs{position:relative;z-index:3;display:flex;height:62px;background:rgba(16,20,32,.86);backdrop-filter:blur(16px);border-top:1px solid var(--border)}
+    #tabs button{flex:1;border:0;background:transparent;color:rgba(232,234,246,.65);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:11px;font-weight:600;cursor:pointer}
+    #tabs button.on{color:var(--gold);background:rgba(123,31,162,.24)}
+    #sheet{position:fixed;inset:0;z-index:10;background:rgba(5,7,12,.68);backdrop-filter:blur(6px);display:none;align-items:flex-end;justify-content:center}#sheet.open{display:flex}
+    .sheet-card{width:100%;max-width:520px;max-height:84vh;display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:22px 22px 0 0;background:#161922;border-top:1px solid var(--border);overflow:hidden}
     .scroll{overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:8px;min-height:0}
-    #toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(15,23,36,.95);border:1px solid var(--gold);color:#fff;padding:9px 16px;border-radius:999px;font-size:12.5px;font-weight:600;display:none;max-width:90%;text-align:center}
-    .ach-pop{position:fixed;top:54px;left:50%;transform:translateX(-50%);z-index:19;padding:12px 18px;border-radius:16px;background:linear-gradient(135deg,#2A1E08,#131C2A);border:1px solid var(--gold);color:#fff;display:flex;align-items:center;gap:10px}
+    #toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(20,24,36,.95);border:1px solid var(--gold);color:#fff;padding:9px 16px;border-radius:999px;font-size:12.5px;font-weight:600;display:none;max-width:90%;text-align:center}
+    .ach-pop{position:fixed;top:54px;left:50%;transform:translateX(-50%);z-index:19;padding:12px 18px;border-radius:16px;background:linear-gradient(135deg,#2A1E08,#141722);border:1px solid var(--gold);color:#fff;display:flex;align-items:center;gap:10px}
   </style>
+  <script src="../../js/telegram-web-app.js"></script>
 </head>
 <body>
 <div id="app">
@@ -53,23 +53,17 @@
 <script>
 (() => {
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) {
-    try { tg.ready(); tg.expand(); } catch (_) {}
-    if (tg.setHeaderColor) try { tg.setHeaderColor('#0B111A'); } catch (_) {}
-    if (tg.setBackgroundColor) try { tg.setBackgroundColor('#0B111A'); } catch (_) {}
-  }
-  const _q = new URLSearchParams(window.location.search);
-  const _h = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+  if (tg) { tg.ready(); tg.expand(); tg.setHeaderColor('#0B0E14'); tg.setBackgroundColor('#0B0E14'); }
+  const _q = new URLSearchParams(window.location.search), _h = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
   const initData = (tg && tg.initData) || window.__TG_INIT_DATA__ || _h.get('tgWebAppData') || _q.get('tgWebAppData') || _h.get('init_data') || _q.get('init_data') || '';
   const authToken = window.__TG_AUTH_TOKEN__ || _h.get('auth_token') || _q.get('auth_token') || '';
   const rawApiBase = window.__TG_API_BASE__ || _h.get('api_base') || _q.get('api_base') || '';
   const apiBase = rawApiBase ? rawApiBase.replace(/\/+$/, '') : '';
-  const apiUrl = (path) => /^https?:\/\//i.test(path) ? path : (apiBase + (path.startsWith('/') ? path : '/' + path));
+  const apiUrl = (p) => /^https?:\/\//i.test(p) ? p : (apiBase + (p.startsWith('/') ? p : '/' + p));
 
   const canvas = document.getElementById('scene'), ctx = canvas.getContext('2d');
   const hud = document.getElementById('hud'), tabsEl = document.getElementById('tabs'), sheetEl = document.getElementById('sheet'), toastEl = document.getElementById('toast'), filePicker = document.getElementById('file-picker');
   const enc = new TextEncoder(), dec = new TextDecoder(), imgs = {};
-
   ['earth_texture.jpg', 'home_world_lightfield.webp', 'zen_room_backdrop_2d.webp'].forEach(n => {
     const im = new Image();
     im.crossOrigin = 'anonymous';
@@ -82,8 +76,7 @@
     im.src = apiUrl('/api/v1/fabushi-miniapp/assets/' + n);
     imgs[n] = im;
   });
-
-  let wasm = null, lastVm = null, lastUiRev = -1, lastSheetKey = '', lastTab = '', editRec = null, composing = false;
+  let wasm = null, lastVm = null, bootError = null, lastUiRev = -1, lastSheetKey = '', lastTab = '', editRec = null, composing = false;
 
   const h = (tag, props, ...kids) => {
     const el = document.createElement(tag);
@@ -144,15 +137,31 @@
     }
   }
 
+  function showLocalToast(msg) {
+    if (!msg) return;
+    toastEl.textContent = msg;
+    toastEl.style.display = 'block';
+    clearTimeout(toastEl._t);
+    toastEl._t = setTimeout(() => { toastEl.style.display = 'none'; }, 3600);
+  }
+
   function runEffects(effects) {
     for (const ef of (effects || [])) {
       if (ef.kind === 'http') {
-        const headers = {};
-        if (initData) headers['X-Telegram-Init-Data'] = initData;
-        if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+        const headers = { 'X-Telegram-Init-Data': initData };
+        const activeToken = window.__TG_AUTH_TOKEN__ || authToken;
+        if (activeToken) headers['Authorization'] = 'Bearer ' + activeToken;
         if (ef.body) headers['Content-Type'] = 'application/json';
         fetch(apiUrl(ef.url), { method: ef.method, headers, body: ef.body ? JSON.stringify(ef.body) : undefined })
-          .then(async r => ({ response_type: ef.response_type, ok: r.ok, payload: await r.json().catch(() => ({})) }))
+          .then(async r => {
+            const payload = await r.json().catch(() => ({}));
+            if (!r.ok && String(ef.url || '').includes('/membership') && (r.status === 402 || payload.error === 'payment_required')) {
+              const msg = payload.message || '需要有效的支付订单或兑换码才能开通会员 (HTTP 402)';
+              showLocalToast(msg);
+              return { response_type: 'error', ok: false, error: msg };
+            }
+            return { response_type: ef.response_type, ok: r.ok, payload };
+          })
           .then(res => applyResult(callStr('fabushi_wasm_apply_http', JSON.stringify(res))))
           .catch(err => applyResult(callStr('fabushi_wasm_apply_http', JSON.stringify({ response_type: 'error', ok: false, error: String(err) }))));
       } else if (ef.kind === 'cloud_storage_set' && tg && tg.CloudStorage) tg.CloudStorage.setItem(ef.key, ef.value);
@@ -161,6 +170,41 @@
   }
   const segPill = (mode, can3d, cmdType, isZen) => h('div', { class: 'seg' + (isZen ? ' zen-seg' : '') }, ['two_d', 'three_d'].map(m => h('button', { class: mode === m ? 'on' : '', 'data-mode': m, text: (m === 'three_d' && !can3d ? '🔒 ' : '') + (m === 'two_d' ? '2D' : '3D'), onClick: () => dispatch({ type: cmdType, mode: m }) })));
 
+  const snapshotSummary = () => {
+    if (!lastVm) {
+      if (bootError) {
+        return { ok: false, boot_error: bootError, status_text: 'WASM 加载失败: ' + bootError };
+      }
+      return null;
+    }
+    let status_text = '';
+    if (lastVm.is_transferring) {
+      status_text = `发送中: 《${lastVm.current_sending_scripture || '经典'}》 → ${lastVm.current_sending_country || 'ALL'} · 已传 ${lastVm.global_data_sent_formatted || '0 B'}`;
+    } else if (lastVm.is_in_session) {
+      status_text = `禅室共修进行中 · 念诵 ${lastVm.chant_count || 0} 遍`;
+    } else if (lastVm.global_data_sent_formatted && lastVm.global_sent_count > 0) {
+      status_text = `已累计传经: ${lastVm.global_data_sent_formatted} · 页面: ${lastVm.active_tab || 'home'}`;
+    }
+    return {
+      active_tab: lastVm.active_tab,
+      is_transferring: lastVm.is_transferring,
+      current_sending_scripture: lastVm.current_sending_scripture,
+      current_sending_country: lastVm.current_sending_country,
+      global_sent_count: lastVm.global_sent_count,
+      global_data_sent_formatted: lastVm.global_data_sent_formatted,
+      is_dharma_composer_mode: lastVm.is_dharma_composer_mode,
+      is_in_session: lastVm.is_in_session,
+      chant_count: lastVm.chant_count,
+      locked_practice: lastVm.locked_practice,
+      total_transfer_bytes: lastVm.profile?.total_transfer_bytes,
+      total_transfer_count: lastVm.profile?.total_transfer_count,
+      total_practice_sessions: lastVm.profile?.total_practice_sessions,
+      total_practice_chants: lastVm.profile?.total_practice_chants,
+      status_text,
+    };
+  };
+
+  let lastReportedStatus = '', lastStatusPushAt = 0;
   function syncLiveMetrics(vm) {
     const byId = id => document.getElementById(id), s = vm.strings;
     const oh = byId('online-home-pill'); if (oh) oh.textContent = `${s.online_global_prefix} ${vm.online_global_sending_count}`;
@@ -170,6 +214,14 @@
     const xp = byId('xfer-prog-bar'); if (xp) xp.style.width = `${Math.round(vm.current_country_progress * 100)}%`;
     const oz = byId('online-zen-pill'); if (oz) oz.textContent = `🧘 ${vm.online_zen_room_count}`;
     const zt = byId('zen-timer'); if (zt) zt.textContent = `⏱ ${vm.session_duration_formatted}`;
+    if (navigator.modelContext && typeof navigator.modelContext.reportStatus === 'function') {
+      const snap = snapshotSummary(), nowMs = Date.now();
+      if (snap && snap.status_text !== lastReportedStatus && (nowMs - lastStatusPushAt >= 800 || !snap.status_text)) {
+        lastReportedStatus = snap.status_text;
+        lastStatusPushAt = nowMs;
+        navigator.modelContext.reportStatus(snap);
+      }
+    }
   }
 
   function renderHud(vm) {
@@ -194,7 +246,7 @@
         h('div', { class: 'row sp' }, h('strong', { style: 'font-size:14px', text: s.global_pudu }), segPill(vm.home_render_mode, vm.can_use_3d, 'select_home_render_mode', false)),
         !vm.is_dharma_composer_mode && (vm.ai_messages.length > 0 || vm.is_ai_generating) && h('div', { class: 'chat-box col' }, vm.ai_messages.map(m => h('div', { class: 'bub ' + (m.is_user ? 'u' : 'a'), text: m.text })), vm.is_ai_generating && h('div', { class: 'bub a', text: '...' })),
         vm.is_plus_menu_open && h('div', { class: 'menu col' },
-          h('div', { class: 'row sp' }, h('button', { class: 'btn btn-primary grow', text: '🙏 全球法布施', onClick: () => dispatch({ type: 'activate_dharma_mode' }) }), h('button', { class: 'btn', text: '📎 添加图片和文件', onClick: () => filePicker.click() })),
+          h('div', { class: 'row sp' }, h('button', { class: 'btn btn-purple grow', text: '🙏 全球法布施', onClick: () => dispatch({ type: 'activate_dharma_mode' }) }), h('button', { class: 'btn', text: '📎 添加图片和文件', onClick: () => filePicker.click() })),
           h('div', { style: 'font-size:11px;opacity:.7', text: '八大经典' }), h('div', { class: 'wrap' }, vm.sutras.map(su => h('button', { class: 'chip', text: su.title, onClick: () => dispatch({ type: 'select_dharma_sutra', title: su.title }) }))),
           h('div', { style: 'font-size:11px;opacity:.7', text: 'R2 法宝包' }), h('div', { class: 'wrap' }, vm.dharma_packages.map(pk => h('button', { class: 'chip', text: pk.display_name, onClick: () => dispatch({ type: 'select_dharma_package', key: pk.key }) })))
         ),
@@ -226,7 +278,7 @@
       const p = vm.profile, nextLoc = vm.locale === 'en' ? 'zh-CN' : 'en';
       hud.append(h('div', { class: 'col pe', style: 'padding-bottom:16px' },
         h('div', { class: 'card row sp' },
-          h('div', { class: 'row grow' }, h('div', { class: 'icon-btn btn-primary', style: 'width:54px;height:54px;font-size:22px', text: (p.display_name || '?')[0].toUpperCase() }), h('div', { class: 'col grow', style: 'gap:2px' }, h('strong', { style: 'font-size:17px', text: p.display_name }), h('span', { style: 'font-size:12px;opacity:.7', text: `@${p.username} · 学号 ${p.user_no}` }), h('span', { style: 'font-size:12px;color:#FFD700', text: `一门深入: ${vm.locked_practice ? vm.locked_practice.title : '未选择'}` }))),
+          h('div', { class: 'row grow' }, h('div', { class: 'icon-btn btn-purple', style: 'width:54px;height:54px;font-size:22px', text: (p.display_name || '?')[0].toUpperCase() }), h('div', { class: 'col grow', style: 'gap:2px' }, h('strong', { style: 'font-size:17px', text: p.display_name }), h('span', { style: 'font-size:12px;opacity:.7', text: `@${p.username} · 学号 ${p.user_no}` }), h('span', { style: 'font-size:12px;color:#FFD700', text: `一门深入: ${vm.locked_practice ? vm.locked_practice.title : '未选择'}` }))),
           h('div', { class: 'col', style: 'gap:6px' }, h('button', { class: 'btn', text: s.edit_profile, onClick: () => dispatch({ type: 'open_edit_profile', open: true }) }), h('button', { class: 'btn', text: vm.locale === 'en' ? '中文' : 'EN', onClick: () => dispatch({ type: 'set_locale', locale: nextLoc }) }))
         ),
         h('div', { class: 'card row sp', style: 'background:linear-gradient(135deg,#B71C1C,#6A1B1A);cursor:pointer', onClick: () => dispatch({ type: 'open_practice_records', open: true }) }, h('div', null, h('div', { style: 'font-size:13px;opacity:.85', text: `${s.practice_records_title} · 今日 ${vm.practice_stats.today_count} 遍` }), h('strong', { style: 'font-size:18px', text: `累计 ${vm.practice_stats.total_count} 遍 · ${vm.practice_stats.consecutive_days} 天连续` })), h('span', { text: '›' })),
@@ -266,9 +318,7 @@
       const isP = modal === 'plb', entries = isP ? vm.practice_leaderboard : vm.leaderboard;
       sheetEl.append(h('div', { class: 'sheet-card' }, hdr(isP ? '禅室修行榜单' : s.leaderboard_title, { type: isP ? 'open_practice_leaderboard' : 'open_leaderboard', open: false }, h('button', { class: 'btn', text: '🔄', onClick: () => dispatch({ type: 'refresh_leaderboard' }) })),
         vm.selected_leaderboard_entry && h('div', { class: 'card col', style: 'border-color:#FFD700' }, h('strong', { text: `${vm.selected_leaderboard_entry.display_name} (@${vm.selected_leaderboard_entry.username})` }), h('span', { style: 'font-size:12px', text: `排名 #${vm.selected_leaderboard_entry.rank} · 累计 ${vm.selected_leaderboard_entry.total_bytes_formatted} · 修行 ${vm.selected_leaderboard_entry.total_duration} 分钟` })),
-        entries.length === 0
-          ? h('div', { class: 'card', style: 'text-align:center;opacity:.75;font-size:13px', text: '暂无排行数据，完成法布施或禅室修行后将实时计入真实榜单' })
-          : h('div', { class: 'scroll' }, entries.map(e => h('div', { class: 'card row sp', onClick: () => dispatch({ type: 'select_leaderboard_user', username: e.username }) }, h('div', { class: 'row grow' }, h('span', { class: 'pill', text: `#${e.rank}` }), h('div', { class: 'grow' }, h('div', { text: e.display_name || e.username }), h('div', { style: 'font-size:11px;opacity:.65', text: `${e.follower_count} 粉丝 · @${e.username}` }))), h('div', { class: 'row' }, h('span', { style: 'color:#FFD700;font-size:12px', text: isP ? `${e.total_duration} 分钟` : e.total_bytes_formatted }), !e.is_self && h('button', { class: 'btn ' + (e.is_following ? '' : 'btn-primary'), text: e.is_following ? '已关注' : '+ 关注', onClick: ev => { ev.stopPropagation(); dispatch({ type: 'toggle_follow', target_username: e.username }); } })))))
+        h('div', { class: 'scroll' }, entries.map(e => h('div', { class: 'card row sp', onClick: () => dispatch({ type: 'select_leaderboard_user', username: e.username }) }, h('div', { class: 'row grow' }, h('span', { class: 'pill', text: `#${e.rank}` }), h('div', { class: 'grow' }, h('div', { text: e.display_name || e.username }), h('div', { style: 'font-size:11px;opacity:.65', text: `${e.follower_count} 粉丝 · @${e.username}` }))), h('div', { class: 'row' }, h('span', { style: 'color:#FFD700;font-size:12px', text: isP ? `${e.total_duration} 分钟` : e.total_bytes_formatted }), !e.is_self && h('button', { class: 'btn ' + (e.is_following ? '' : 'btn-purple'), text: e.is_following ? '已关注' : '+ 关注', onClick: ev => { ev.stopPropagation(); dispatch({ type: 'toggle_follow', target_username: e.username }); } })))))
       ));
     } else if (modal === 'psel') {
       const inp = h('input', { class: 'inp', placeholder: '输入或选择主修功课（如：金刚经、心经）' });
@@ -300,33 +350,192 @@
   filePicker.addEventListener('change', async () => { const f = filePicker.files && filePicker.files[0]; if (!f) return; let preview = null; if (f.size < 65536 && /text|json|md/.test(f.type || f.name)) preview = await f.text().catch(() => null); dispatch({ type: 'attach_custom_file', name: f.name, size_bytes: f.size, preview_text: preview }); filePicker.value = ''; });
   window.__FABUSHI_TEST_HOOK__ = { getState: () => lastVm, dispatch: cmd => dispatch(cmd), applyHttp: p => applyResult(callStr('fabushi_wasm_apply_http', typeof p === 'string' ? p : JSON.stringify(p))) };
 
-  async function loadWasmBytes() {
-    const candidates = [apiUrl('/api/v1/fabushi-miniapp/app.wasm'), './fabushi_miniapp.wasm'];
-    for (const url of candidates) {
-      try {
-        const resp = await fetch(url);
-        if (resp.ok) {
-          const buf = await resp.arrayBuffer();
-          if (buf.byteLength > 1024) return buf;
-        }
-      } catch (_) {}
+  let resolveBootReady = () => {};
+  const bootReadyPromise = new Promise(resolve => { resolveBootReady = resolve; });
+
+  function registerFabushiWebMcpTools() {
+    if (!navigator.modelContext || typeof navigator.modelContext.registerTool !== 'function') return;
+    const ensureReady = async () => {
+      if (bootError) throw new Error('全球法布施 WASM 加载失败: ' + bootError);
+      if (!wasm || !lastVm) {
+        await Promise.race([
+          bootReadyPromise,
+          new Promise(r => setTimeout(r, 8000)),
+        ]);
+      }
+      if (bootError) throw new Error('全球法布施 WASM 加载失败: ' + bootError);
+      if (!wasm || !lastVm) throw new Error('全球法布施 WASM 运行时尚未初始化完成');
+      return lastVm;
+    };
+    if (typeof navigator.modelContext.setStateProvider === 'function') {
+      navigator.modelContext.setStateProvider(snapshotSummary);
     }
-    throw new Error('Unable to fetch fabushi_miniapp.wasm');
+    const tools = [
+      {
+        name: 'fabushi_get_status',
+        description: '读取全球法布施小程序当前实时状态（标签页、正在发送的经文与地区、累计字节、禅修会话与功德档案）',
+        inputSchema: { type: 'object', properties: {} },
+        annotations: { readOnlyHint: true },
+        execute: async () => { await ensureReady(); return snapshotSummary(); },
+      },
+      {
+        name: 'fabushi_switch_tab',
+        description: '切换全球法布施底部主标签页：home(全球法布施)、zen_room(禅室共修)、profile(我的功德)',
+        inputSchema: { type: 'object', required: ['tab'], properties: { tab: { type: 'string' } } },
+        execute: async ({ tab } = {}) => {
+          await ensureReady();
+          const mapTab = { home: 'home', dharma: 'home', zen_room: 'zen_room', zen: 'zen_room', practice: 'zen_room', profile: 'profile', discover: 'profile', me: 'profile' };
+          const target = mapTab[String(tab || 'home').toLowerCase()] || 'home';
+          dispatch({ type: 'select_tab', tab: target });
+          return snapshotSummary();
+        },
+      },
+      {
+        name: 'fabushi_send_dharma',
+        description: '直接在小程序界面选择指定经典（如金刚经、心经、大悲咒）与国家/全球节点（ALL）并发起全球法布施传输',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sutra: { type: 'string', description: '经文名称，例如 金刚经 / 心经 / 大悲咒' },
+            target_country: { type: 'string', description: '目标地区代码，ALL 代表全球' },
+            looping: { type: 'boolean', description: '是否开启循环布施' }
+          }
+        },
+        execute: async ({ sutra, target_country, looping } = {}) => {
+          await ensureReady();
+          dispatch({ type: 'select_tab', tab: 'home' });
+          dispatch({ type: 'activate_dharma_mode' });
+          const cleanSutra = String(sutra || '心经').replace(/[《》\s]/g, '').trim();
+          const found = (lastVm.sutras || []).find(su => su.title === cleanSutra || su.title.includes(cleanSutra) || cleanSutra.includes(su.title));
+          dispatch({ type: 'select_dharma_sutra', title: found ? found.title : cleanSutra });
+          if (target_country) {
+            const code = String(target_country).trim().toUpperCase();
+            if (code === 'ALL') dispatch({ type: 'toggle_region_all', selected: true });
+            else dispatch({ type: 'toggle_region_country', code });
+          } else if (!lastVm.country_list || !lastVm.country_list.length) {
+            dispatch({ type: 'toggle_region_all', selected: true });
+          }
+          if (typeof looping === 'boolean' && lastVm.is_looping !== looping) {
+            dispatch({ type: 'toggle_looping' });
+          }
+          dispatch({ type: 'submit_composer' });
+          return { dispatched: true, status: snapshotSummary() };
+        },
+      },
+      {
+        name: 'fabushi_stop_dharma',
+        description: '停止当前正在进行的全球法布施传输',
+        inputSchema: { type: 'object', properties: {} },
+        execute: async () => {
+          await ensureReady();
+          dispatch({ type: 'stop_transfer' });
+          return snapshotSummary();
+        },
+      },
+      {
+        name: 'fabushi_record_practice',
+        description: '在禅室共修补录一次念诵/共修功课记录',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sutra: { type: 'string' },
+            chant_count: { type: 'integer' },
+            duration_minutes: { type: 'integer' },
+            note: { type: 'string' }
+          }
+        },
+        execute: async ({ sutra, chant_count, duration_minutes, note } = {}) => {
+          await ensureReady();
+          const today = new Date().toISOString().slice(0, 10);
+          dispatch({
+            type: 'add_practice_record',
+            sutra_name: String(sutra || lastVm.locked_practice?.title || '心经').replace(/[《》\s]/g, ''),
+            chant_count: Number(chant_count) || 108,
+            duration_minutes: Number(duration_minutes) || 15,
+            record_date: today,
+            local_time: '08:00',
+            notes: note || 'AI WebMCP 共修记录'
+          });
+          return snapshotSummary();
+        },
+      },
+      {
+        name: 'fabushi_open_sheet',
+        description: '打开或关闭全球法布施小程序的弹窗（leaderboard / practice_leaderboard / sutra_reader / practice_records / region_selector）',
+        inputSchema: {
+          type: 'object',
+          required: ['sheet'],
+          properties: {
+            sheet: { type: 'string' },
+            open: { type: 'boolean' },
+            title: { type: 'string' }
+          }
+        },
+        execute: async ({ sheet, open = true, title = null } = {}) => {
+          await ensureReady();
+          const mapSheet = {
+            leaderboard: { type: 'open_leaderboard', open },
+            practice_leaderboard: { type: 'open_practice_leaderboard', open },
+            sutra_reader: { type: 'open_sutra_reader', open, title },
+            practice_records: { type: 'open_practice_records', open },
+            region_selector: { type: 'open_region_selector', open },
+          };
+          const cmd = mapSheet[String(sheet || '').toLowerCase()];
+          if (!cmd) throw new Error('未知弹窗名称: ' + sheet);
+          dispatch(cmd);
+          return snapshotSummary();
+        },
+      },
+    ];
+    for (const tool of tools) {
+      navigator.modelContext.registerTool(tool);
+    }
   }
+  registerFabushiWebMcpTools();
 
   async function boot() {
-    const bytes = await loadWasmBytes();
-    const mod = await WebAssembly.instantiate(bytes, {});
+    const candidates = [apiUrl('/api/v1/fabushi-miniapp/app.wasm'), './fabushi_miniapp.wasm'];
+    let lastStatus = 0;
+    let lastUrl = candidates[0];
+    let buf = null;
+    for (const candidateUrl of candidates) {
+      lastUrl = candidateUrl;
+      try {
+        const resp = await fetch(candidateUrl);
+        lastStatus = resp.status;
+        if (!resp.ok) continue;
+        const arr = await resp.arrayBuffer();
+        if (arr && arr.byteLength >= 8) {
+          buf = arr;
+          break;
+        }
+      } catch (e) {
+        lastStatus = 0;
+      }
+    }
+    if (!buf) {
+      throw new Error(`HTTP ${lastStatus || 'FETCH_ERROR'} (${lastUrl})`);
+    }
+    const mod = await WebAssembly.instantiate(buf, {});
     wasm = mod.instance.exports;
-    const tab = _q.get('tab') || _h.get('tab');
+    const tab = new URLSearchParams(window.location.search).get('tab');
     let res = readResult(wasm.fabushi_wasm_init(Date.now(), -new Date().getTimezoneOffset(), canvas.clientWidth || 420, canvas.clientHeight || 780));
     if (tab) res = callStr('fabushi_wasm_set_initial_tab', tab);
     applyResult(res);
+    resolveBootReady();
     let lastTick = performance.now();
     const frame = now => { if (now - lastTick >= 33) { const dt = now - lastTick; lastTick = now; applyResult(readResult(wasm.fabushi_wasm_tick(dt, Date.now(), canvas.clientWidth || 420, canvas.clientHeight || 780))); } requestAnimationFrame(frame); };
     requestAnimationFrame(frame);
   }
-  boot().catch(err => { toastEl.textContent = 'WASM 加载失败: ' + err; toastEl.style.display = 'block'; });
+  boot().catch(err => {
+    bootError = err && err.message ? err.message : String(err);
+    resolveBootReady();
+    toastEl.textContent = 'WASM 加载失败: ' + bootError;
+    toastEl.style.display = 'block';
+    if (navigator.modelContext && typeof navigator.modelContext.reportStatus === 'function') {
+      navigator.modelContext.reportStatus(snapshotSummary());
+    }
+  });
 })();
 </script>
 </body>
