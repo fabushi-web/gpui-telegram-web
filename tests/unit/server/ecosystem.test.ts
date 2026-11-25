@@ -427,11 +427,11 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     expect(getBobStorage.status).toBe(200);
     expect(getBobStorage.data.items.sutra_bookmark).toBe('heart_sutra_v2');
 
-    // Fabushi tap via X-Telegram-Init-Data updates Bob's (1002) state without touching Alice's (1001)!
+    // Fabushi tap via X-Telegram-Init-Data updates Bob's state via canonical /api/v1/fabushi-miniapp/*
     const bobMuyu = await reqJson(
       baseUrl,
       'POST',
-      '/api/v1/fabushi/zen/muyu',
+      '/api/v1/fabushi-miniapp/zen/muyu',
       undefined,
       { count: 12 },
       { 'X-Telegram-Init-Data': bobLaunch.data.init_data },
@@ -442,12 +442,20 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     const tamperedFabushi = await reqJson(
       baseUrl,
       'GET',
-      '/api/v1/fabushi/state',
+      '/api/v1/fabushi-miniapp/state',
       undefined,
       undefined,
       { 'X-Telegram-Init-Data': bobLaunch.data.init_data.replace(/hash=[0-9a-f]{4}/, 'hash=beef') },
     );
     expect(tamperedFabushi.status).toBe(401);
+
+    // Legacy colliding /api/v1/fabushi/zen/muyu removed -> 404, while /api/v1/fabushi/state serves Hermes runtime!
+    const legacyCollidingMuyu = await reqJson(baseUrl, 'POST', '/api/v1/fabushi/zen/muyu', bob, { count: 1 });
+    expect(legacyCollidingMuyu.status).toBe(404);
+    const runtimeState = await reqJson(baseUrl, 'GET', '/api/v1/fabushi/state', alice);
+    expect(runtimeState.status).toBe(200);
+    expect(runtimeState.data.ready).toBe(true);
+    expect(runtimeState.data.commands_count).toBe(61);
 
     // Telegram HTTP Bot API (`/bot<token>/getMe` & `/bot/:token/sendMessage`)
     const botMe = await reqJson(baseUrl, 'GET', '/bot/777002:AAOfficialFabushiBotToken_v1/getMe');

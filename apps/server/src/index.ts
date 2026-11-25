@@ -3,17 +3,24 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
-import type { ServerStatusResponse } from '@gpui-telegram/protocol';
+import type { BotRegistryEntry, ServerStatusResponse } from '@gpui-telegram/protocol';
 import { resolveServerConfig, type ServerConfig, type ServerConfigOverrides } from './config.js';
 import { createMessageAtomic } from './db/queries.js';
 import { openSqliteWalDatabase } from './db/schema.js';
 import { resetDatabaseClean, seedDatabaseIfEmpty } from './db/seed.js';
 import { registerAuthAndUserRoutes } from './routes/auth.js';
+import { registerAutomationAppRoutes } from './routes/automationApps.js';
 import {
   handleBotConversationTurn,
+  MiniAppWebMcpBroker,
   registerBotsMiniAppsAndFabushiRoutes,
 } from './routes/botsMiniApps.js';
 import { registerChatAndSocialRoutes } from './routes/chats.js';
+import {
+  CodingAgentBroker,
+  handleCodingCallback,
+  registerCodingAgentRoutes,
+} from './routes/codingAgents.js';
 import { registerFabushiMiniAppRoutes } from './routes/fabushiMiniApp.js';
 import {
   executeSlashCommandInternal,
@@ -23,6 +30,12 @@ import {
 import { registerMagpieGatewayRoutes, runConfiguredLlmCompletion } from './routes/magpie.js';
 import { registerMediaStoriesE2eeAndCallRoutes } from './routes/media.js';
 import { registerMessageAndSearchRoutes } from './routes/messages.js';
+import { MultiAgentOrchestrator, registerMultiAgentRoutes } from './routes/multiAgent.js';
+import { createOfficialMcpRuntime, registerOfficialMcpRoutes } from './routes/officialMcp.js';
+import {
+  createRemoteAssistRuntime,
+  registerRemoteAssistAndComputerRoutes,
+} from './routes/remoteAssist.js';
 import {
   BrowserControlBridge,
   registerBrowserControlRoutes,
@@ -48,11 +61,14 @@ import {
   ApiError,
   HttpRouter,
   markResponseAcceptsGzip,
+  readRawBody,
+  requireAuth,
   sendError,
   sendJson,
   sendText,
   setCorsHeaders,
   type RequestContext,
+  type RouteHandler,
 } from './utils/http.js';
 import { RealtimeGatewayHub } from './ws/hub.js';
 
@@ -119,8 +135,21 @@ export function createTelegramServer(
   const shutdownAbort = new AbortController();
   const hub = new RealtimeGatewayHub(db);
   hub.setShutdownSignal(shutdownAbort.signal);
-  const browserBridge = new BrowserControlBridge(db);
+  const browserBridge = new BrowserControlBridge(db, config.dataDir);
   hub.setBrowserControlBridge(browserBridge);
+
+  const multiAgentOrchestrator = new MultiAgentOrchestrator(db, config, hub);
+  const codingAgentBroker = new CodingAgentBroker(db, hub);
+  const webMcpBroker = new MiniAppWebMcpBroker(hub);
+  const remoteAssistRuntime = createRemoteAssistRuntime(db, hub);
+  const officialMcpRuntime = createOfficialMcpRuntime(db, config, remoteAssistRuntime);
+  remoteAssistRuntime.setMcpKillHooks(officialMcpRuntime.getKillHooks());
+
+  hub.setCodingHostHandlers({
+    onEvent: (userId, sessionId, event) => codingAgentBroker.handleHostEvent(userId, sessionId, event),
+    onSessionDisconnected: (userId, sessionId) =>
+      codingAgentBroker.markSessionDisconnected(userId, sessionId),
+  });
 
   const router = new HttpRouter();
   const startedAtMs = Date.now();
@@ -142,54 +171,168 @@ export function createTelegramServer(
     },
   }) as RealtimeGatewayHub;
 
-  // Bot & @HermesAgent conversational message hook (triggered from both HTTP and WS SendMessage)
+  // Bot, Coding Agent, Multi-Agent Group & @HermesAgent conversational message hook
   const runBotReplyNow = (chatId: number, senderId: number, text: string): void => {
     try {
-      // 1. Check @BotFather / @FabushiBot / custom bots
+      const chatMeta = db
+        .prepare(`SELECT chat_type, peer_user_id FROM chats WHERE chat_id = ?`)
+        .get(chatId) as { chat_type: number; peer_user_id: number | null } | undefined;
+      if (!chatMeta) return;
+
+      // 1. Check Coding Agent Bots (1:1 DM or @mentioned in group chat)
+      const memberBots = db
+        .prepare(
+          `SELECT br.bot_user_id, br.bot_json
+           FROM chat_members cm
+           INNER JOIN bots_registry br ON br.bot_user_id = cm.user_id
+           WHERE cm.chat_id = ?`,
+        )
+        .all(chatId) as Array<{ bot_user_id: number; bot_json: string }>;
+
+      const codingBots = memberBots
+        .map((r) => JSON.parse(r.bot_json) as BotRegistryEntry)
+        .filter((b) => Boolean(b.coding_agent));
+
+      if (codingBots.length > 0) {
+        if (Number(chatMeta.chat_type) === 0) {
+          if (
+            codingAgentBroker.handleIncomingMessage({
+              bot: codingBots[0]!,
+              chatId,
+              senderId,
+              text,
+            })
+          ) {
+            return;
+          }
+        } else {
+          const mentionTokens = Array.from(text.matchAll(/@([A-Za-z0-9_.-]+)/g)).map((m) =>
+            m[1]!.toLowerCase(),
+          );
+          const targeted = codingBots.find((b) =>
+            mentionTokens.includes(b.username.toLowerCase()),
+          );
+          if (targeted) {
+            codingAgentBroker.handleIncomingMessage({
+              bot: targeted,
+              chatId,
+              senderId,
+              text,
+            });
+            return;
+          }
+        }
+      }
+
+      // 2. Check @BotFather / @FabushiBot / custom Bot API update queue (1:1 DM)
       if (handleBotConversationTurn(db, deferredBotSink, chatId, senderId, text)) {
         return;
       }
 
-      // 2. Check @HermesAgent (`777000`) DM chat or `@HermesAgent` mention
-      const hermesInChat = db
-        .prepare(`SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = 777000`)
-        .get(chatId);
-      const chatMeta = db
-        .prepare(`SELECT chat_type, peer_user_id FROM chats WHERE chat_id = ?`)
-        .get(chatId) as { chat_type: number; peer_user_id: number | null } | undefined;
+      // 3. Group Chat Multi-Agent Orchestration (FloorControl, 5-Hop Budget, Reply Gate, Shared Workspace)
+      if (Number(chatMeta.chat_type) !== 0) {
+        if (multiAgentOrchestrator.handleGroupMessage(chatId, senderId, text)) {
+          return;
+        }
+        return;
+      }
 
-      const isDirectHermes = chatMeta?.chat_type === 0 && Number(chatMeta.peer_user_id) === 777000;
-      const mentionsHermes = /@HermesAgent\b/i.test(text);
+      // 4. Direct 1:1 DM with @HermesAgent (777000) or user-created Fabushi AI bot
+      const peerBotId = chatMeta.peer_user_id ? Number(chatMeta.peer_user_id) : 0;
+      const peerBotRow = peerBotId
+        ? (db
+            .prepare(`SELECT bot_json FROM bots_registry WHERE bot_user_id = ?`)
+            .get(peerBotId) as { bot_json: string } | undefined)
+        : undefined;
+      const peerBot = peerBotRow ? (JSON.parse(peerBotRow.bot_json) as BotRegistryEntry) : null;
+      const isDirectFabushiAiBot =
+        peerBotId === 777000 || Boolean(peerBot?.is_fabushi_bot && !peerBot.coding_agent);
 
-      if (isDirectHermes || (hermesInChat && mentionsHermes)) {
+      if (isDirectFabushiAiBot) {
         const trimmed = text.trim();
-        if (trimmed.startsWith('/')) {
-          const slashRes = executeSlashCommandInternal(db, senderId, trimmed, undefined, chatId);
+        if (/^\/start(?:\s|@|$)/i.test(trimmed)) {
+          const displayName =
+            peerBot?.display_name || (peerBotId === 777000 ? 'Hermes Agent' : 'Fabushi AI');
+          const handleSuffix = peerBot?.username ? ` (@${peerBot.username})` : '';
+          const descText = (peerBot?.description || peerBot?.about || '').trim();
+          const availableCmds =
+            Array.isArray(peerBot?.commands) && peerBot.commands.length > 0
+              ? peerBot.commands
+              : [
+                  { command: 'help', description: 'Show available slash commands' },
+                  { command: 'status', description: 'Show runtime and model status' },
+                  { command: 'new', description: 'Start a fresh session' },
+                ];
+          const cmdLines = availableCmds
+            .slice(0, 8)
+            .map((c) => `• \`/${String(c.command).replace(/^\//, '')}\` — ${c.description}`)
+            .join('\n');
+          const welcomeText = [
+            `👋 **${displayName}**${handleSuffix}`,
+            descText,
+            cmdLines ? `**Available commands:**\n${cmdLines}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n\n');
+
+          try {
+            db.prepare(`
+              INSERT INTO user_bot_permissions (
+                user_id, bot_user_id, allows_write_to_pm, has_started_chat, app_tos_accepted_at, updated_at_ms
+              ) VALUES (?, ?, 1, 1, 0, ?)
+              ON CONFLICT(user_id, bot_user_id) DO UPDATE SET
+                allows_write_to_pm = 1,
+                has_started_chat = 1,
+                updated_at_ms = excluded.updated_at_ms
+            `).run(senderId, peerBotId, Date.now());
+          } catch {
+            // Non-fatal during teardown
+          }
+
           createMessageAtomic(db, deferredBotSink, {
             chatId,
-            senderId: 777000,
+            senderId: peerBotId,
+            text: welcomeText,
+          });
+        } else if (trimmed.startsWith('/')) {
+          const slashRes = executeSlashCommandInternal(
+            db,
+            senderId,
+            trimmed,
+            undefined,
+            chatId,
+            config,
+          );
+          createMessageAtomic(db, deferredBotSink, {
+            chatId,
+            senderId: peerBotId,
             text: slashRes.response_text,
           });
         } else {
-          // Real async LLM completion via user's configured Magpie provider or AI gateway
           void (async () => {
             try {
               if (shutdownAbort.signal.aborted) return;
               const mem = getHermesMemoryState(db, senderId);
-              const llmRes = await runConfiguredLlmCompletion(db, config, senderId, [
-                { role: 'system', content: mem.soul },
-                { role: 'user', content: trimmed },
-              ]);
+              const llmRes = await runConfiguredLlmCompletion(
+                db,
+                config,
+                senderId,
+                [
+                  { role: 'system', content: peerBot?.ai_persona || mem.soul },
+                  { role: 'user', content: trimmed },
+                ],
+                { model: peerBot?.preferred_model || undefined },
+              );
               if (shutdownAbort.signal.aborted) return;
               const replyText =
                 llmRes.usedUpstream && llmRes.text
                   ? llmRes.text
                   : llmRes.error
-                    ? `⚠️ **Hermes AI** 调用模型失败（${llmRes.providerId}）：${llmRes.error}。请检查 **Magpie LLM 网关** 配置。`
-                    : `尚未配置可用的 AI 模型提供商。请点击左侧栏的 **Magpie LLM 网关** 添加并启用 API Key 后，即可与 @HermesAgent 进行真实对话。`;
+                    ? `⚠️ **Fabushi AI** 调用模型失败（${llmRes.providerId}）：${llmRes.error}。请检查 **Magpie LLM 网关** 配置。`
+                    : `尚未配置可用的 AI 模型提供商。请前往 **Magpie LLM 网关** 添加并启用 API Key 后，即可进行真实对话。`;
               createMessageAtomic(db, hub, {
                 chatId,
-                senderId: 777000,
+                senderId: peerBotId,
                 text: replyText,
               });
             } catch {
@@ -271,6 +414,11 @@ export function createTelegramServer(
       );
     }
     const t0 = performance.now();
+    multiAgentOrchestrator.reset();
+    codingAgentBroker.reset();
+    webMcpBroker.reset();
+    officialMcpRuntime.reset();
+    remoteAssistRuntime.reset();
     browserBridge.resetFastSync();
     hub.disconnectAllSessions();
     resetDatabaseClean(db, config.mediaDir, config.uploadsDir);
@@ -282,12 +430,80 @@ export function createTelegramServer(
     });
   });
 
-  // Register all domain route suites
+  // Register all domain route suites (strict ordering: static/canonical before wildcard/legacy)
   registerAuthAndUserRoutes(router, db, hub, config);
   registerUserVaultRoutes(router, db, config);
   registerChatAndSocialRoutes(router, db, hub);
+  const wrapChatCallbackHandler = (originalHandler: RouteHandler): RouteHandler => {
+    return async (ctx) => {
+      // Authenticate before buffering up to 8 MiB (both coding & message callbacks require auth)
+      requireAuth(db, ctx);
+      const rawBuf = await readRawBody(ctx.req, 8 * 1024 * 1024);
+
+      let parsedBody: Record<string, unknown> | null = null;
+      if (rawBuf.length > 0) {
+        try {
+          const parsed: unknown = JSON.parse(rawBuf.toString('utf8'));
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            parsedBody = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // Delegate malformed JSON to originalHandler so membership/400 precedence is preserved
+        }
+      }
+
+      const rawCbData = parsedBody
+        ? (parsedBody.callback_data ?? parsedBody.data)
+        : undefined;
+      if (typeof rawCbData === 'string' && rawCbData.trim().startsWith('coding:')) {
+        await handleCodingCallback(db, hub, codingAgentBroker, ctx, parsedBody!);
+        return;
+      }
+
+      const replayReq = Object.create(ctx.req, {
+        [Symbol.asyncIterator]: {
+          value: async function* () {
+            if (rawBuf.length > 0) {
+              yield rawBuf;
+            }
+          },
+          configurable: true,
+        },
+      }) as http.IncomingMessage;
+      await originalHandler({ ...ctx, req: replayReq });
+    };
+  };
+
+  const messageRoutesRouter = new Proxy(router, {
+    get(target, prop) {
+      if (prop === 'post') {
+        return (pattern: string, handler: RouteHandler) => {
+          target.post(
+            pattern,
+            pattern === '/api/v1/chats/:chatId/callback'
+              ? wrapChatCallbackHandler(handler)
+              : handler,
+          );
+        };
+      }
+      if (prop === 'register') {
+        return (method: string, pattern: string, handler: RouteHandler) => {
+          target.register(
+            method,
+            pattern,
+            method.toUpperCase() === 'POST' && pattern === '/api/v1/chats/:chatId/callback'
+              ? wrapChatCallbackHandler(handler)
+              : handler,
+          );
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+
   registerMessageAndSearchRoutes(
-    router,
+    messageRoutesRouter,
     db,
     hub,
     dispatchBotReplyIfApplicable,
@@ -296,12 +512,24 @@ export function createTelegramServer(
   );
   registerMediaStoriesE2eeAndCallRoutes(router, db, config, hub);
   registerUpdatesRoutes(router, config, options.updates);
-  registerBotsMiniAppsAndFabushiRoutes(router, db, hub, config);
+  registerBotsMiniAppsAndFabushiRoutes(
+    router,
+    db,
+    hub,
+    config,
+    webMcpBroker,
+    (ctx, body) => handleCodingCallback(db, hub, codingAgentBroker, ctx, body),
+  );
   registerFabushiMiniAppRoutes(router, db, config, hub);
   registerHermesStudioRoutes(router, db, config, hub);
   registerMagpieGatewayRoutes(router, db, config);
+  registerMultiAgentRoutes(router, db, multiAgentOrchestrator);
+  registerCodingAgentRoutes(router, db, codingAgentBroker);
+  registerRemoteAssistAndComputerRoutes(router, db, config, hub, remoteAssistRuntime);
+  registerOfficialMcpRoutes(router, db, config, hub, officialMcpRuntime, remoteAssistRuntime);
   registerWorkspaceTailnetAndWalletRoutes(router, db, config, hub, browserBridge);
   registerBrowserControlRoutes(router, db, browserBridge);
+  registerAutomationAppRoutes(router, db);
 
   const httpServer = http.createServer(async (req, res) => {
     setCorsHeaders(res);
@@ -481,6 +709,11 @@ export function createTelegramServer(
       if (isClosed) return;
       isClosed = true;
       shutdownAbort.abort();
+      multiAgentOrchestrator.dispose();
+      codingAgentBroker.dispose();
+      webMcpBroker.close();
+      officialMcpRuntime.close();
+      remoteAssistRuntime.close();
       await browserBridge.dispose();
       await hub.close();
       httpServer.closeAllConnections?.();

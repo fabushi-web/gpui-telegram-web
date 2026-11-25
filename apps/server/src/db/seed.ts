@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type {
-  BotRegistryEntry,
-  MagpiePreset,
-  MiniAppEntry,
-  StickerSetDto,
-  UserPrivacySettingsDto,
+import {
+  resolveGrokBotAvatar,
+  type BotRegistryEntry,
+  type MagpiePreset,
+  type MiniAppEntry,
+  type StickerSetDto,
+  type UserPrivacySettingsDto,
 } from '@gpui-telegram/protocol';
 
 export const DEFAULT_PRIVACY_SETTINGS: UserPrivacySettingsDto = {
@@ -93,11 +94,6 @@ export const MAGPIE_BUILTIN_PRESETS: MagpiePreset[] = [
   { id: 'custom-gemini', name: 'Custom Gemini API', category: 'custom', api_mode: 'gemini_generate_content', base_url: 'http://127.0.0.1:8000/v1beta', default_model: 'custom-gemini', models: ['custom-gemini'], no_key_required: false },
   { id: 'custom-responses', name: 'Custom Codex Responses API', category: 'custom', api_mode: 'codex_responses', base_url: 'http://127.0.0.1:8000/v1', default_model: 'codex-mini', models: ['codex-mini'], no_key_required: false },
 ];
-
-/** @deprecated M3 compile bridge for untouched routes/workspace.ts; removed in M3. */
-export function buildComputerViewportSvg(_title: string, _statusLine: string): string {
-  return '';
-}
 
 export function seedSystemEntitiesIfEmpty(
   db: DatabaseSync,
@@ -198,6 +194,10 @@ export function seedSystemEntitiesIfEmpty(
           has_main_app: false,
           approval_mode: 'ask',
           toolset_preset: 'hermes-telegram',
+          is_fabushi_bot: true,
+          agent_id: 'fabushi-ai-bot',
+          avatar_shape: resolveGrokBotAvatar('fabushi-ai-bot').shape,
+          avatar_color: resolveGrokBotAvatar('fabushi-ai-bot').color,
           created_at_ms: now,
         },
       },
@@ -219,6 +219,9 @@ export function seedSystemEntitiesIfEmpty(
           menu_button_url: '/miniapps/FabushiBot/fabushi',
           has_main_app: true,
           main_app_short_name: 'fabushi',
+          agent_id: 'fabushibot',
+          avatar_shape: resolveGrokBotAvatar('fabushibot').shape,
+          avatar_color: resolveGrokBotAvatar('fabushibot').color,
           created_at_ms: now,
         },
       },
@@ -320,7 +323,8 @@ export function resetDatabaseClean(
   uploadsDir: string,
   _options?: { seedDemoData?: boolean },
 ): void {
-  for (const dir of [mediaDir, uploadsDir]) {
+  const browserProfilesDir = path.join(path.dirname(mediaDir), 'p');
+  for (const dir of [mediaDir, uploadsDir, browserProfilesDir]) {
     if (fs.existsSync(dir)) {
       for (const entry of fs.readdirSync(dir)) {
         fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
@@ -331,6 +335,27 @@ export function resetDatabaseClean(
   db.exec('BEGIN IMMEDIATE;');
   try {
     db.exec(`
+      DELETE FROM automation_app_runs;
+      DELETE FROM user_automation_apps;
+      DELETE FROM automation_app_versions;
+      DELETE FROM automation_apps;
+      DELETE FROM browser_audit_logs;
+      DELETE FROM browser_desktop_tokens;
+      DELETE FROM browser_pairing_tickets;
+      DELETE FROM browser_control_generations;
+      DELETE FROM redeem_codes;
+      DELETE FROM payment_orders;
+      DELETE FROM bot_computer_profiles;
+      DELETE FROM remote_sessions;
+      DELETE FROM remote_assist_devices;
+      DELETE FROM mcp_tool_audit_log;
+      DELETE FROM mcp_oauth_tokens;
+      DELETE FROM mcp_oauth_codes;
+      DELETE FROM mcp_oauth_clients;
+      DELETE FROM user_bot_permissions;
+      DELETE FROM group_workspace_entries;
+      DELETE FROM group_workspaces;
+      DELETE FROM user_provider_vaults;
       DELETE FROM archive_bot_dedup;
       DELETE FROM chat_create_nonces;
       DELETE FROM vault_device_sync_requests;

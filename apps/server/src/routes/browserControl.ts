@@ -2,31 +2,44 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { WebSocket } from 'ws';
-import type {
-  BrowserActionKind,
-  BrowserAuditLogEntry,
-  BrowserCommandRequest,
-  BrowserCommandResult,
-  BrowserControlRevokeResponse,
-  BrowserElementRef,
-  BrowserRegisterPayload,
-  BrowserSnapshotDto,
-  BrowserStateReportPayload,
-  BrowserTargetDescriptor,
-  DesktopPairingTicketDto,
-  HeadlessBrowserSessionDto,
-  McpCallToolResultDto,
-  McpContentItem,
-  McpJsonRpcRequest,
-  McpJsonRpcResponse,
-  McpToolDto,
-  McpToolSchemaDto,
-  WsServerFrame,
+import {
+  AUTOMATION_APP_LIMITS,
+  AUTOMATION_APP_SCHEMA_VERSION_V1,
+  scanJsonForSecretLeaks,
+  validateAutomationAppId,
+  type AutomationAppParam,
+  type AutomationScriptApp,
+  type BrowserActionKind,
+  type BrowserActionTrace,
+  type BrowserAuditLogEntry,
+  type BrowserCommandRequest,
+  type BrowserCommandResult,
+  type BrowserControlMode,
+  type BrowserControlRevokeResponse,
+  type BrowserRegisterPayload,
+  type BrowserSnapshotDto,
+  type BrowserStateReportPayload,
+  type BrowserTargetDescriptor,
+  type DesktopPairingTicketDto,
+  type HeadlessBrowserSessionDto,
+  type McpCallToolResultDto,
+  type McpContentItem,
+  type McpJsonRpcRequest,
+  type McpJsonRpcResponse,
+  type McpToolDto,
+  type McpToolSchemaDto,
+  type RecordedBrowserAction,
+  type ScriptAppMetadata,
+  type ScriptReplayReport,
+  type ScriptStep,
+  type SemanticLocator,
+  type StepTimingMetric,
+  type WsServerFrame,
 } from '@gpui-telegram/protocol';
+import { sha256Hex } from '../utils/crypto.js';
 import {
   ApiError,
   authenticateToken,
@@ -39,35 +52,97 @@ import {
 } from '../utils/http.js';
 import type { IncomingMessage } from 'node:http';
 
-const CHROMIUM_CANDIDATE_PATHS = [
-  process.env.CHROMIUM_PATH,
-  '/usr/lib/chromium/chromium',
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
-  '/usr/bin/google-chrome',
-  '/usr/bin/google-chrome-stable',
-].filter((p): p is string => Boolean(p && p.trim()));
+function isExecutableFile(candidate: string): boolean {
+  try {
+    const stat = fs.statSync(candidate);
+    if (!stat.isFile()) return false;
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function resolveChromiumBinaryPath(): string | null {
-  for (const candidate of CHROMIUM_CANDIDATE_PATHS) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
+  // 1. Explicit env override takes precedence and fails closed if pointing to non-existent binary
+  const explicit =
+    process.env.CHROME_EXECUTABLE?.trim() ||
+    process.env.CHROMIUM_PATH?.trim() ||
+    process.env.PLAYWRIGHT_CHROME_PATH?.trim();
+  if (explicit) {
+    return isExecutableFile(explicit) ? explicit : null;
   }
+
+  // 2. System Google Chrome
+  for (const sysChrome of ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable']) {
+    if (isExecutableFile(sysChrome)) return sysChrome;
+  }
+
+  // 3. Playwright bundled Chromium cache (sorted descending by revision)
+  const pwRoot = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim() || '/opt/ms-playwright';
+  try {
+    if (fs.existsSync(pwRoot)) {
+      const dirs = fs
+        .readdirSync(pwRoot)
+        .filter((name) => /^chromium-\d+$/.test(name))
+        .sort((a, b) => Number(b.slice(9)) - Number(a.slice(9)));
+      for (const dir of dirs) {
+        for (const sub of ['chrome-linux64/chrome', 'chrome-linux/chrome']) {
+          const full = path.join(pwRoot, dir, sub);
+          if (isExecutableFile(full)) return full;
+        }
+      }
+    }
+  } catch {
+    // Ignore unreadable Playwright dir
+  }
+
+  // 4. System Chromium
+  for (const sysChromium of [
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/lib/chromium/chromium',
+  ]) {
+    if (isExecutableFile(sysChromium)) return sysChromium;
+  }
+
   return null;
 }
 
 export const CHROMIUM_BINARY_PATH =
-  resolveChromiumBinaryPath() ?? '/usr/lib/chromium/chromium';
+  resolveChromiumBinaryPath() ?? '/usr/bin/google-chrome';
 
 export function isChromiumBinaryAvailable(): boolean {
-  return (
-    process.env.BROWSER_HEADLESS_MODE !== 'fallback' &&
-    resolveChromiumBinaryPath() !== null
-  );
+  return resolveChromiumBinaryPath() !== null;
 }
 
 const activeBridges = new Set<BrowserControlBridge>();
+const liveCdpDrivers = new Set<ChromiumCdpDriver>();
+
+process.once('exit', () => {
+  for (const driver of Array.from(liveCdpDrivers)) {
+    try {
+      driver.killFastSync();
+    } catch {
+      // Ignore exit cleanup error
+    }
+  }
+});
+
+function terminateProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform !== 'win32' && typeof proc.pid === 'number' && proc.pid > 0) {
+    try {
+      process.kill(-proc.pid, signal);
+    } catch {
+      // Ignore ESRCH if process group already exited
+    }
+  }
+  try {
+    proc.kill(signal);
+  } catch {
+    // Ignore if already exited
+  }
+}
 
 /**
  * Closes all active headless browser sessions across all server instances,
@@ -131,24 +206,20 @@ export const BROWSER_MCP_TOOL_SCHEMAS: McpToolSchemaDto[] = [
   {
     name: 'browser_headless_open',
     description:
-      'Launch an isolated headless browser session (real Chromium CDP when available, or deterministic HTTP DOM fallback) and optionally navigate to an initial URL.',
+      'Launch an isolated real headless Chromium CDP browser session and optionally navigate to an initial URL.',
     inputSchema: {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'Initial URL (http://, https://, data:, or about:blank)' },
         width: { type: 'number', description: 'Viewport width (default 1280)' },
         height: { type: 'number', description: 'Viewport height (default 800)' },
-        prefer_fallback: {
-          type: 'boolean',
-          description: 'Use lightweight HTTP DOM fallback instead of Chromium CDP',
-        },
       },
     },
   },
   {
     name: 'browser_headless_action',
     description:
-      'Perform DOM inspection or interaction (snapshot, navigate/goto, click, fill, press, hover, scroll, select, evaluate_query, screenshot) in an open headless browser session.',
+      'Perform DOM inspection or interaction (snapshot, navigate/goto, click, fill, press, hover, scroll, select, evaluate_query, screenshot) in an open headless Chromium CDP session.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -182,7 +253,7 @@ export const BROWSER_MCP_TOOL_SCHEMAS: McpToolSchemaDto[] = [
   },
   {
     name: 'browser_headless_screenshot',
-    description: 'Capture a PNG (Chromium CDP) or SVG (fallback) screenshot of a headless browser session.',
+    description: 'Capture a real PNG screenshot via Chromium CDP of a headless browser session.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -250,7 +321,6 @@ export const BROWSER_MCP_TOOL_SCHEMAS: McpToolSchemaDto[] = [
         url: { type: 'string', description: 'Initial URL (http://, https://, data:, or about:blank)' },
         width: { type: 'number', description: 'Viewport width (default 1280)' },
         height: { type: 'number', description: 'Viewport height (default 800)' },
-        prefer_fallback: { type: 'boolean', description: 'Use lightweight HTTP DOM fallback' },
       },
     },
   },
@@ -288,7 +358,7 @@ export const BROWSER_MCP_DOCK_TOOLS: McpToolDto[] = [
     tool_id: 'bctrl_headless_open',
     server_id: 'mcp_browser_bridge',
     name: 'browser_headless_open',
-    description: 'Open isolated headless Chromium CDP / fallback browser session',
+    description: 'Open isolated headless Chromium CDP browser session',
     risk_level: 'low',
     requires_approval: false,
   },
@@ -322,7 +392,154 @@ export const BROWSER_MCP_DOCK_TOOLS: McpToolDto[] = [
 // URL Safety & Helpers
 // ============================================================================
 
-function validateHeadlessUrl(rawUrl: string): string {
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+}
+
+function optionalTrimmedString(val: unknown, fieldName: string, maxLen = 2048): string | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val !== 'string') {
+    throw new ApiError(400, 'invalid_parameter', `${fieldName} must be a string`);
+  }
+  const trimmed = val.trim();
+  if (trimmed.length > maxLen) {
+    throw new ApiError(400, 'invalid_parameter', `${fieldName} exceeds maximum length of ${maxLen}`);
+  }
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function optionalFiniteNumber(val: unknown, fieldName: string): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val !== 'number' || !Number.isFinite(val)) {
+    throw new ApiError(400, 'invalid_parameter', `${fieldName} must be a finite number`);
+  }
+  return val;
+}
+
+function optionalBoolean(val: unknown, fieldName: string): boolean | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val !== 'boolean') {
+    throw new ApiError(400, 'invalid_parameter', `${fieldName} must be a boolean`);
+  }
+  return val;
+}
+
+function parseViewport(
+  rawViewport: unknown,
+  fallbackWidth = 1280,
+  fallbackHeight = 800,
+): { width: number; height: number } {
+  if (rawViewport === undefined || rawViewport === null) {
+    return {
+      width: Math.max(320, Math.min(3840, Math.floor(fallbackWidth))),
+      height: Math.max(240, Math.min(2160, Math.floor(fallbackHeight))),
+    };
+  }
+  if (!isPlainObject(rawViewport)) {
+    throw new ApiError(400, 'invalid_viewport', 'viewport must be a JSON object');
+  }
+  let width = fallbackWidth;
+  if (rawViewport.width !== undefined) {
+    if (typeof rawViewport.width !== 'number' || !Number.isFinite(rawViewport.width)) {
+      throw new ApiError(400, 'invalid_viewport', 'viewport.width must be a finite number');
+    }
+    width = rawViewport.width;
+  }
+  let height = fallbackHeight;
+  if (rawViewport.height !== undefined) {
+    if (typeof rawViewport.height !== 'number' || !Number.isFinite(rawViewport.height)) {
+      throw new ApiError(400, 'invalid_viewport', 'viewport.height must be a finite number');
+    }
+    height = rawViewport.height;
+  }
+  return {
+    width: Math.max(320, Math.min(3840, Math.floor(width))),
+    height: Math.max(240, Math.min(2160, Math.floor(height))),
+  };
+}
+
+function parseIpv6Groups(rawHost: string): number[] | null {
+  const bare = rawHost.split('%')[0]!;
+  if (!bare.includes(':')) return null;
+  let normalized = bare;
+  const lastColon = bare.lastIndexOf(':');
+  const tail = bare.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    const octets = tail.split('.').map((p) => Number(p));
+    if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) {
+      return null;
+    }
+    const hi = ((octets[0]! << 8) | octets[1]!).toString(16);
+    const lo = ((octets[2]! << 8) | octets[3]!).toString(16);
+    normalized = `${bare.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+  const halves = normalized.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - (left.length + right.length);
+  if (halves.length === 1 && missing !== 0) return null;
+  if (halves.length === 2 && missing < 1) return null;
+  const full = [...left, ...Array<string>(Math.max(0, missing)).fill('0'), ...right];
+  if (full.length !== 8) return null;
+  const groups: number[] = [];
+  for (const part of full) {
+    if (!/^[0-9a-f]{1,4}$/i.test(part)) return null;
+    groups.push(parseInt(part, 16));
+  }
+  return groups;
+}
+
+function isBlockedMetadataOrLinkLocalHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!host) return false;
+  if (
+    host === '169.254.169.254' ||
+    host.startsWith('169.254.') ||
+    host === '100.100.100.200' ||
+    host === 'metadata.google.internal' ||
+    host.endsWith('.metadata.google.internal') ||
+    host === 'metadata.goog' ||
+    host === 'metadata'
+  ) {
+    return true;
+  }
+  const v6 = parseIpv6Groups(host);
+  if (v6) {
+    // Link-local fe80::/10 (fe80..febf)
+    if ((v6[0]! & 0xffc0) === 0xfe80) return true;
+    // AWS IPv6 IMDS fd00:ec2::254
+    if (
+      v6[0] === 0xfd00 &&
+      v6[1] === 0x0ec2 &&
+      v6[2] === 0 &&
+      v6[3] === 0 &&
+      v6[4] === 0 &&
+      v6[5] === 0 &&
+      v6[6] === 0 &&
+      v6[7] === 0x0254
+    ) {
+      return true;
+    }
+    // IPv4-mapped ::ffff:0:0/96 or IPv4-compatible ::/96 targeting 169.254.0.0/16 or 100.100.100.200
+    const allZeroPrefix = v6[0] === 0 && v6[1] === 0 && v6[2] === 0 && v6[3] === 0 && v6[4] === 0;
+    if (allZeroPrefix && (v6[5] === 0xffff || v6[5] === 0)) {
+      const a = (v6[6]! >> 8) & 0xff;
+      const b = v6[6]! & 0xff;
+      const c = (v6[7]! >> 8) & 0xff;
+      const d = v6[7]! & 0xff;
+      if ((a === 169 && b === 254) || (a === 100 && b === 100 && c === 100 && d === 200)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function validateHeadlessUrl(rawUrl: unknown): string {
+  if (typeof rawUrl !== 'string') {
+    throw new ApiError(400, 'invalid_browser_url', 'URL must be a string');
+  }
   const trimmed = rawUrl.trim();
   if (!trimmed || trimmed === 'about:blank') {
     return 'about:blank';
@@ -343,10 +560,20 @@ function validateHeadlessUrl(rawUrl: string): string {
       `Disallowed browser URL protocol "${parsed.protocol}" (only http:, https:, data:text/html, and about:blank are allowed)`,
     );
   }
+  if (isBlockedMetadataOrLinkLocalHost(parsed.hostname)) {
+    throw new ApiError(
+      400,
+      'unsafe_browser_url',
+      `Blocked cloud metadata or link-local SSRF host: ${parsed.hostname}`,
+    );
+  }
   return parsed.toString();
 }
 
-function normalizeActionKind(rawAction: string): BrowserActionKind {
+function normalizeActionKind(rawAction: unknown): BrowserActionKind {
+  if (typeof rawAction !== 'string') {
+    throw new ApiError(400, 'invalid_browser_action', 'action must be a string');
+  }
   if (rawAction === 'goto') return 'navigate';
   if (rawAction === 'evaluate') return 'evaluate_query';
   const valid: Set<BrowserActionKind> = new Set([
@@ -368,25 +595,6 @@ function normalizeActionKind(rawAction: string): BrowserActionKind {
   return rawAction as BrowserActionKind;
 }
 
-function decodeBasicHtmlEntities(s: string): string {
-  return s
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'");
-}
-
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
 function httpGetDirectBuffer(urlObj: URL, timeoutMs = 5000): Promise<{ statusCode: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.get(
@@ -398,7 +606,7 @@ function httpGetDirectBuffer(urlObj: URL, timeoutMs = 5000): Promise<{ statusCod
         timeout: timeoutMs,
         headers: {
           Accept: 'text/html,application/xhtml+xml,text/plain,*/*',
-          'User-Agent': 'GPUI-Telegram-HeadlessBridge/1.2',
+          'User-Agent': 'Fabushi-Web-HeadlessBridge/1.6.11',
         },
       },
       (res) => {
@@ -420,11 +628,11 @@ function httpGetDirectBuffer(urlObj: URL, timeoutMs = 5000): Promise<{ statusCod
 }
 
 // ============================================================================
-// Headless Driver Interface + Implementations (Chromium CDP & HTTP DOM Fallback)
+// Headless Driver Interface (Real Chromium CDP ONLY — ZERO SVG fallback!)
 // ============================================================================
 
 interface HeadlessDriver {
-  readonly backend: 'chromium_cdp' | 'http_dom_fallback';
+  readonly backend: 'chromium_cdp';
   getUrl(): string;
   getTitle(): string;
   getViewport(): { width: number; height: number };
@@ -435,403 +643,14 @@ interface HeadlessDriver {
     screenshotDataUrl?: string;
     data?: Record<string, unknown>;
   }>;
+  evaluateJs<T = unknown>(expression: string): Promise<T>;
   screenshot(): Promise<{ dataUrl: string; mimeType: string }>;
   close(): Promise<void>;
   killFastSync(): void;
 }
 
-interface FallbackElementState extends BrowserElementRef {
-  href?: string;
-  checked?: boolean;
-  clickCount: number;
-}
-
-class HttpDomFallbackDriver implements HeadlessDriver {
-  readonly backend = 'http_dom_fallback' as const;
-  private currentUrl = 'about:blank';
-  private currentTitle = 'about:blank';
-  private textExcerpt = '';
-  private elements: FallbackElementState[] = [];
-  private scrollY = 0;
-  private lastKeyPressed: string | null = null;
-  private lastClickedRef: string | null = null;
-  private closed = false;
-
-  constructor(
-    private readonly sessionId: string,
-    private readonly viewport: { width: number; height: number },
-  ) {}
-
-  getUrl(): string {
-    return this.currentUrl;
-  }
-
-  getTitle(): string {
-    return this.currentTitle;
-  }
-
-  getViewport(): { width: number; height: number } {
-    return this.viewport;
-  }
-
-  private async fetchHtml(targetUrl: string): Promise<string> {
-    const safeUrl = validateHeadlessUrl(targetUrl);
-    this.currentUrl = safeUrl;
-    this.scrollY = 0;
-
-    if (safeUrl === 'about:blank') {
-      return '<!doctype html><html><head><title>about:blank</title></head><body></body></html>';
-    }
-
-    if (/^data:/i.test(safeUrl)) {
-      const commaIdx = safeUrl.indexOf(',');
-      if (commaIdx === -1) return '';
-      const meta = safeUrl.slice(5, commaIdx);
-      const rawData = safeUrl.slice(commaIdx + 1);
-      if (/;base64/i.test(meta)) {
-        return Buffer.from(rawData, 'base64').toString('utf8');
-      }
-      try {
-        return decodeURIComponent(rawData);
-      } catch {
-        return rawData;
-      }
-    }
-
-    const parsed = new URL(safeUrl);
-    const isLoopback =
-      parsed.protocol === 'http:' &&
-      (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '::1');
-
-    if (isLoopback) {
-      const res = await httpGetDirectBuffer(parsed, 6000);
-      return res.body;
-    }
-
-    const resp = await fetch(safeUrl, {
-      signal: AbortSignal.timeout(6000),
-      headers: {
-        Accept: 'text/html,application/xhtml+xml,text/plain,*/*',
-      },
-    });
-    return await resp.text();
-  }
-
-  private parseHtmlIntoState(html: string): void {
-    const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-    this.currentTitle = titleMatch
-      ? decodeBasicHtmlEntities(titleMatch[1]!.replace(/\s+/g, ' ').trim())
-      : this.currentUrl;
-
-    const withoutScripts = html
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ');
-
-    this.textExcerpt = decodeBasicHtmlEntities(withoutScripts.replace(/<[^>]+>/g, ' '))
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 1400);
-
-    const parsedElements: FallbackElementState[] = [];
-    const tagRegex = /<(a|button|input|textarea|select|div|span)\b([^>]*)>([\s\S]*?)<\/\1>|<(input)\b([^>]*?)\/?>/gi;
-    let match: RegExpExecArray | null;
-    let idx = 0;
-
-    const readAttr = (attrs: string, name: string): string | undefined => {
-      const re = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i');
-      const m = re.exec(attrs);
-      const val = m?.[1] ?? m?.[2] ?? m?.[3];
-      return val !== undefined ? decodeBasicHtmlEntities(val) : undefined;
-    };
-
-    while ((match = tagRegex.exec(withoutScripts)) !== null && idx < 150) {
-      const tag = (match[1] ?? match[4] ?? '').toLowerCase();
-      const attrs = match[2] ?? match[5] ?? '';
-      const innerHtml = match[3] ?? '';
-
-      const role = readAttr(attrs, 'role');
-      const testId = readAttr(attrs, 'data-testid');
-      const id = readAttr(attrs, 'id');
-      const isInteractiveGeneric =
-        (tag === 'div' || tag === 'span') &&
-        (role === 'button' || role === 'tab' || role === 'link' || Boolean(testId));
-
-      if ((tag === 'div' || tag === 'span') && !isInteractiveGeneric) {
-        continue;
-      }
-
-      idx += 1;
-      const ref = `e${idx}`;
-      const innerText = decodeBasicHtmlEntities(innerHtml.replace(/<[^>]+>/g, ' '))
-        .replace(/\s+/g, ' ')
-        .trim();
-      const ariaLabel = readAttr(attrs, 'aria-label');
-      const placeholder = readAttr(attrs, 'placeholder');
-      const attrValue = readAttr(attrs, 'value');
-      const value = tag === 'textarea' ? innerText : attrValue;
-      const disabled = /\bdisabled\b/i.test(attrs);
-      const href = tag === 'a' ? readAttr(attrs, 'href') : undefined;
-
-      const selector = id
-        ? `#${id}`
-        : testId
-          ? `[data-testid="${testId}"]`
-          : `[data-bctrl-ref="${ref}"]`;
-
-      parsedElements.push({
-        ref,
-        selector,
-        tag,
-        role,
-        text: (innerText || ariaLabel || placeholder || value || tag).slice(0, 160),
-        id,
-        testId,
-        value,
-        disabled,
-        href,
-        clickCount: 0,
-        rect: {
-          x: 24,
-          y: 48 + (idx - 1) * 36,
-          width: 260,
-          height: 30,
-        },
-      });
-    }
-
-    this.elements = parsedElements;
-  }
-
-  private buildSnapshot(): BrowserSnapshotDto {
-    return {
-      target_id: this.sessionId,
-      url: this.currentUrl,
-      title: this.currentTitle,
-      timestamp_ms: Date.now(),
-      viewport: { ...this.viewport },
-      text_excerpt: this.textExcerpt,
-      elements: this.elements.map(({ href: _h, checked: _c, clickCount: _k, ...el }) => ({
-        ...el,
-      })),
-    };
-  }
-
-  private findElement(ref?: string, selector?: string): FallbackElementState | undefined {
-    if (ref) {
-      const cleanRef = ref.replace(/^@/, '');
-      const byRef = this.elements.find((e) => e.ref === cleanRef);
-      if (byRef) return byRef;
-    }
-    if (selector) {
-      const idMatch = /^#([A-Za-z0-9_-]+)$/.exec(selector.trim());
-      if (idMatch) {
-        return this.elements.find((e) => e.id === idMatch[1]);
-      }
-      const testIdMatch = /^\[data-testid=["']?([^"'\]]+)["']?\]$/.exec(selector.trim());
-      if (testIdMatch) {
-        return this.elements.find((e) => e.testId === testIdMatch[1]);
-      }
-      const refMatch = /^\[data-bctrl-ref=["']?([^"'\]]+)["']?\]$/.exec(selector.trim());
-      if (refMatch) {
-        return this.elements.find((e) => e.ref === refMatch[1]);
-      }
-      return this.elements.find((e) => e.selector === selector || e.tag === selector.trim().toLowerCase());
-    }
-    return undefined;
-  }
-
-  async goto(url: string): Promise<BrowserSnapshotDto> {
-    if (this.closed) throw new ApiError(410, 'headless_session_closed', 'Headless session is closed');
-    try {
-      const html = await this.fetchHtml(url);
-      this.parseHtmlIntoState(html);
-      return this.buildSnapshot();
-    } catch (err) {
-      if (err instanceof ApiError) throw err;
-      throw new ApiError(
-        502,
-        'navigation_failed',
-        err instanceof Error ? err.message : `Failed to load ${url}`,
-      );
-    }
-  }
-
-  async snapshot(): Promise<BrowserSnapshotDto> {
-    if (this.closed) throw new ApiError(410, 'headless_session_closed', 'Headless session is closed');
-    return this.buildSnapshot();
-  }
-
-  async performAction(req: BrowserCommandRequest): Promise<{
-    snapshot: BrowserSnapshotDto;
-    screenshotDataUrl?: string;
-    data?: Record<string, unknown>;
-  }> {
-    if (this.closed) throw new ApiError(410, 'headless_session_closed', 'Headless session is closed');
-    const action = normalizeActionKind(req.action);
-
-    switch (action) {
-      case 'snapshot':
-        return { snapshot: this.buildSnapshot() };
-
-      case 'navigate': {
-        if (!req.url) throw new ApiError(400, 'missing_url', 'Action "navigate" requires url');
-        const snap = await this.goto(req.url);
-        return { snapshot: snap };
-      }
-
-      case 'click': {
-        const el = this.findElement(req.ref, req.selector);
-        if (!el) {
-          throw new ApiError(404, 'element_not_found', `Element ${req.ref ?? req.selector ?? ''} not found`);
-        }
-        el.clickCount += 1;
-        this.lastClickedRef = el.ref;
-        if (el.href && !el.href.startsWith('#') && !el.href.startsWith('javascript:')) {
-          try {
-            const resolved = new URL(el.href, this.currentUrl).toString();
-            const snap = await this.goto(resolved);
-            return { snapshot: snap, data: { clicked_ref: el.ref, navigated_to: resolved } };
-          } catch {
-            // Keep current page if relative resolution fails on data:/about: URLs
-          }
-        }
-        return {
-          snapshot: this.buildSnapshot(),
-          data: { clicked_ref: el.ref, click_count: el.clickCount },
-        };
-      }
-
-      case 'fill':
-      case 'select': {
-        const el = this.findElement(req.ref, req.selector);
-        if (!el) {
-          throw new ApiError(404, 'element_not_found', `Element ${req.ref ?? req.selector ?? ''} not found`);
-        }
-        const val = req.text ?? '';
-        el.value = val;
-        if (el.tag === 'select') {
-          el.text = val;
-        }
-        return {
-          snapshot: this.buildSnapshot(),
-          data: { updated_ref: el.ref, value: val },
-        };
-      }
-
-      case 'press': {
-        this.lastKeyPressed = req.key ?? 'Enter';
-        return {
-          snapshot: this.buildSnapshot(),
-          data: { key: this.lastKeyPressed },
-        };
-      }
-
-      case 'hover': {
-        const el = this.findElement(req.ref, req.selector);
-        if (!el) {
-          throw new ApiError(404, 'element_not_found', `Element ${req.ref ?? req.selector ?? ''} not found`);
-        }
-        return {
-          snapshot: this.buildSnapshot(),
-          data: { hovered_ref: el.ref },
-        };
-      }
-
-      case 'scroll': {
-        this.scrollY = Math.max(0, this.scrollY + (req.delta_y ?? 320));
-        return {
-          snapshot: this.buildSnapshot(),
-          data: { scroll_y: this.scrollY },
-        };
-      }
-
-      case 'evaluate_query': {
-        const expr = (req.text ?? '').trim();
-        let value: unknown = this.currentTitle;
-        if (expr === 'document.title') value = this.currentTitle;
-        else if (expr === 'location.href' || expr === 'window.location.href') value = this.currentUrl;
-        else if (expr === 'window.scrollY') value = this.scrollY;
-        else if (expr === 'document.body.innerText') value = this.textExcerpt;
-        else {
-          value = {
-            title: this.currentTitle,
-            url: this.currentUrl,
-            elements_count: this.elements.length,
-            scroll_y: this.scrollY,
-            last_clicked_ref: this.lastClickedRef,
-            last_key: this.lastKeyPressed,
-          };
-        }
-        return {
-          snapshot: this.buildSnapshot(),
-          data: { expression: expr, value },
-        };
-      }
-
-      case 'screenshot': {
-        const shot = await this.screenshot();
-        return {
-          snapshot: this.buildSnapshot(),
-          screenshotDataUrl: shot.dataUrl,
-          data: { mime_type: shot.mimeType },
-        };
-      }
-
-      case 'app_action': {
-        return {
-          snapshot: this.buildSnapshot(),
-          data: { app_action: req.app_action ?? 'noop', ok: true },
-        };
-      }
-    }
-  }
-
-  async screenshot(): Promise<{ dataUrl: string; mimeType: string }> {
-    if (this.closed) throw new ApiError(410, 'headless_session_closed', 'Headless session is closed');
-    const w = this.viewport.width;
-    const h = this.viewport.height;
-    const elemRows = this.elements
-      .slice(0, 8)
-      .map((el, i) => {
-        const y = 152 + i * 40;
-        const label = `[${el.ref}] <${el.tag}> ${el.text || ''}${el.value ? ` = "${el.value}"` : ''}`;
-        return `<g transform="translate(28, ${y})">
-          <rect width="${Math.min(w - 56, 680)}" height="30" rx="6" fill="#1e293b" stroke="#334155" />
-          <text x="12" y="20" fill="#e2e8f0" font-family="monospace" font-size="13">${escapeXml(label.slice(0, 88))}</text>
-        </g>`;
-      })
-      .join('\n');
-
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-      <rect width="${w}" height="${h}" fill="#0f172a" />
-      <rect width="${w}" height="44" fill="#1e293b" />
-      <circle cx="20" cy="22" r="6" fill="#ef4444" />
-      <circle cx="40" cy="22" r="6" fill="#f59e0b" />
-      <circle cx="60" cy="22" r="6" fill="#10b981" />
-      <rect x="84" y="9" width="${Math.max(200, w - 110)}" height="26" rx="6" fill="#0f172a" />
-      <text x="96" y="27" fill="#94a3b8" font-family="monospace" font-size="12">${escapeXml(this.currentUrl.slice(0, 110))}</text>
-      <text x="28" y="84" fill="#f8fafc" font-family="sans-serif" font-size="22" font-weight="bold">${escapeXml(this.currentTitle.slice(0, 80))}</text>
-      <text x="28" y="116" fill="#94a3b8" font-family="sans-serif" font-size="14">${escapeXml(this.textExcerpt.slice(0, 115))}</text>
-      ${elemRows}
-    </svg>`;
-
-    return {
-      dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`,
-      mimeType: 'image/svg+xml',
-    };
-  }
-
-  async close(): Promise<void> {
-    this.closed = true;
-  }
-
-  killFastSync(): void {
-    this.closed = true;
-  }
-}
-
 // ============================================================================
-// Real Chromium Headless CDP Driver (`/usr/lib/chromium/chromium`)
+// Real Chromium Headless CDP Driver (CI / Container Hardened)
 // ============================================================================
 
 const CDP_SNAPSHOT_EXPRESSION = `(function(targetId) {
@@ -903,33 +722,71 @@ class ChromiumCdpDriver implements HeadlessDriver {
   private currentUrl = 'about:blank';
   private currentTitle = '';
   private closed = false;
+  private closePromise: Promise<void> | null = null;
 
   private constructor(
     private readonly sessionId: string,
     private readonly viewport: { width: number; height: number },
+    private readonly profileRoot: string,
   ) {}
 
   static async launch(
     sessionId: string,
     viewport: { width: number; height: number },
+    profileRoot: string,
   ): Promise<ChromiumCdpDriver> {
-    const driver = new ChromiumCdpDriver(sessionId, viewport);
-    await driver.initProcessAndConnect();
-    return driver;
+    const driver = new ChromiumCdpDriver(sessionId, viewport, profileRoot);
+    try {
+      await driver.initProcessAndConnect();
+      return driver;
+    } catch (err) {
+      await driver.close();
+      throw err;
+    }
   }
 
   private async initProcessAndConnect(): Promise<void> {
-    const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpui-bctrl-cdp-'));
+    const binPath = resolveChromiumBinaryPath();
+    if (!binPath) {
+      throw new ApiError(503, 'browser_unavailable', 'Chromium/Chrome executable not found on this host');
+    }
+
+    // Short profile directory under dataDir/p/<hex> to stay well under Linux 107B AF_UNIX limit!
+    const profilesParent = path.join(this.profileRoot, 'p');
+    fs.mkdirSync(profilesParent, { recursive: true });
+    const userDataDir = path.join(profilesParent, crypto.randomBytes(4).toString('hex'));
+    fs.mkdirSync(userDataDir, { recursive: true });
     this.userDataDir = userDataDir;
 
+    const rawLaunchTimeout = Number(process.env.BROWSER_CDP_LAUNCH_TIMEOUT_MS ?? 30_000);
+    const launchTimeoutMs = Number.isFinite(rawLaunchTimeout)
+      ? Math.max(5000, Math.min(60_000, Math.floor(rawLaunchTimeout)))
+      : 30_000;
+
+    const existingNoProxy = process.env.NO_PROXY || process.env.no_proxy || '';
+    const mergedNoProxy = Array.from(
+      new Set(['127.0.0.1', 'localhost', '::1', ...existingNoProxy.split(',').map((s) => s.trim()).filter(Boolean)]),
+    ).join(',');
+
     const proc = spawn(
-      CHROMIUM_BINARY_PATH,
+      binPath,
       [
-        '--headless',
+        '--headless=new',
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-crash-reporter',
+        '--disable-breakpad',
+        '--password-store=basic',
+        '--use-mock-keychain',
+        '--disable-extensions',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-background-networking',
@@ -944,40 +801,95 @@ class ChromiumCdpDriver implements HeadlessDriver {
         `--window-size=${this.viewport.width},${this.viewport.height}`,
         'about:blank',
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
+      {
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: {
+          ...process.env,
+          DBUS_SESSION_BUS_ADDRESS: '',
+          NO_PROXY: mergedNoProxy,
+          no_proxy: mergedNoProxy,
+        },
+      },
     );
     this.proc = proc;
+    liveCdpDrivers.add(this);
 
+    // Dual port discovery: race stderr regex AND DevToolsActivePort file polling!
     const debugPort = await new Promise<number>((resolve, reject) => {
+      let settled = false;
       let stderrBuf = '';
+      const activePortFile = path.join(userDataDir, 'DevToolsActivePort');
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        clearInterval(portPoll);
+        proc.stderr?.off('data', onData);
+        proc.off('error', onError);
+        proc.off('exit', onExit);
+      };
+
+      const finishOk = (port: number) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(port);
+      };
+
+      const finishErr = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+
       const timer = setTimeout(() => {
-        reject(new Error(`Timed out waiting for Chromium DevTools port. Stderr: ${stderrBuf.slice(-300)}`));
-      }, 15000);
+        finishErr(
+          new Error(`Timed out after ${launchTimeoutMs}ms waiting for Chromium DevTools port. Stderr: ${stderrBuf.slice(-300)}`),
+        );
+      }, launchTimeoutMs);
+      timer.unref?.();
+
+      const portPoll = setInterval(() => {
+        try {
+          if (fs.existsSync(activePortFile)) {
+            const firstLine = fs.readFileSync(activePortFile, 'utf8').split(/\r?\n/)[0]?.trim() ?? '';
+            const portNum = Number(firstLine);
+            if (Number.isInteger(portNum) && portNum > 0 && portNum <= 65535) {
+              finishOk(portNum);
+            }
+          }
+        } catch {
+          // Retry on next tick
+        }
+      }, 100);
+      portPoll.unref?.();
 
       const onData = (chunk: Buffer) => {
         stderrBuf += chunk.toString('utf8');
+        if (stderrBuf.length > 8192) stderrBuf = stderrBuf.slice(-4096);
         const m = /DevTools listening on ws:\/\/(?:\[::1\]|127\.0\.0\.1|localhost):(\d+)\//.exec(stderrBuf);
         if (m) {
-          clearTimeout(timer);
-          proc.stderr?.off('data', onData);
-          resolve(Number(m[1]));
+          finishOk(Number(m[1]));
         }
       };
 
+      const onError = (err: Error) => finishErr(err);
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
+        finishErr(
+          new Error(
+            `Chromium exited prematurely (code=${code}, signal=${signal}): ${stderrBuf.slice(-300)}`,
+          ),
+        );
+
       proc.stderr?.on('data', onData);
-      proc.once('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-      proc.once('exit', (code) => {
-        clearTimeout(timer);
-        reject(new Error(`Chromium exited prematurely with code ${code}: ${stderrBuf.slice(-300)}`));
-      });
+      proc.once('error', onError);
+      proc.once('exit', onExit);
     });
 
-    // Discover the primary 'page' target from /json/list over direct loopback HTTP
+    // Discover the primary 'page' target from /json/list over direct loopback HTTP (up to 40 attempts)
     let pageWsUrl: string | null = null;
-    for (let attempt = 0; attempt < 15; attempt++) {
+    for (let attempt = 0; attempt < 40; attempt++) {
       try {
         const listRes = await httpGetDirectBuffer(
           new URL(`http://127.0.0.1:${debugPort}/json/list`),
@@ -993,22 +905,42 @@ class ChromiumCdpDriver implements HeadlessDriver {
           pageWsUrl = pageTarget.webSocketDebuggerUrl;
           break;
         }
+        // Fallback: open a fresh about:blank page if none initialized yet
+        if (attempt === 10 || attempt === 25) {
+          try {
+            const newRes = await httpGetDirectBuffer(
+              new URL(`http://127.0.0.1:${debugPort}/json/new?about:blank`),
+              2000,
+            );
+            const created = JSON.parse(newRes.body) as { webSocketDebuggerUrl?: string };
+            if (created.webSocketDebuggerUrl) {
+              pageWsUrl = created.webSocketDebuggerUrl;
+              break;
+            }
+          } catch {
+            // Continue retrying /json/list
+          }
+        }
       } catch {
         // Retry briefly while DevTools target initializes
       }
-      await new Promise((r) => setTimeout(r, 75));
+      await new Promise((r) => setTimeout(r, 100));
     }
 
     if (!pageWsUrl) {
-      await this.close();
       throw new Error('Failed to locate page webSocketDebuggerUrl from Chromium /json/list');
     }
 
-    const ws = new WebSocket(pageWsUrl);
+    // Normalize WS URL host to 127.0.0.1 (avoids IPv6/localhost proxy mismatches)
+    const normalizedWsUrl = new URL(pageWsUrl);
+    normalizedWsUrl.hostname = '127.0.0.1';
+
+    const ws = new WebSocket(normalizedWsUrl.toString());
     this.cdpWs = ws;
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timed out connecting to CDP WebSocket')), 4000);
+      const timer = setTimeout(() => reject(new Error('Timed out connecting to CDP WebSocket')), 10_000);
+      timer.unref?.();
       ws.once('open', () => {
         clearTimeout(timer);
         resolve();
@@ -1371,13 +1303,29 @@ class ChromiumCdpDriver implements HeadlessDriver {
         };
       }
 
-      case 'app_action': {
-        return {
-          snapshot: await this.snapshot(),
-          data: { app_action: req.app_action ?? 'noop', ok: true },
-        };
-      }
+      case 'app_action':
+        throw new ApiError(
+          400,
+          'unsupported_headless_action',
+          'app_action is only supported on live web tabs, not headless Chromium CDP sessions',
+        );
     }
+  }
+
+  async evaluateJs<T = unknown>(expression: string): Promise<T> {
+    const res = await this.sendCdp('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (res?.exceptionDetails) {
+      throw new ApiError(
+        400,
+        'evaluate_exception',
+        res.exceptionDetails.text ?? 'Runtime.evaluate threw exception',
+      );
+    }
+    return res?.result?.value as T;
   }
 
   async screenshot(): Promise<{ dataUrl: string; mimeType: string }> {
@@ -1395,118 +1343,26 @@ class ChromiumCdpDriver implements HeadlessDriver {
 
   killFastSync(): void {
     this.closed = true;
+    liveCdpDrivers.delete(this);
     for (const [, pending] of this.pendingCdp) {
       clearTimeout(pending.timer);
       pending.reject(new Error('Headless session terminated'));
     }
     this.pendingCdp.clear();
-    if (this.cdpWs && this.cdpWs.readyState === WebSocket.OPEN) {
-      try {
-        this.cdpWs.send(JSON.stringify({ id: 999999, method: 'Browser.close', params: {} }));
-      } catch {
-        // Ignore
-      }
-    }
     const wsRef = this.cdpWs;
     this.cdpWs = null;
-    const proc = this.proc;
-    this.proc = null;
-    const dir = this.userDataDir;
-    this.userDataDir = null;
-
-    if (proc) {
+    if (wsRef) {
       try {
-        proc.kill('SIGTERM');
-      } catch {
-        // Ignore
-      }
-      const fallbackKill = setTimeout(() => {
-        try {
-          wsRef?.terminate();
-        } catch {
-          // Ignore
-        }
-        if (proc.exitCode === null && proc.signalCode === null) {
-          try {
-            proc.kill('SIGKILL');
-          } catch {
-            // Ignore
-          }
-        }
-        if (dir) {
-          void fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
-        }
-      }, 350);
-      fallbackKill.unref?.();
-      proc.once('exit', () => {
-        clearTimeout(fallbackKill);
-        try {
-          wsRef?.close();
-        } catch {
-          // Ignore
-        }
-        if (dir) {
-          void fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
-        }
-      });
-    } else if (dir) {
-      void fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-
-    for (const [, pending] of this.pendingCdp) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('Headless session closed'));
-    }
-    this.pendingCdp.clear();
-
-    if (this.cdpWs && this.cdpWs.readyState === WebSocket.OPEN) {
-      try {
-        this.cdpWs.send(JSON.stringify({ id: 999999, method: 'Browser.close', params: {} }));
+        wsRef.terminate();
       } catch {
         // Ignore
       }
     }
-
     const proc = this.proc;
     this.proc = null;
     if (proc && proc.exitCode === null && proc.signalCode === null) {
-      await new Promise<void>((resolve) => {
-        const killTimer = setTimeout(() => {
-          try {
-            proc.kill('SIGKILL');
-          } catch {
-            // Ignore
-          }
-          resolve();
-        }, 700);
-        killTimer.unref?.();
-        proc.once('exit', () => {
-          clearTimeout(killTimer);
-          resolve();
-        });
-        try {
-          proc.kill('SIGTERM');
-        } catch {
-          clearTimeout(killTimer);
-          resolve();
-        }
-      });
+      terminateProcessGroup(proc, 'SIGKILL');
     }
-
-    if (this.cdpWs) {
-      try {
-        this.cdpWs.close();
-      } catch {
-        // Ignore
-      }
-      this.cdpWs = null;
-    }
-
     const dir = this.userDataDir;
     this.userDataDir = null;
     if (dir) {
@@ -1516,6 +1372,69 @@ class ChromiumCdpDriver implements HeadlessDriver {
         // Ignore cleanup race
       }
     }
+  }
+
+  async close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = (async () => {
+      this.closed = true;
+      liveCdpDrivers.delete(this);
+
+      for (const [, pending] of this.pendingCdp) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Headless session closed'));
+      }
+      this.pendingCdp.clear();
+
+      if (this.cdpWs && this.cdpWs.readyState === WebSocket.OPEN) {
+        try {
+          this.cdpWs.send(JSON.stringify({ id: 999999, method: 'Browser.close', params: {} }));
+        } catch {
+          // Ignore
+        }
+      }
+
+      const proc = this.proc;
+      this.proc = null;
+      if (proc && proc.exitCode === null && proc.signalCode === null) {
+        await new Promise<void>((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(termTimer);
+            resolve();
+          };
+          proc.once('exit', finish);
+          const termTimer = setTimeout(() => {
+            terminateProcessGroup(proc, 'SIGKILL');
+            setTimeout(finish, 200).unref?.();
+          }, 1500);
+          termTimer.unref?.();
+          terminateProcessGroup(proc, 'SIGTERM');
+        });
+      }
+
+      if (this.cdpWs) {
+        try {
+          this.cdpWs.terminate();
+        } catch {
+          // Ignore
+        }
+        this.cdpWs = null;
+      }
+
+      const dir = this.userDataDir;
+      this.userDataDir = null;
+      if (dir) {
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } catch {
+          // Ignore cleanup race
+        }
+      }
+    })();
+    return this.closePromise;
   }
 }
 
@@ -1599,25 +1518,57 @@ function randomPairCode(len = 6): string {
 }
 
 export class BrowserControlBridge {
-  private readonly userGenerations = new Map<number, number>();
-  private readonly desktopTokens = new Map<string, DesktopTokenRecord>();
-  private readonly pairingTickets = new Map<string, PairingTicketRecord>();
   private readonly liveTabs = new Map<string, LiveTabRecord>();
   private readonly socketToTargetIds = new Map<WebSocket, Set<string>>();
   private readonly controllerSockets = new Set<ControllerWsClient>();
   private readonly pendingCommands = new Map<string, PendingBrowserCommand>();
   private readonly headlessSessions = new Map<string, ManagedHeadlessSession>();
-  private readonly auditLogsByUser = new Map<number, BrowserAuditLogEntry[]>();
+  private readonly controlModes = new Map<number, BrowserControlMode>();
+  private readonly profileRoot: string;
 
-  constructor(private readonly db: DatabaseSync) {
+  constructor(private readonly db: DatabaseSync, dataDir?: string) {
+    this.profileRoot = dataDir && dataDir.trim() ? dataDir.trim() : path.join(process.cwd(), 'data');
     activeBridges.add(this);
   }
 
   getGeneration(userId: number): number {
-    const cur = this.userGenerations.get(userId);
-    if (cur !== undefined) return cur;
-    this.userGenerations.set(userId, 1);
+    const row = this.db
+      .prepare(`SELECT control_generation FROM browser_control_generations WHERE user_id = ?`)
+      .get(userId) as { control_generation: number } | undefined;
+    if (row) return Number(row.control_generation);
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO browser_control_generations (user_id, control_generation, updated_at_ms) VALUES (?, 1, ?)`,
+      )
+      .run(userId, Date.now());
     return 1;
+  }
+
+  getControlMode(userId: number): BrowserControlMode {
+    return this.controlModes.get(userId) ?? { mode: 'idle' };
+  }
+
+  setControlMode(userId: number, mode: BrowserControlMode): BrowserControlMode {
+    this.controlModes.set(userId, mode);
+    return mode;
+  }
+
+  hasActiveControlForUser(userId: number): boolean {
+    for (const [, tab] of this.liveTabs) {
+      if (tab.descriptor.user_id === userId) return true;
+    }
+    for (const [, hs] of this.headlessSessions) {
+      if (hs.userId === userId) return true;
+    }
+    for (const ctrl of this.controllerSockets) {
+      if (ctrl.userId === userId) return true;
+    }
+    const tokenRow = this.db
+      .prepare(
+        `SELECT 1 FROM browser_desktop_tokens WHERE user_id = ? AND revoked = 0 AND expires_at_ms > ? LIMIT 1`,
+      )
+      .get(userId, Date.now());
+    return Boolean(tokenRow);
   }
 
   recordAudit(
@@ -1629,21 +1580,48 @@ export class BrowserControlBridge {
       timestamp_ms: Date.now(),
       ...entry,
     };
-    let list = this.auditLogsByUser.get(userId);
-    if (!list) {
-      list = [];
-      this.auditLogsByUser.set(userId, list);
-    }
-    list.unshift(full);
-    if (list.length > 250) {
-      list.length = 250;
-    }
+    this.db
+      .prepare(`
+        INSERT INTO browser_audit_logs (
+          audit_id, user_id, target_id, caller, action, status, summary, latency_ms, timestamp_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        full.audit_id,
+        userId,
+        full.target_id,
+        full.caller,
+        full.action,
+        full.status,
+        full.summary,
+        full.latency_ms,
+        full.timestamp_ms,
+      );
     return full;
   }
 
   listAuditLogs(userId: number, limit = 50): BrowserAuditLogEntry[] {
-    const clamped = Math.max(1, Math.min(200, limit));
-    return (this.auditLogsByUser.get(userId) ?? []).slice(0, clamped);
+    const clamped = Math.max(1, Math.min(200, Math.floor(limit)));
+    const rows = this.db
+      .prepare(
+        `SELECT audit_id, target_id, caller, action, status, summary, latency_ms, timestamp_ms
+         FROM browser_audit_logs
+         WHERE user_id = ?
+         ORDER BY timestamp_ms DESC
+         LIMIT ?`,
+      )
+      .all(userId, clamped) as Array<Record<string, unknown>>;
+
+    return rows.map((r) => ({
+      audit_id: String(r.audit_id),
+      target_id: String(r.target_id),
+      caller: String(r.caller),
+      action: String(r.action),
+      status: String(r.status) as BrowserAuditLogEntry['status'],
+      summary: String(r.summary),
+      latency_ms: Number(r.latency_ms),
+      timestamp_ms: Number(r.timestamp_ms),
+    }));
   }
 
   extractRequestToken(req: IncomingMessage, query?: URLSearchParams): string | null {
@@ -1662,16 +1640,35 @@ export class BrowserControlBridge {
     if (!rawToken) return null;
 
     if (rawToken.startsWith('bctrl_')) {
-      const rec = this.desktopTokens.get(rawToken);
-      if (!rec || rec.revoked || rec.expiresAtMs <= Date.now()) {
+      const tokenHash = sha256Hex(rawToken);
+      const row = this.db
+        .prepare(
+          `SELECT user_id, label, issued_generation, expires_at_ms, revoked
+           FROM browser_desktop_tokens WHERE token_hash = ?`,
+        )
+        .get(tokenHash) as
+        | {
+            user_id: number;
+            label: string;
+            issued_generation: number;
+            expires_at_ms: number;
+            revoked: number;
+          }
+        | undefined;
+      if (!row || Number(row.revoked) !== 0 || Number(row.expires_at_ms) <= Date.now()) {
+        return null;
+      }
+      const userId = Number(row.user_id);
+      const curGen = this.getGeneration(userId);
+      if (Number(row.issued_generation) < curGen) {
         return null;
       }
       return {
-        userId: rec.userId,
+        userId,
         callerKind: 'desktop_controller',
-        callerLabel: rec.label,
+        callerLabel: row.label,
         rawToken,
-        generation: this.getGeneration(rec.userId),
+        generation: curGen,
       };
     }
 
@@ -1700,49 +1697,76 @@ export class BrowserControlBridge {
   }
 
   // ==========================================================================
-  // Desktop Pairing (`pair/create` & `pair/claim`)
+  // SQLite-Persisted Desktop Pairing (`pair/create` & `pair/claim`)
   // ==========================================================================
 
   createPairingTicket(
     userId: number,
     baseUrl: string,
-    opts: { label?: string; ttlSecs?: number } = {},
-  ): DesktopPairingTicketDto {
-    const ttlMs = Math.max(10_000, Math.min(86_400_000, (opts.ttlSecs ?? 600) * 1000));
+    opts: { label?: unknown; ttlSecs?: unknown } = {},
+  ): DesktopPairingTicketDto & { pairing_code: string; code: string; control_token: string; token: string } {
+    const validatedLabel = optionalTrimmedString(opts.label, 'label', 120);
+    const validatedTtl = optionalFiniteNumber(opts.ttlSecs, 'ttl_secs');
+    const ttlMs = Math.max(10_000, Math.min(86_400_000, Math.floor((validatedTtl ?? 600) * 1000)));
     const now = Date.now();
     const expiresAtMs = now + ttlMs;
-    let pairCode = randomPairCode(6);
-    while (this.pairingTickets.has(pairCode)) {
-      pairCode = randomPairCode(6);
-    }
     const desktopToken = `bctrl_${crypto.randomBytes(20).toString('hex')}`;
-    const label = opts.label?.trim() || 'GPUI Desktop Bridge';
+    const tokenHash = sha256Hex(desktopToken);
+    const label = validatedLabel || 'Fabushi Desktop Bridge';
     const gen = this.getGeneration(userId);
-
     const wsBase = baseUrl.replace(/^http/i, 'ws');
-    const ticket: PairingTicketRecord = {
-      pairCode,
-      desktopToken,
-      userId,
-      label,
-      expiresAtMs,
-      claimed: false,
-      httpBaseUrl: baseUrl,
-      wsBridgeUrl: `${wsBase}/api/v1/browser/ws`,
-      mcpRpcUrl: `${baseUrl}/api/v1/mcp/rpc`,
-    };
-    this.pairingTickets.set(pairCode, ticket);
+    const wsBridgeUrl = `${wsBase}/api/v1/browser/ws`;
+    const mcpRpcUrl = `${baseUrl}/api/v1/mcp/rpc`;
+    let pairCode = randomPairCode(6);
 
-    // Activate token bound to current userId + control_generation
-    this.desktopTokens.set(desktopToken, {
-      desktopToken,
-      userId,
-      label,
-      issuedGeneration: gen,
-      expiresAtMs: now + 30 * 86_400_000,
-      revoked: false,
-      createdAtMs: now,
-    });
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      for (let i = 0; i < 10; i++) {
+        const exists = this.db
+          .prepare(`SELECT 1 FROM browser_pairing_tickets WHERE pair_code = ?`)
+          .get(pairCode);
+        if (!exists) break;
+        pairCode = randomPairCode(6);
+      }
+
+      this.db
+        .prepare(`
+          INSERT INTO browser_pairing_tickets (
+            pair_code, desktop_token_hash, desktop_token, user_id, label,
+            expires_at_ms, claimed, http_base_url, ws_bridge_url, mcp_rpc_url, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        `)
+        .run(
+          pairCode,
+          tokenHash,
+          desktopToken,
+          userId,
+          label,
+          expiresAtMs,
+          baseUrl,
+          wsBridgeUrl,
+          mcpRpcUrl,
+          now,
+        );
+
+      this.db
+        .prepare(`
+          INSERT INTO browser_desktop_tokens (
+            token_hash, desktop_token, user_id, label, issued_generation,
+            expires_at_ms, revoked, created_at_ms, revoked_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL)
+        `)
+        .run(tokenHash, desktopToken, userId, label, gen, now + 30 * 86_400_000, now);
+
+      this.db.exec('COMMIT;');
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {
+        // Already rolled back
+      }
+      throw err;
+    }
 
     this.recordAudit(userId, {
       target_id: 'pairing',
@@ -1754,72 +1778,118 @@ export class BrowserControlBridge {
     });
 
     return {
-      pair_code: ticket.pairCode,
-      desktop_token: ticket.desktopToken,
-      expires_at_ms: ticket.expiresAtMs,
-      http_base_url: ticket.httpBaseUrl,
-      ws_bridge_url: ticket.wsBridgeUrl,
-      mcp_rpc_url: ticket.mcpRpcUrl,
+      pair_code: pairCode,
+      pairing_code: pairCode,
+      code: pairCode,
+      desktop_token: desktopToken,
+      control_token: desktopToken,
+      token: desktopToken,
+      expires_at_ms: expiresAtMs,
+      http_base_url: baseUrl,
+      ws_bridge_url: wsBridgeUrl,
+      mcp_rpc_url: mcpRpcUrl,
     };
   }
 
   claimPairingTicket(
-    rawPairCode: string,
-    controllerLabel?: string,
+    rawPairCode: unknown,
+    controllerLabel?: unknown,
     overrideBaseUrl?: string,
-  ): DesktopPairingTicketDto {
+  ): DesktopPairingTicketDto & { pairing_code: string; code: string; control_token: string; token: string } {
+    if (rawPairCode === undefined || rawPairCode === null) {
+      throw new ApiError(400, 'missing_pair_code', 'pair_code is required');
+    }
+    if (typeof rawPairCode !== 'string') {
+      throw new ApiError(400, 'invalid_parameter', 'pair_code must be a string');
+    }
     const code = rawPairCode.trim().toUpperCase();
     if (!code) {
       throw new ApiError(400, 'missing_pair_code', 'pair_code is required');
     }
-    const ticket = this.pairingTickets.get(code);
-    if (!ticket) {
-      throw new ApiError(404, 'invalid_pair_code', 'Invalid or unknown desktop pairing code');
-    }
+    const cleanControllerLabel = optionalTrimmedString(controllerLabel, 'controller_label', 120);
+
     const now = Date.now();
-    if (ticket.expiresAtMs <= now) {
-      this.pairingTickets.delete(code);
-      throw new ApiError(410, 'pair_code_expired', 'Desktop pairing code has expired');
-    }
-    if (ticket.claimed) {
-      throw new ApiError(409, 'pair_code_already_claimed', 'Desktop pairing code has already been claimed');
+    let claimedRow: Record<string, unknown>;
+    let tokenRow: Record<string, unknown>;
+    let finalLabel: string;
+    const extendedExpiry = now + 30 * 86_400_000;
+
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      const ticket = this.db
+        .prepare(`SELECT * FROM browser_pairing_tickets WHERE pair_code = ?`)
+        .get(code) as Record<string, unknown> | undefined;
+      if (!ticket) {
+        this.db.exec('ROLLBACK;');
+        throw new ApiError(404, 'invalid_pair_code', 'Invalid or unknown desktop pairing code');
+      }
+      if (Number(ticket.expires_at_ms) <= now) {
+        this.db.prepare(`DELETE FROM browser_pairing_tickets WHERE pair_code = ?`).run(code);
+        this.db.exec('COMMIT;');
+        throw new ApiError(410, 'pair_code_expired', 'Desktop pairing code has expired');
+      }
+      if (Number(ticket.claimed) !== 0) {
+        this.db.exec('ROLLBACK;');
+        throw new ApiError(409, 'pair_code_already_claimed', 'Desktop pairing code has already been claimed');
+      }
+
+      const tok = this.db
+        .prepare(`SELECT * FROM browser_desktop_tokens WHERE token_hash = ?`)
+        .get(String(ticket.desktop_token_hash)) as Record<string, unknown> | undefined;
+      if (!tok || Number(tok.revoked) !== 0) {
+        this.db.exec('ROLLBACK;');
+        throw new ApiError(401, 'pairing_revoked', 'Desktop pairing ticket was revoked by user');
+      }
+
+      finalLabel = cleanControllerLabel || String(ticket.label);
+      this.db
+        .prepare(`UPDATE browser_pairing_tickets SET claimed = 1, label = ? WHERE pair_code = ?`)
+        .run(finalLabel, code);
+      this.db
+        .prepare(`UPDATE browser_desktop_tokens SET label = ?, expires_at_ms = ? WHERE token_hash = ?`)
+        .run(finalLabel, extendedExpiry, String(ticket.desktop_token_hash));
+      this.db.exec('COMMIT;');
+
+      claimedRow = ticket;
+      tokenRow = tok;
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {
+        // Already committed/rolled back
+      }
+      throw err;
     }
 
-    const tokenRec = this.desktopTokens.get(ticket.desktopToken);
-    if (!tokenRec || tokenRec.revoked) {
-      throw new ApiError(401, 'pairing_revoked', 'Desktop pairing ticket was revoked by user');
-    }
+    const userId = Number(claimedRow.user_id);
+    const desktopToken = String(tokenRow.desktop_token);
 
-    ticket.claimed = true;
-    if (controllerLabel?.trim()) {
-      ticket.label = controllerLabel.trim();
-      tokenRec.label = controllerLabel.trim();
-    }
-    tokenRec.expiresAtMs = now + 30 * 86_400_000;
-
-    // Update active_controller hint on user's live tabs
     for (const [, tab] of this.liveTabs) {
-      if (tab.descriptor.user_id === ticket.userId && tab.descriptor.allow_remote_control) {
-        tab.descriptor.active_controller = tokenRec.label;
+      if (tab.descriptor.user_id === userId && tab.descriptor.allow_remote_control) {
+        tab.descriptor.active_controller = finalLabel;
       }
     }
 
-    this.recordAudit(ticket.userId, {
+    this.recordAudit(userId, {
       target_id: 'pairing',
-      caller: tokenRec.label,
+      caller: finalLabel,
       action: 'pair_claim',
       status: 'ok',
-      summary: `Desktop controller "${tokenRec.label}" claimed pairing code ${code}`,
+      summary: `Desktop controller "${finalLabel}" claimed pairing code ${code}`,
       latency_ms: 0,
     });
-    this.broadcastTargetsUpdated(ticket.userId);
+    this.broadcastTargetsUpdated(userId);
 
-    const httpBase = overrideBaseUrl ?? ticket.httpBaseUrl;
+    const httpBase = overrideBaseUrl ?? String(claimedRow.http_base_url);
     const wsBase = httpBase.replace(/^http/i, 'ws');
     return {
-      pair_code: ticket.pairCode,
-      desktop_token: ticket.desktopToken,
-      expires_at_ms: tokenRec.expiresAtMs,
+      pair_code: code,
+      pairing_code: code,
+      code,
+      desktop_token: desktopToken,
+      control_token: desktopToken,
+      token: desktopToken,
+      expires_at_ms: extendedExpiry,
       http_base_url: httpBase,
       ws_bridge_url: `${wsBase}/api/v1/browser/ws`,
       mcp_rpc_url: `${httpBase}/api/v1/mcp/rpc`,
@@ -1881,34 +1951,56 @@ export class BrowserControlBridge {
     payload: BrowserRegisterPayload,
     ws: WebSocket | null = null,
   ): BrowserTargetDescriptor {
+    if (!isPlainObject(payload)) {
+      throw new ApiError(400, 'invalid_parameter', 'Tab registration payload must be a JSON object');
+    }
+    const rawTargetId = optionalTrimmedString(payload.target_id, 'target_id', 128);
+    const titleInput = optionalTrimmedString(payload.title, 'title', 512);
+    const urlInput = optionalTrimmedString(payload.url, 'url', 4096);
+    const themeInput = optionalTrimmedString(payload.theme, 'theme', 64);
+    const navDestInput = optionalTrimmedString(payload.active_nav_dest, 'active_nav_dest', 64);
+    const allowRemoteInput = optionalBoolean(payload.allow_remote_control, 'allow_remote_control');
+    let activeChatId: number | null | undefined;
+    if (payload.active_chat_id !== undefined) {
+      if (payload.active_chat_id === null) {
+        activeChatId = null;
+      } else {
+        activeChatId = optionalFiniteNumber(payload.active_chat_id, 'active_chat_id');
+      }
+    }
+
     const now = Date.now();
-    const targetId =
-      payload.target_id?.trim() || `tab_${userId}_${crypto.randomBytes(4).toString('hex')}`;
+    const targetId = rawTargetId || `tab_${userId}_${crypto.randomBytes(4).toString('hex')}`;
     const existing = this.liveTabs.get(targetId);
     if (existing && existing.descriptor.user_id !== userId) {
       throw new ApiError(403, 'forbidden_target', 'Target ID belongs to a different user');
     }
+
+    const viewport =
+      payload.viewport !== undefined
+        ? parseViewport(payload.viewport)
+        : (existing?.descriptor.viewport ?? { width: 1280, height: 800 });
 
     const gen = this.getGeneration(userId);
     const descriptor: BrowserTargetDescriptor = {
       target_id: targetId,
       user_id: userId,
       kind: 'live_web_tab',
-      title: payload.title || existing?.descriptor.title || 'GPUI Telegram Web',
-      url: payload.url || existing?.descriptor.url || 'http://localhost/',
-      viewport: payload.viewport ?? existing?.descriptor.viewport ?? { width: 1280, height: 800 },
-      theme: payload.theme ?? existing?.descriptor.theme,
+      title: titleInput || existing?.descriptor.title || 'GPUI Telegram Web',
+      url: urlInput || existing?.descriptor.url || 'http://localhost/',
+      viewport,
+      theme: themeInput ?? existing?.descriptor.theme,
       active_chat_id:
-        payload.active_chat_id !== undefined
-          ? payload.active_chat_id
-          : existing?.descriptor.active_chat_id ?? null,
-      active_nav_dest: payload.active_nav_dest ?? existing?.descriptor.active_nav_dest,
+        activeChatId !== undefined
+          ? activeChatId
+          : (existing?.descriptor.active_chat_id ?? null),
+      active_nav_dest: navDestInput ?? existing?.descriptor.active_nav_dest,
       connected_at_ms: existing?.descriptor.connected_at_ms ?? now,
       last_heartbeat_ms: now,
       allow_remote_control:
-        payload.allow_remote_control !== undefined
-          ? Boolean(payload.allow_remote_control)
-          : existing?.descriptor.allow_remote_control ?? true,
+        allowRemoteInput !== undefined
+          ? allowRemoteInput
+          : (existing?.descriptor.allow_remote_control ?? true),
       active_controller: existing?.descriptor.active_controller ?? null,
       control_generation: gen,
     };
@@ -1935,20 +2027,43 @@ export class BrowserControlBridge {
   }
 
   reportTabState(userId: number, payload: BrowserStateReportPayload): BrowserTargetDescriptor {
-    const rec = this.liveTabs.get(payload.target_id);
+    if (!isPlainObject(payload)) {
+      throw new ApiError(400, 'invalid_parameter', 'State report payload must be a JSON object');
+    }
+    const targetId = optionalTrimmedString(payload.target_id, 'target_id', 128);
+    if (!targetId) {
+      throw new ApiError(400, 'invalid_parameter', 'target_id is required');
+    }
+    const titleInput = optionalTrimmedString(payload.title, 'title', 512);
+    const urlInput = optionalTrimmedString(payload.url, 'url', 4096);
+    const themeInput = optionalTrimmedString(payload.theme, 'theme', 64);
+    const navDestInput = optionalTrimmedString(payload.active_nav_dest, 'active_nav_dest', 64);
+    const allowRemoteInput = optionalBoolean(payload.allow_remote_control, 'allow_remote_control');
+    const viewportInput =
+      payload.viewport !== undefined ? parseViewport(payload.viewport) : undefined;
+    let activeChatId: number | null | undefined;
+    if (payload.active_chat_id !== undefined) {
+      if (payload.active_chat_id === null) {
+        activeChatId = null;
+      } else {
+        activeChatId = optionalFiniteNumber(payload.active_chat_id, 'active_chat_id');
+      }
+    }
+
+    const rec = this.liveTabs.get(targetId);
     if (!rec || rec.descriptor.user_id !== userId) {
-      throw new ApiError(404, 'browser_target_not_found', `Browser tab "${payload.target_id}" not found`);
+      throw new ApiError(404, 'browser_target_not_found', `Browser tab "${targetId}" not found`);
     }
 
     const d = rec.descriptor;
-    if (payload.title !== undefined) d.title = payload.title;
-    if (payload.url !== undefined) d.url = payload.url;
-    if (payload.viewport !== undefined) d.viewport = payload.viewport;
-    if (payload.theme !== undefined) d.theme = payload.theme;
-    if (payload.active_chat_id !== undefined) d.active_chat_id = payload.active_chat_id;
-    if (payload.active_nav_dest !== undefined) d.active_nav_dest = payload.active_nav_dest;
-    if (payload.allow_remote_control !== undefined) {
-      d.allow_remote_control = Boolean(payload.allow_remote_control);
+    if (titleInput !== undefined) d.title = titleInput;
+    if (urlInput !== undefined) d.url = urlInput;
+    if (viewportInput !== undefined) d.viewport = viewportInput;
+    if (themeInput !== undefined) d.theme = themeInput;
+    if (activeChatId !== undefined) d.active_chat_id = activeChatId;
+    if (navDestInput !== undefined) d.active_nav_dest = navDestInput;
+    if (allowRemoteInput !== undefined) {
+      d.allow_remote_control = allowRemoteInput;
     }
     d.last_heartbeat_ms = Date.now();
     d.control_generation = this.getGeneration(userId);
@@ -2040,25 +2155,46 @@ export class BrowserControlBridge {
     auth: BrowserCallerAuth,
     rawReq: BrowserCommandRequest,
   ): Promise<BrowserCommandResult> {
+    if (!isPlainObject(rawReq)) {
+      throw new ApiError(400, 'invalid_parameter', 'Command request must be a JSON object');
+    }
     const userId = auth.userId;
     const action = normalizeActionKind(rawReq.action);
-    const callerLabel = rawReq.caller_label?.trim() || auth.callerLabel;
+    const reqTargetId = optionalTrimmedString(rawReq.target_id, 'target_id', 128);
+    const callerLabel = optionalTrimmedString(rawReq.caller_label, 'caller_label', 128) || auth.callerLabel;
+    const reqCommandId = optionalTrimmedString(rawReq.command_id, 'command_id', 128);
+    const expectedGeneration = optionalFiniteNumber(rawReq.expected_generation, 'expected_generation');
+    const reqTimeoutMs = optionalFiniteNumber(rawReq.timeout_ms, 'timeout_ms');
+    const reqRef = optionalTrimmedString(rawReq.ref, 'ref', 128);
+    const reqSelector = optionalTrimmedString(rawReq.selector, 'selector', 1024);
+    const reqText =
+      rawReq.text === undefined || rawReq.text === null
+        ? undefined
+        : typeof rawReq.text === 'string'
+          ? rawReq.text
+          : (() => {
+              throw new ApiError(400, 'invalid_parameter', 'text must be a string');
+            })();
+    const reqKey = optionalTrimmedString(rawReq.key, 'key', 64);
+    const reqUrl = optionalTrimmedString(rawReq.url, 'url', 4096);
+    const reqAppAction = optionalTrimmedString(rawReq.app_action, 'app_action', 128);
+    const reqDeltaY = optionalFiniteNumber(rawReq.delta_y, 'delta_y');
     const startGen = this.getGeneration(userId);
     const t0 = performance.now();
 
-    if (rawReq.expected_generation !== undefined && rawReq.expected_generation !== startGen) {
+    if (expectedGeneration !== undefined && expectedGeneration !== startGen) {
       this.recordAudit(userId, {
-        target_id: rawReq.target_id ?? 'unknown',
+        target_id: reqTargetId ?? 'unknown',
         caller: callerLabel,
         action,
         status: 'revoked',
-        summary: `Rejected stale command generation ${rawReq.expected_generation} (current ${startGen})`,
+        summary: `Rejected stale command generation ${expectedGeneration} (current ${startGen})`,
         latency_ms: 0,
       });
       throw new ApiError(
         409,
         'control_generation_mismatch',
-        `Expected control_generation ${rawReq.expected_generation}, current is ${startGen}`,
+        `Expected control_generation ${expectedGeneration}, current is ${startGen}`,
       );
     }
 
@@ -2066,15 +2202,15 @@ export class BrowserControlBridge {
     let liveTab: LiveTabRecord | undefined;
     let headless: ManagedHeadlessSession | undefined;
 
-    if (rawReq.target_id) {
-      const lt = this.liveTabs.get(rawReq.target_id);
+    if (reqTargetId) {
+      const lt = this.liveTabs.get(reqTargetId);
       if (lt) {
         if (lt.descriptor.user_id !== userId) {
           throw new ApiError(403, 'forbidden_target', 'Browser target belongs to another user');
         }
         liveTab = lt;
       } else {
-        const hs = this.headlessSessions.get(rawReq.target_id);
+        const hs = this.headlessSessions.get(reqTargetId);
         if (hs && hs.dto.status === 'ready') {
           if (hs.userId !== userId) {
             throw new ApiError(403, 'forbidden_target', 'Headless session belongs to another user');
@@ -2108,6 +2244,13 @@ export class BrowserControlBridge {
       return await this.executeHeadlessAction(auth, headless.dto.session_id, {
         ...rawReq,
         action,
+        command_id: reqCommandId,
+        ref: reqRef,
+        selector: reqSelector,
+        text: reqText,
+        key: reqKey,
+        url: reqUrl,
+        delta_y: reqDeltaY,
         caller_label: callerLabel,
       });
     }
@@ -2116,8 +2259,8 @@ export class BrowserControlBridge {
       throw new ApiError(
         404,
         'browser_target_not_found',
-        rawReq.target_id
-          ? `Browser target "${rawReq.target_id}" not found`
+        reqTargetId
+          ? `Browser target "${reqTargetId}" not found`
           : 'No active live browser tab or headless session registered for this user',
       );
     }
@@ -2139,8 +2282,8 @@ export class BrowserControlBridge {
       );
     }
 
-    const commandId = rawReq.command_id?.trim() || `bcmd_${crypto.randomBytes(6).toString('hex')}`;
-    const timeoutMs = Math.max(100, Math.min(30_000, rawReq.timeout_ms ?? 8000));
+    const commandId = reqCommandId || `bcmd_${crypto.randomBytes(6).toString('hex')}`;
+    const timeoutMs = Math.max(100, Math.min(30_000, Math.floor(reqTimeoutMs ?? 8000)));
 
     liveTab.descriptor.active_controller = callerLabel;
     liveTab.descriptor.control_generation = startGen;
@@ -2152,6 +2295,13 @@ export class BrowserControlBridge {
       target_id: targetId,
       generation: startGen,
       caller_label: callerLabel,
+      ref: reqRef,
+      selector: reqSelector,
+      text: reqText,
+      key: reqKey,
+      url: reqUrl,
+      app_action: reqAppAction,
+      delta_y: reqDeltaY,
     };
 
     const resultPromise = new Promise<BrowserCommandResult>((resolve, reject) => {
@@ -2207,25 +2357,38 @@ export class BrowserControlBridge {
   }
 
   resolveTabCommandResult(userId: number, incoming: BrowserCommandResult): boolean {
-    const pending = this.pendingCommands.get(incoming.command_id);
+    if (!isPlainObject(incoming)) {
+      throw new ApiError(400, 'invalid_parameter', 'Command result payload must be a JSON object');
+    }
+    const incomingCmdId = optionalTrimmedString(incoming.command_id, 'command_id', 128);
+    if (!incomingCmdId) {
+      throw new ApiError(400, 'invalid_parameter', 'command_id must be a non-empty string');
+    }
+    optionalTrimmedString(incoming.target_id, 'target_id', 128);
+    const incomingAction = optionalTrimmedString(incoming.action, 'action', 64);
+    const incomingError = optionalTrimmedString(incoming.error, 'error', 2048);
+    const incomingLatency = optionalFiniteNumber(incoming.latency_ms, 'latency_ms');
+    const incomingGeneration = optionalFiniteNumber(incoming.generation, 'generation');
+
+    const pending = this.pendingCommands.get(incomingCmdId);
     if (!pending || pending.userId !== userId) {
       return false;
     }
 
     clearTimeout(pending.timer);
-    this.pendingCommands.delete(incoming.command_id);
+    this.pendingCommands.delete(incomingCmdId);
 
     const currentGen = this.getGeneration(userId);
     if (
       currentGen !== pending.generation ||
-      (typeof incoming.generation === 'number' && incoming.generation !== pending.generation)
+      (incomingGeneration !== undefined && incomingGeneration !== pending.generation)
     ) {
       this.recordAudit(userId, {
         target_id: pending.targetId,
         caller: pending.callerLabel,
         action: pending.action,
         status: 'revoked',
-        summary: `Fenced stale BrowserCommandResult (cmd gen ${incoming.generation ?? pending.generation} vs current ${currentGen})`,
+        summary: `Fenced stale BrowserCommandResult (cmd gen ${incomingGeneration ?? pending.generation} vs current ${currentGen})`,
         latency_ms: Math.max(0, Math.round(performance.now() - pending.startedAtPerf)),
       });
       pending.reject(
@@ -2260,12 +2423,13 @@ export class BrowserControlBridge {
       command_id: pending.commandId,
       target_id: pending.targetId,
       generation: pending.generation,
-      action: incoming.action ?? pending.action,
+      action: (incomingAction as BrowserActionKind | undefined) ?? pending.action,
       snapshot: incoming.snapshot,
-      screenshot_data_url: incoming.screenshot_data_url,
+      screenshot_data_url:
+        typeof incoming.screenshot_data_url === 'string' ? incoming.screenshot_data_url : undefined,
       data: incoming.data,
-      error: incoming.error,
-      latency_ms: typeof incoming.latency_ms === 'number' && incoming.latency_ms >= 0 ? incoming.latency_ms : latencyMs,
+      error: incomingError,
+      latency_ms: incomingLatency !== undefined && incomingLatency >= 0 ? incomingLatency : latencyMs,
     };
 
     this.recordAudit(userId, {
@@ -2329,37 +2493,62 @@ export class BrowserControlBridge {
   revokeControl(
     userId: number,
     opts: {
-      targetId?: string;
-      revokeTokens?: boolean;
-      disableRemoteControl?: boolean;
-      reason?: string;
+      targetId?: unknown;
+      revokeTokens?: unknown;
+      disableRemoteControl?: unknown;
+      reason?: unknown;
     } = {},
   ): BrowserControlRevokeResponse & { latency_sub_10ms: boolean } {
-    const startHr = process.hrtime.bigint();
-    const nextGen = this.getGeneration(userId) + 1;
-    this.userGenerations.set(userId, nextGen);
+    // Strictly validate ALL inputs BEFORE any SQLite or in-memory mutation!
+    const targetId = optionalTrimmedString(opts.targetId, 'target_id', 128);
+    const reason = optionalTrimmedString(opts.reason, 'reason', 256);
+    const revokeTokens = optionalBoolean(opts.revokeTokens, 'revoke_tokens');
+    const disableRemoteControl = optionalBoolean(opts.disableRemoteControl, 'disable_remote_control');
 
+    const startHr = process.hrtime.bigint();
+    const now = Date.now();
+    let nextGen = 0;
     let revokedTokensCount = 0;
-    if (opts.revokeTokens !== false) {
-      for (const [, rec] of this.desktopTokens) {
-        if (rec.userId === userId && !rec.revoked) {
-          rec.revoked = true;
-          revokedTokensCount += 1;
-        }
+
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      nextGen = this.getGeneration(userId) + 1;
+      this.db
+        .prepare(`
+          INSERT INTO browser_control_generations (user_id, control_generation, updated_at_ms)
+          VALUES (?, ?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET control_generation = excluded.control_generation, updated_at_ms = excluded.updated_at_ms
+        `)
+        .run(userId, nextGen, now);
+
+      if (revokeTokens !== false) {
+        const tokRes = this.db
+          .prepare(
+            `UPDATE browser_desktop_tokens SET revoked = 1, revoked_at_ms = ?
+             WHERE user_id = ? AND revoked = 0`,
+          )
+          .run(now, userId);
+        revokedTokensCount = Number(tokRes.changes ?? 0);
+        this.db.prepare(`DELETE FROM browser_pairing_tickets WHERE user_id = ?`).run(userId);
       }
-      for (const [, ticket] of this.pairingTickets) {
-        if (ticket.userId === userId) {
-          this.pairingTickets.delete(ticket.pairCode);
-        }
+      this.db.exec('COMMIT;');
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {
+        // Already rolled back
       }
+      throw err;
     }
 
+    this.controlModes.set(userId, { mode: 'user_takeover', paused_at_step: 0 });
+
     for (const [, tab] of this.liveTabs) {
-      if (tab.descriptor.user_id === userId && (!opts.targetId || tab.descriptor.target_id === opts.targetId)) {
+      if (tab.descriptor.user_id === userId && (!targetId || tab.descriptor.target_id === targetId)) {
         tab.descriptor.control_generation = nextGen;
         tab.descriptor.active_controller = null;
         tab.queuedCommands.length = 0;
-        if (opts.disableRemoteControl) {
+        if (disableRemoteControl) {
           tab.descriptor.allow_remote_control = false;
         }
       }
@@ -2367,7 +2556,7 @@ export class BrowserControlBridge {
 
     let abortedCommandsCount = 0;
     for (const [cmdId, pending] of this.pendingCommands) {
-      if (pending.userId === userId && (!opts.targetId || pending.targetId === opts.targetId)) {
+      if (pending.userId === userId && (!targetId || pending.targetId === targetId)) {
         clearTimeout(pending.timer);
         this.pendingCommands.delete(cmdId);
         abortedCommandsCount += 1;
@@ -2376,7 +2565,7 @@ export class BrowserControlBridge {
           caller: pending.callerLabel,
           action: pending.action,
           status: 'revoked',
-          summary: `Aborted in-flight "${pending.action}" via <10ms emergency user revoke (gen #${nextGen})`,
+          summary: `Aborted in-flight "${pending.action}" via emergency user revoke (gen #${nextGen})`,
           latency_ms: Math.max(0, Math.round(performance.now() - pending.startedAtPerf)),
         });
         pending.reject(
@@ -2394,15 +2583,15 @@ export class BrowserControlBridge {
       type: 'BrowserControlRevoked',
       payload: {
         user_id: userId,
-        target_id: opts.targetId,
+        target_id: targetId,
         control_generation: nextGen,
-        reason: opts.reason ?? 'control_revoked_by_user',
-        timestamp_ms: Date.now(),
+        reason: reason ?? 'control_revoked_by_user',
+        timestamp_ms: now,
       },
     };
     this.broadcastToUserBrowserPeers(userId, revokedFrame);
 
-    if (opts.revokeTokens !== false) {
+    if (revokeTokens !== false) {
       for (const ctrl of this.controllerSockets) {
         if (ctrl.userId === userId && ctrl.desktopToken) {
           this.controllerSockets.delete(ctrl);
@@ -2419,7 +2608,7 @@ export class BrowserControlBridge {
     const sub10ms = elapsedUs < 10_000;
 
     this.recordAudit(userId, {
-      target_id: opts.targetId ?? 'all_targets',
+      target_id: targetId ?? 'all_targets',
       caller: `user:${userId}`,
       action: 'revoke_control',
       status: 'revoked',
@@ -2439,45 +2628,55 @@ export class BrowserControlBridge {
   }
 
   // ==========================================================================
-  // Headless Browser Automation Engine (`chromium_cdp` + `http_dom_fallback`)
+  // Real Chromium CDP Headless Automation Engine (ZERO SVG fallback!)
   // ==========================================================================
 
   async openHeadlessSession(
     auth: BrowserCallerAuth,
     opts: {
-      url?: string;
-      viewport?: { width?: number; height?: number };
-      preferFallback?: boolean;
-      backend?: 'chromium_cdp' | 'http_dom_fallback';
+      url?: unknown;
+      viewport?: unknown;
+      preferFallback?: unknown;
+      backend?: unknown;
     } = {},
   ): Promise<{ session: HeadlessBrowserSessionDto; snapshot: BrowserSnapshotDto }> {
     const t0 = performance.now();
-    const width = Math.max(320, Math.min(3840, Number(opts.viewport?.width ?? 1280)));
-    const height = Math.max(240, Math.min(2160, Number(opts.viewport?.height ?? 800)));
-    const initialUrl = opts.url ? validateHeadlessUrl(opts.url) : 'about:blank';
+
+    const preferFallback = optionalBoolean(opts.preferFallback, 'prefer_fallback');
+    const backend = optionalTrimmedString(opts.backend, 'backend', 64);
+
+    if (preferFallback === true || (backend !== undefined && backend !== 'chromium_cdp')) {
+      throw new ApiError(
+        400,
+        'unsupported_backend',
+        'Fallback SVG driver has been removed; real Chromium CDP is required',
+      );
+    }
+
+    const { width, height } = parseViewport(opts.viewport, 1280, 800);
+    const initialUrl =
+      opts.url !== undefined && opts.url !== null ? validateHeadlessUrl(opts.url) : 'about:blank';
+
+    if (!isChromiumBinaryAvailable()) {
+      throw new ApiError(
+        503,
+        'browser_unavailable',
+        'Chromium/Chrome executable not found on this host',
+      );
+    }
+
     const sessionId = `hbs_${crypto.randomBytes(6).toString('hex')}`;
 
-    const useCdp =
-      !opts.preferFallback &&
-      opts.backend !== 'http_dom_fallback' &&
-      isChromiumBinaryAvailable();
-
     let driver: HeadlessDriver;
-    if (useCdp) {
-      try {
-        driver = await ChromiumCdpDriver.launch(sessionId, { width, height });
-      } catch (err) {
-        if (opts.backend === 'chromium_cdp') {
-          throw new ApiError(
-            500,
-            'chromium_launch_failed',
-            err instanceof Error ? err.message : 'Failed to launch headless Chromium',
-          );
-        }
-        driver = new HttpDomFallbackDriver(sessionId, { width, height });
-      }
-    } else {
-      driver = new HttpDomFallbackDriver(sessionId, { width, height });
+    try {
+      driver = await ChromiumCdpDriver.launch(sessionId, { width, height }, this.profileRoot);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw new ApiError(
+        503,
+        'browser_unavailable',
+        err instanceof Error ? err.message : 'Failed to launch real headless Chromium CDP session',
+      );
     }
 
     let snapshot: BrowserSnapshotDto;
@@ -2547,14 +2746,41 @@ export class BrowserControlBridge {
     sessionId: string,
     rawReq: BrowserCommandRequest,
   ): Promise<BrowserCommandResult> {
-    const managed = this.requireHeadlessSession(auth.userId, sessionId);
-    const t0 = performance.now();
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      throw new ApiError(400, 'missing_session_id', 'session_id is required');
+    }
+    if (!isPlainObject(rawReq)) {
+      throw new ApiError(400, 'invalid_parameter', 'Headless action request must be a JSON object');
+    }
     const action = normalizeActionKind(rawReq.action);
-    const commandId = rawReq.command_id?.trim() || `hcmd_${crypto.randomBytes(6).toString('hex')}`;
+    const reqCommandId = optionalTrimmedString(rawReq.command_id, 'command_id', 128);
+    const callerLabel = optionalTrimmedString(rawReq.caller_label, 'caller_label', 128) || auth.callerLabel;
+    const reqRef = optionalTrimmedString(rawReq.ref, 'ref', 128);
+    const reqSelector = optionalTrimmedString(rawReq.selector, 'selector', 1024);
+    const reqKey = optionalTrimmedString(rawReq.key, 'key', 64);
+    const reqUrl = optionalTrimmedString(rawReq.url, 'url', 4096);
+    const reqDeltaY = optionalFiniteNumber(rawReq.delta_y, 'delta_y');
+    if (rawReq.text !== undefined && rawReq.text !== null && typeof rawReq.text !== 'string') {
+      throw new ApiError(400, 'invalid_parameter', 'text must be a string');
+    }
+    const reqText = typeof rawReq.text === 'string' ? rawReq.text : undefined;
+
+    const managed = this.requireHeadlessSession(auth.userId, sessionId.trim());
+    const t0 = performance.now();
+    const commandId = reqCommandId || `hcmd_${crypto.randomBytes(6).toString('hex')}`;
     const gen = this.getGeneration(auth.userId);
 
     try {
-      const outcome = await managed.driver.performAction({ ...rawReq, action });
+      const outcome = await managed.driver.performAction({
+        ...rawReq,
+        action,
+        ref: reqRef,
+        selector: reqSelector,
+        text: reqText,
+        key: reqKey,
+        url: reqUrl,
+        delta_y: reqDeltaY,
+      });
       managed.latestSnapshot = outcome.snapshot;
       managed.dto.url = outcome.snapshot.url;
       managed.dto.title = outcome.snapshot.title;
@@ -2564,7 +2790,7 @@ export class BrowserControlBridge {
       const res: BrowserCommandResult = {
         ok: true,
         command_id: commandId,
-        target_id: sessionId,
+        target_id: sessionId.trim(),
         generation: gen,
         action,
         snapshot: outcome.snapshot,
@@ -2574,11 +2800,11 @@ export class BrowserControlBridge {
       };
 
       this.recordAudit(auth.userId, {
-        target_id: sessionId,
-        caller: rawReq.caller_label || auth.callerLabel,
+        target_id: sessionId.trim(),
+        caller: callerLabel,
         action: `headless_${action}`,
         status: 'ok',
-        summary: `Executed ${action} on ${sessionId} (${managed.dto.backend})`,
+        summary: `Executed ${action} on ${sessionId.trim()} (${managed.dto.backend})`,
         latency_ms: latencyMs,
       });
 
@@ -2586,8 +2812,8 @@ export class BrowserControlBridge {
     } catch (err) {
       const latencyMs = Math.max(0, Math.round(performance.now() - t0));
       this.recordAudit(auth.userId, {
-        target_id: sessionId,
-        caller: rawReq.caller_label || auth.callerLabel,
+        target_id: sessionId.trim(),
+        caller: callerLabel,
         action: `headless_${action}`,
         status: 'error',
         summary: err instanceof Error ? err.message : 'Headless action failed',
@@ -2726,29 +2952,30 @@ export class BrowserControlBridge {
       case 'browser_open_headless':
       case 'browser_headless_open': {
         const opened = await this.openHeadlessSession(auth, {
-          url: typeof args.url === 'string' ? args.url : undefined,
+          url: args.url,
           viewport: {
-            width: typeof args.width === 'number' ? args.width : undefined,
-            height: typeof args.height === 'number' ? args.height : undefined,
+            ...(args.width !== undefined ? { width: args.width } : {}),
+            ...(args.height !== undefined ? { height: args.height } : {}),
           },
-          preferFallback: Boolean(args.prefer_fallback),
+          preferFallback: args.prefer_fallback,
+          backend: args.backend,
         });
         return { result: opened as unknown as Record<string, unknown> };
       }
 
       case 'browser_headless_action': {
-        const sessionId = String(args.session_id ?? '');
+        const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
         if (!sessionId) {
           throw new ApiError(400, 'missing_session_id', 'session_id is required');
         }
         const actRes = await this.executeHeadlessAction(auth, sessionId, {
-          action: String(args.action ?? 'snapshot') as BrowserActionKind,
-          ref: typeof args.ref === 'string' ? args.ref : undefined,
-          selector: typeof args.selector === 'string' ? args.selector : undefined,
-          text: typeof args.text === 'string' ? args.text : undefined,
-          key: typeof args.key === 'string' ? args.key : undefined,
-          url: typeof args.url === 'string' ? args.url : undefined,
-          delta_y: typeof args.delta_y === 'number' ? args.delta_y : undefined,
+          action: (args.action ?? 'snapshot') as BrowserActionKind,
+          ref: args.ref as string | undefined,
+          selector: args.selector as string | undefined,
+          text: args.text as string | undefined,
+          key: args.key as string | undefined,
+          url: args.url as string | undefined,
+          delta_y: args.delta_y as number | undefined,
           caller_label: `MCP:${auth.callerLabel}`,
         });
         return {
@@ -2758,7 +2985,7 @@ export class BrowserControlBridge {
       }
 
       case 'browser_headless_screenshot': {
-        const sessionId = String(args.session_id ?? '');
+        const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
         if (!sessionId) {
           throw new ApiError(400, 'missing_session_id', 'session_id is required');
         }
@@ -2770,7 +2997,7 @@ export class BrowserControlBridge {
       }
 
       case 'browser_headless_close': {
-        const sessionId = String(args.session_id ?? '');
+        const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
         if (!sessionId) {
           throw new ApiError(400, 'missing_session_id', 'session_id is required');
         }
@@ -2806,7 +3033,7 @@ export class BrowserControlBridge {
             capabilities: { tools: {} },
             serverInfo: {
               name: 'gpui-telegram-web-browser-bridge',
-              version: '1.2.0',
+              version: '1.6.11',
             },
           },
         };
@@ -2829,12 +3056,9 @@ export class BrowserControlBridge {
         };
 
       case 'tools/call': {
-        const params = rpc.params ?? {};
+        const params = isPlainObject(rpc.params) ? rpc.params : {};
         const name = typeof params.name === 'string' ? params.name : '';
-        const toolArgs =
-          params.arguments && typeof params.arguments === 'object'
-            ? (params.arguments as Record<string, unknown>)
-            : {};
+        const toolArgs = isPlainObject(params.arguments) ? params.arguments : {};
         if (!name) {
           return {
             jsonrpc: '2.0',
@@ -2894,7 +3118,267 @@ export class BrowserControlBridge {
   }
 
   // ==========================================================================
-  // Fast Test Reset & Clean Server Shutdown
+  // Zero-LLM Deterministic Replay of `AutomationScriptApp` on Real Chromium CDP
+  // ==========================================================================
+
+  async replayScriptApp(
+    auth: BrowserCallerAuth,
+    manifest: AutomationScriptApp,
+    paramsInput: Record<string, string> = {},
+    sessionIdInput?: string,
+  ): Promise<ScriptReplayReport> {
+    if (!isPlainObject(manifest) || !Array.isArray(manifest.steps)) {
+      throw new ApiError(400, 'invalid_manifest', 'manifest with steps array is required');
+    }
+    if (manifest.steps.length > AUTOMATION_APP_LIMITS.maxStepsCount) {
+      throw new ApiError(
+        400,
+        'too_many_steps',
+        `manifest.steps exceeds maximum of ${AUTOMATION_APP_LIMITS.maxStepsCount} steps`,
+      );
+    }
+    for (let i = 0; i < manifest.steps.length; i++) {
+      const s = manifest.steps[i];
+      if (!isPlainObject(s) || typeof s.kind !== 'string') {
+        throw new ApiError(400, 'invalid_step', `Step #${i} must be an object with a string kind`);
+      }
+      const sRec = s as Record<string, unknown>;
+      if (
+        sRec.timeout_ms !== undefined &&
+        (typeof sRec.timeout_ms !== 'number' || !Number.isFinite(sRec.timeout_ms))
+      ) {
+        throw new ApiError(400, 'invalid_parameter', `Step #${i} timeout_ms must be a finite number`);
+      }
+    }
+    const startMs = Date.now();
+    const extractedOutputs: Record<string, string> = {};
+    const stepTimings: StepTimingMetric[] = [];
+    let stepsExecuted = 0;
+
+    // Resolve template placeholders `{{param}}`
+    const paramValues = new Map<string, string>();
+    const rawParams = Array.isArray(manifest.parameters) ? manifest.parameters : [];
+    for (const p of rawParams) {
+      if (paramsInput[p.name] !== undefined) {
+        paramValues.set(p.name, String(paramsInput[p.name]));
+      } else if (typeof p.default_value === 'string') {
+        paramValues.set(p.name, p.default_value);
+      } else if (p.required !== false) {
+        throw new ApiError(400, 'missing_parameter', `Missing required script parameter: ${p.name}`);
+      }
+    }
+    for (const [k, v] of Object.entries(paramsInput)) {
+      paramValues.set(k, String(v));
+    }
+
+    const interpolate = (tpl: string): string =>
+      tpl.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (_m, key: string) => paramValues.get(key) ?? '');
+
+    let ownsSession = false;
+    let managed: ManagedHeadlessSession;
+    if (sessionIdInput) {
+      managed = this.requireHeadlessSession(auth.userId, sessionIdInput);
+    } else {
+      const opened = await this.openHeadlessSession(auth, { url: 'about:blank' });
+      managed = this.requireHeadlessSession(auth.userId, opened.session.session_id);
+      ownsSession = true;
+    }
+
+    const resolveLocatorJs = (loc: SemanticLocator): string => `(function(loc) {
+      if (loc.test_id) {
+        const byTid = document.querySelector('[data-testid=' + JSON.stringify(loc.test_id) + ']');
+        if (byTid) return byTid;
+      }
+      if (loc.aria_label) {
+        const byAria = document.querySelector('[aria-label=' + JSON.stringify(loc.aria_label) + ']');
+        if (byAria) return byAria;
+      }
+      if (loc.name_attr) {
+        const byName = document.querySelector('[name=' + JSON.stringify(loc.name_attr) + ']');
+        if (byName) return byName;
+      }
+      if (loc.css_selector) {
+        try {
+          const byCss = document.querySelector(loc.css_selector);
+          if (byCss) return byCss;
+        } catch (_) {}
+      }
+      if (loc.role || loc.text_anchor) {
+        const pool = Array.from(document.querySelectorAll(loc.role ? ('[role=' + JSON.stringify(loc.role) + '], button, a, input, label, [data-testid]') : '*'));
+        for (const el of pool) {
+          const txt = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+          if (loc.text_anchor && txt.indexOf(loc.text_anchor) !== -1) return el;
+        }
+      }
+      return null;
+    })(${JSON.stringify(loc)})`;
+
+    try {
+      for (let i = 0; i < manifest.steps.length; i++) {
+        const step = manifest.steps[i]!;
+        const stepStart = Date.now();
+        this.controlModes.set(auth.userId, {
+          mode: 'ai_controlling',
+          active_step: i,
+          status_text: `Running step ${i + 1}/${manifest.steps.length}: ${step.kind}`,
+        });
+
+        try {
+          switch (step.kind) {
+            case 'navigate': {
+              const url = interpolate(step.url_template);
+              await managed.driver.goto(url);
+              break;
+            }
+            case 'wait_for': {
+              const deadline = Date.now() + Math.max(100, Math.min(30_000, Number(step.timeout_ms || 5000)));
+              let found = false;
+              while (Date.now() < deadline) {
+                found = await managed.driver.evaluateJs<boolean>(`Boolean(${resolveLocatorJs(step.locator)})`);
+                if (found) break;
+                await new Promise((r) => setTimeout(r, 100));
+              }
+              if (!found) {
+                throw new Error(`wait_for timed out for locator ${JSON.stringify(step.locator)}`);
+              }
+              break;
+            }
+            case 'click': {
+              const ok = await managed.driver.evaluateJs<boolean>(
+                `(function(){ const el = ${resolveLocatorJs(step.locator)}; if (!el) return false; el.scrollIntoView({block:'center'}); el.click(); return true; })()`,
+              );
+              if (!ok) throw new Error(`click target not found: ${JSON.stringify(step.locator)}`);
+              break;
+            }
+            case 'fill': {
+              const val = interpolate(step.value_template);
+              const ok = await managed.driver.evaluateJs<boolean>(
+                `(function(v){ const el = ${resolveLocatorJs(step.locator)}; if (!el) return false; if (typeof el.focus === 'function') el.focus(); const tag = el.tagName.toLowerCase(); if (tag === 'input' || tag === 'textarea' || tag === 'select') { el.value = v; } else { el.textContent = v; } el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); return true; })(${JSON.stringify(val)})`,
+              );
+              if (!ok) throw new Error(`fill target not found: ${JSON.stringify(step.locator)}`);
+              break;
+            }
+            case 'press_key': {
+              await managed.driver.performAction({ action: 'press', key: step.key });
+              break;
+            }
+            case 'scroll': {
+              await managed.driver.performAction({ action: 'scroll', delta_y: step.delta_y });
+              break;
+            }
+            case 'extract_text': {
+              const res = await managed.driver.evaluateJs<{ found: boolean; text: string }>(
+                `(function(){ const el = ${resolveLocatorJs(step.locator)}; if (!el) return { found: false, text: '' }; return { found: true, text: (el.innerText || el.textContent || el.value || '').trim() }; })()`,
+              );
+              if (!res?.found) {
+                throw new Error(`extract_text target not found: ${JSON.stringify(step.locator)}`);
+              }
+              extractedOutputs[step.output_key] = res.text;
+              break;
+            }
+            case 'assert_visible': {
+              const visible = await managed.driver.evaluateJs<boolean>(
+                `(function(){ const el = ${resolveLocatorJs(step.locator)}; if (!el) return false; const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; })()`,
+              );
+              if (!visible) {
+                throw new Error(`assert_visible failed: ${JSON.stringify(step.locator)}`);
+              }
+              break;
+            }
+            case 'assert_text_contains': {
+              const expected = interpolate(step.expected_template);
+              const actual = await managed.driver.evaluateJs<string | null>(
+                `(function(){ const el = ${resolveLocatorJs(step.locator)}; if (!el) return null; return (el.innerText || el.textContent || el.value || '').trim(); })()`,
+              );
+              if (actual === null || !actual.includes(expected)) {
+                throw new Error(`assert_text_contains failed: expected "${expected}" in "${String(actual)}"`);
+              }
+              break;
+            }
+            case 'human_checkpoint': {
+              this.controlModes.set(auth.userId, {
+                mode: 'waiting_for_takeover',
+                reason: step.reason,
+              });
+              stepTimings.push({
+                step_index: i,
+                operation: step.kind,
+                backend: 'chrome_cdp',
+                duration_ms: Date.now() - stepStart,
+                success: true,
+                detail: step.reason,
+              });
+              stepsExecuted += 1;
+              return {
+                app_id: manifest.app_id,
+                version: manifest.version,
+                success: false,
+                steps_executed: stepsExecuted,
+                extracted_outputs: extractedOutputs,
+                step_timings: stepTimings,
+                total_duration_ms: Date.now() - startMs,
+                used_llm: false,
+                final_url: managed.driver.getUrl(),
+                error: `human_checkpoint: ${step.reason}`,
+              };
+            }
+          }
+
+          stepsExecuted += 1;
+          stepTimings.push({
+            step_index: i,
+            operation: step.kind,
+            backend: 'chrome_cdp',
+            duration_ms: Date.now() - stepStart,
+            success: true,
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          stepTimings.push({
+            step_index: i,
+            operation: step.kind,
+            backend: 'chrome_cdp',
+            duration_ms: Date.now() - stepStart,
+            success: false,
+            detail: errMsg,
+          });
+          return {
+            app_id: manifest.app_id,
+            version: manifest.version,
+            success: false,
+            steps_executed: stepsExecuted,
+            extracted_outputs: extractedOutputs,
+            step_timings: stepTimings,
+            total_duration_ms: Date.now() - startMs,
+            used_llm: false,
+            final_url: managed.driver.getUrl(),
+            error: errMsg,
+          };
+        }
+      }
+
+      this.controlModes.set(auth.userId, { mode: 'idle' });
+      return {
+        app_id: manifest.app_id,
+        version: manifest.version,
+        success: true,
+        steps_executed: stepsExecuted,
+        extracted_outputs: extractedOutputs,
+        step_timings: stepTimings,
+        total_duration_ms: Date.now() - startMs,
+        used_llm: false,
+        final_url: managed.driver.getUrl(),
+        error: null,
+      };
+    } finally {
+      if (ownsSession) {
+        await this.closeHeadlessSession(auth, managed.dto.session_id).catch(() => {});
+      }
+    }
+  }
+
+  // ==========================================================================
+  // Fast Test Reset & Clean Server Shutdown (Await Chromium Close FIRST!)
   // ==========================================================================
 
   resetFastSync(): void {
@@ -2919,10 +3403,7 @@ export class BrowserControlBridge {
     this.controllerSockets.clear();
     this.socketToTargetIds.clear();
     this.liveTabs.clear();
-    this.desktopTokens.clear();
-    this.pairingTickets.clear();
-    this.userGenerations.clear();
-    this.auditLogsByUser.clear();
+    this.controlModes.clear();
   }
 
   async closeAllHeadlessSessions(): Promise<void> {
@@ -2932,10 +3413,531 @@ export class BrowserControlBridge {
   }
 
   async dispose(): Promise<void> {
-    this.resetFastSync();
+    // Gracefully close headless Chromium processes FIRST so zero zombies survive!
     await this.closeAllHeadlessSessions();
+    this.resetFastSync();
     activeBridges.delete(this);
   }
+}
+
+// ============================================================================
+// Script Distillation Engine (`BrowserActionTrace -> AutomationScriptApp`)
+// ============================================================================
+
+const SENSITIVE_FIELD_RE =
+  /pass(word|code)?|secret|token|api[_-]?key|otp|pin|cvv|ssn|credential|auth|bearer/i;
+
+function hasAnySemanticLocator(loc: SemanticLocator | undefined | null): loc is SemanticLocator {
+  if (!loc || typeof loc !== 'object') return false;
+  return Boolean(
+    (typeof loc.test_id === 'string' && loc.test_id.trim()) ||
+      (typeof loc.aria_label === 'string' && loc.aria_label.trim()) ||
+      (typeof loc.role === 'string' && loc.role.trim()) ||
+      (typeof loc.text_anchor === 'string' && loc.text_anchor.trim()) ||
+      (typeof loc.css_selector === 'string' && loc.css_selector.trim()) ||
+      (typeof loc.name_attr === 'string' && loc.name_attr.trim()),
+  );
+}
+
+function slugifyName(raw: string): string {
+  return (
+    raw
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 64) || 'automation-script'
+  );
+}
+
+function extractSafeDomain(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (isBlockedMetadataOrLinkLocalHost(host)) {
+      throw new ApiError(400, 'unsafe_browser_url', `Blocked metadata host in trace URL: ${host}`);
+    }
+    return host || null;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    return null;
+  }
+}
+
+const SENSITIVE_URL_PARAM_RE =
+  /^(?:token|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|api[_-]?key|apikey|password|passwd|pwd|secret|client[_-]?secret|session[_-]?id|auth|authorization|bearer|key|signature|sig|otp)$/i;
+
+function scrubSensitiveUrlForDistillation(
+  safeUrl: string,
+  paramsMap: Map<string, AutomationAppParam>,
+  parameterizeText: (literal: string) => string,
+  stepIdx: number,
+): string {
+  if (!/^https?:\/\//i.test(safeUrl)) {
+    return parameterizeText(safeUrl);
+  }
+  let u: URL;
+  try {
+    u = new URL(safeUrl);
+  } catch {
+    return parameterizeText(safeUrl);
+  }
+
+  const placeholders: Array<{ sentinel: string; paramName: string }> = [];
+  const registerSecretParam = (rawKey: string, desc: string): string => {
+    const base =
+      rawKey
+        .toLowerCase()
+        .replace(/[^a-z0-9_]/g, '_')
+        .replace(/^_+|_+$/g, '') || `url_secret_${stepIdx + 1}`;
+    let paramName = base;
+    const existing = paramsMap.get(paramName);
+    if (existing && !existing.is_secret) {
+      paramName = `${base}_secret`;
+    }
+    paramsMap.set(paramName, {
+      name: paramName,
+      description: desc,
+      required: true,
+      default_value: null,
+      is_secret: true,
+    });
+    const sentinel = `__FABUSHI_DISTILL_PH_${placeholders.length}__`;
+    placeholders.push({ sentinel, paramName });
+    return sentinel;
+  };
+
+  // 1. URL embedded basic-auth password (`https://user:pass@host/...`)
+  if (u.password) {
+    u.password = registerSecretParam('url_password', `Secret password for ${u.hostname}`);
+  }
+
+  // 2. Sensitive query parameters (`?token=...`, `?api_key=...`, `?access_token=...`, `?password=...`, or leaky value)
+  const entries = Array.from(u.searchParams.entries());
+  if (entries.length > 0) {
+    let queryMutated = false;
+    const nextParams = new URLSearchParams();
+    for (const [k, v] of entries) {
+      const parameterized = parameterizeText(v);
+      const alreadyTemplated = /^\{\{\s*[A-Za-z0-9_.-]+\s*\}\}$/.test(parameterized.trim());
+      const isSensitive =
+        !alreadyTemplated &&
+        v.trim().length > 0 &&
+        (SENSITIVE_URL_PARAM_RE.test(k) || !scanJsonForSecretLeaks(v).safe);
+      if (isSensitive) {
+        queryMutated = true;
+        nextParams.append(k, registerSecretParam(k, `Secret URL parameter ${k}`));
+      } else {
+        nextParams.append(k, v);
+      }
+    }
+    if (queryMutated) {
+      u.search = nextParams.toString();
+    }
+  }
+
+  // 3. Sensitive fragment/hash parameters (`#access_token=...&state=ok` or raw secret in hash)
+  if (u.hash.length > 1) {
+    const rawHash = u.hash.slice(1);
+    if (rawHash.includes('=')) {
+      let hashMutated = false;
+      const nextParts = rawHash.split('&').map((part) => {
+        const eq = part.indexOf('=');
+        if (eq <= 0) return part;
+        const k = part.slice(0, eq);
+        const v = part.slice(eq + 1);
+        let decodedVal = v;
+        try {
+          decodedVal = decodeURIComponent(v);
+        } catch {
+          // keep raw
+        }
+        const parameterized = parameterizeText(decodedVal);
+        const alreadyTemplated = /^\{\{\s*[A-Za-z0-9_.-]+\s*\}\}$/.test(parameterized.trim());
+        if (
+          !alreadyTemplated &&
+          decodedVal.trim().length > 0 &&
+          (SENSITIVE_URL_PARAM_RE.test(k) || !scanJsonForSecretLeaks(decodedVal).safe)
+        ) {
+          hashMutated = true;
+          return `${k}=${registerSecretParam(k, `Secret URL fragment parameter ${k}`)}`;
+        }
+        return part;
+      });
+      if (hashMutated) {
+        u.hash = `#${nextParts.join('&')}`;
+      }
+    } else if (!scanJsonForSecretLeaks(rawHash).safe) {
+      u.hash = `#${registerSecretParam('url_fragment_secret', 'Secret URL fragment')}`;
+    }
+  }
+
+  let result = parameterizeText(u.toString());
+  for (const { sentinel, paramName } of placeholders) {
+    result = result.split(sentinel).join(`{{${paramName}}}`);
+  }
+  return result;
+}
+
+export function distillBrowserActionTrace(
+  trace: BrowserActionTrace,
+  meta: ScriptAppMetadata,
+  authorUserId: number,
+): AutomationScriptApp {
+  if (!isPlainObject(trace) || !Array.isArray(trace.actions) || trace.actions.length === 0) {
+    throw new ApiError(400, 'empty_trace', 'trace.actions must contain at least one recorded action');
+  }
+  if (!isPlainObject(meta)) {
+    throw new ApiError(400, 'invalid_metadata', 'metadata must be a JSON object');
+  }
+  if (trace.actions.length > AUTOMATION_APP_LIMITS.maxStepsCount) {
+    throw new ApiError(
+      400,
+      'too_many_steps',
+      `trace.actions exceeds maximum of ${AUTOMATION_APP_LIMITS.maxStepsCount} steps`,
+    );
+  }
+  const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+  if (!name || name.length > AUTOMATION_APP_LIMITS.maxNameLen) {
+    throw new ApiError(400, 'invalid_metadata', 'metadata.name is required (1..160 chars)');
+  }
+
+  if (
+    trace.parameter_bindings !== undefined &&
+    trace.parameter_bindings !== null &&
+    !Array.isArray(trace.parameter_bindings)
+  ) {
+    throw new ApiError(400, 'invalid_parameter', 'trace.parameter_bindings must be an array');
+  }
+  if (
+    meta.parameter_overrides !== undefined &&
+    meta.parameter_overrides !== null &&
+    !Array.isArray(meta.parameter_overrides)
+  ) {
+    throw new ApiError(400, 'invalid_parameter', 'metadata.parameter_overrides must be an array');
+  }
+  if (
+    meta.target_domains !== undefined &&
+    meta.target_domains !== null &&
+    !Array.isArray(meta.target_domains)
+  ) {
+    throw new ApiError(400, 'invalid_parameter', 'metadata.target_domains must be an array');
+  }
+  if (
+    meta.required_capabilities !== undefined &&
+    meta.required_capabilities !== null &&
+    !Array.isArray(meta.required_capabilities)
+  ) {
+    throw new ApiError(400, 'invalid_parameter', 'metadata.required_capabilities must be an array');
+  }
+
+  for (let i = 0; i < trace.actions.length; i++) {
+    if (!isPlainObject(trace.actions[i])) {
+      throw new ApiError(400, 'invalid_action', `Action #${i} must be a JSON object`);
+    }
+  }
+
+  const sortedActions: RecordedBrowserAction[] = [...trace.actions].sort(
+    (a, b) => (Number.isFinite(Number(a.seq)) ? Number(a.seq) : 0) - (Number.isFinite(Number(b.seq)) ? Number(b.seq) : 0),
+  );
+
+  const bindings = Array.isArray(trace.parameter_bindings)
+    ? trace.parameter_bindings.filter((b) => isPlainObject(b))
+    : [];
+  const paramsMap = new Map<string, AutomationAppParam>();
+  for (const ov of Array.isArray(meta.parameter_overrides) ? meta.parameter_overrides : []) {
+    if (isPlainObject(ov) && typeof ov.name === 'string' && ov.name.trim()) {
+      paramsMap.set(ov.name.trim(), {
+        name: ov.name.trim(),
+        description: typeof ov.description === 'string' ? ov.description : '',
+        required: ov.required !== undefined ? Boolean(ov.required) : true,
+        default_value: typeof ov.default_value === 'string' ? ov.default_value : null,
+        is_secret: Boolean(ov.is_secret),
+      });
+    }
+  }
+  for (const b of bindings) {
+    if (typeof b.param_name === 'string' && b.param_name.trim() && !paramsMap.has(b.param_name.trim())) {
+      paramsMap.set(b.param_name.trim(), {
+        name: b.param_name.trim(),
+        description: typeof b.description === 'string' ? b.description : '',
+        required: b.required !== undefined ? Boolean(b.required) : true,
+        default_value: null,
+        is_secret: Boolean(b.is_secret),
+      });
+    }
+  }
+
+  const parameterizeText = (literal: string): string => {
+    let out = literal;
+    for (const b of bindings) {
+      if (
+        typeof b.literal_value === 'string' &&
+        b.literal_value.length > 0 &&
+        typeof b.param_name === 'string' &&
+        b.param_name.trim() &&
+        out.includes(b.literal_value)
+      ) {
+        out = out.split(b.literal_value).join(`{{${b.param_name.trim()}}}`);
+      }
+    }
+    return out;
+  };
+
+  const domainsSet = new Set<string>(
+    (Array.isArray(meta.target_domains) ? meta.target_domains : [])
+      .filter((d): d is string => typeof d === 'string' && d.trim().length > 0)
+      .map((d) => d.trim().toLowerCase()),
+  );
+  if (typeof trace.initial_url === 'string' && trace.initial_url.trim()) {
+    const dom = extractSafeDomain(trace.initial_url.trim());
+    if (dom) domainsSet.add(dom);
+  }
+
+  const steps: ScriptStep[] = [];
+  const capabilities = new Set<string>(
+    (Array.isArray(meta.required_capabilities) ? meta.required_capabilities : []).filter(
+      (c): c is string => typeof c === 'string' && c.trim().length > 0,
+    ),
+  );
+  capabilities.add('browser.cdp');
+
+  for (let i = 0; i < sortedActions.length; i++) {
+    const rec = sortedActions[i]!;
+    if (typeof rec.page_url === 'string' && rec.page_url.trim()) {
+      const dom = extractSafeDomain(rec.page_url.trim());
+      if (dom) domainsSet.add(dom);
+    }
+    const act = rec.action;
+    if (!isPlainObject(act) || typeof act.kind !== 'string') {
+      throw new ApiError(400, 'invalid_action', `Action #${i} is missing valid action.kind`);
+    }
+
+    switch (act.kind) {
+      case 'navigate': {
+        if (typeof act.url !== 'string' || !act.url.trim()) {
+          throw new ApiError(400, 'invalid_browser_url', `Action #${i} (navigate) requires a non-empty string url`);
+        }
+        const safeUrl = validateHeadlessUrl(act.url);
+        const dom = extractSafeDomain(safeUrl);
+        if (dom) domainsSet.add(dom);
+        const urlTemplate = scrubSensitiveUrlForDistillation(safeUrl, paramsMap, parameterizeText, i);
+        steps.push({ kind: 'navigate', url_template: urlTemplate });
+        break;
+      }
+      case 'wait_for': {
+        if (!hasAnySemanticLocator(act.locator)) {
+          throw new ApiError(400, 'invalid_locator', `Action #${i} (wait_for) requires a non-empty SemanticLocator`);
+        }
+        const rawTimeout = act.timeout_ms !== undefined ? optionalFiniteNumber(act.timeout_ms, 'timeout_ms') : 5000;
+        steps.push({
+          kind: 'wait_for',
+          locator: act.locator,
+          timeout_ms: Math.max(100, Math.min(30_000, Math.floor(rawTimeout ?? 5000))),
+        });
+        break;
+      }
+      case 'click': {
+        if (!hasAnySemanticLocator(act.locator)) {
+          throw new ApiError(400, 'invalid_locator', `Action #${i} (click) requires a non-empty SemanticLocator`);
+        }
+        steps.push({ kind: 'click', locator: act.locator });
+        break;
+      }
+      case 'fill': {
+        if (!hasAnySemanticLocator(act.locator)) {
+          throw new ApiError(400, 'invalid_locator', `Action #${i} (fill) requires a non-empty SemanticLocator`);
+        }
+        const vaultKeyHint =
+          typeof act.vault_key_hint === 'string' && act.vault_key_hint.trim()
+            ? act.vault_key_hint.trim()
+            : undefined;
+        const paramNameHint =
+          typeof act.parameter_name_hint === 'string' && act.parameter_name_hint.trim()
+            ? act.parameter_name_hint.trim()
+            : undefined;
+        const locatorText = [
+          act.locator.test_id,
+          act.locator.aria_label,
+          act.locator.name_attr,
+          act.locator.css_selector,
+          act.locator.text_anchor,
+          paramNameHint,
+          vaultKeyHint,
+        ]
+          .filter((v): v is string => typeof v === 'string' && v.length > 0)
+          .join(' ');
+        const rawFillValue =
+          typeof act.value === 'string'
+            ? act.value
+            : act.value === undefined || act.value === null
+              ? ''
+              : String(act.value);
+        const matchedBinding = bindings.find(
+          (b) => typeof b.literal_value === 'string' && b.literal_value.length > 0 && rawFillValue === b.literal_value,
+        );
+        const valueLooksSecret =
+          rawFillValue.trim().length > 0 && !scanJsonForSecretLeaks(rawFillValue).safe;
+        const isSecret =
+          Boolean(act.is_secret) ||
+          Boolean(matchedBinding?.is_secret) ||
+          Boolean(vaultKeyHint) ||
+          SENSITIVE_FIELD_RE.test(locatorText) ||
+          valueLooksSecret;
+
+        if (isSecret) {
+          const paramName =
+            paramNameHint ||
+            (typeof matchedBinding?.param_name === 'string' && matchedBinding.param_name.trim()) ||
+            (vaultKeyHint && vaultKeyHint.replace(/[^A-Za-z0-9_]/g, '_')) ||
+            (typeof act.locator.name_attr === 'string' && act.locator.name_attr.trim().replace(/[^A-Za-z0-9_]/g, '_')) ||
+            `secret_input_${i + 1}`;
+          paramsMap.set(paramName, {
+            name: paramName,
+            description: `Secret credential for ${act.locator.name_attr || act.locator.aria_label || paramName}`,
+            required: true,
+            default_value: null,
+            is_secret: true,
+          });
+          steps.push({
+            kind: 'fill',
+            locator: act.locator,
+            value_template: `{{${paramName}}}`,
+            secret_vault_key: vaultKeyHint ?? paramName,
+          });
+        } else if (paramNameHint) {
+          if (!paramsMap.has(paramNameHint)) {
+            paramsMap.set(paramNameHint, {
+              name: paramNameHint,
+              description: `Input parameter ${paramNameHint}`,
+              required: true,
+              default_value: null,
+              is_secret: false,
+            });
+          }
+          steps.push({
+            kind: 'fill',
+            locator: act.locator,
+            value_template: `{{${paramNameHint}}}`,
+            secret_vault_key: null,
+          });
+        } else {
+          steps.push({
+            kind: 'fill',
+            locator: act.locator,
+            value_template: parameterizeText(rawFillValue),
+            secret_vault_key: null,
+          });
+        }
+        break;
+      }
+      case 'press_key': {
+        const keyStr = typeof act.key === 'string' && act.key.trim() ? act.key.trim() : 'Enter';
+        steps.push({ kind: 'press_key', key: keyStr });
+        break;
+      }
+      case 'scroll': {
+        const dx = act.delta_x !== undefined ? optionalFiniteNumber(act.delta_x, 'delta_x') : 0;
+        const dy = act.delta_y !== undefined ? optionalFiniteNumber(act.delta_y, 'delta_y') : 320;
+        steps.push({
+          kind: 'scroll',
+          delta_x: dx ?? 0,
+          delta_y: dy ?? 320,
+        });
+        break;
+      }
+      case 'extract_text': {
+        if (!hasAnySemanticLocator(act.locator)) {
+          throw new ApiError(400, 'invalid_locator', `Action #${i} (extract_text) requires a non-empty SemanticLocator`);
+        }
+        const outKey =
+          typeof act.output_key === 'string' && act.output_key.trim()
+            ? act.output_key.trim()
+            : `output_${i + 1}`;
+        steps.push({
+          kind: 'extract_text',
+          locator: act.locator,
+          output_key: outKey,
+        });
+        break;
+      }
+      case 'assert_visible': {
+        if (!hasAnySemanticLocator(act.locator)) {
+          throw new ApiError(400, 'invalid_locator', `Action #${i} (assert_visible) requires a non-empty SemanticLocator`);
+        }
+        steps.push({ kind: 'assert_visible', locator: act.locator });
+        break;
+      }
+      case 'assert_text_contains': {
+        if (!hasAnySemanticLocator(act.locator)) {
+          throw new ApiError(400, 'invalid_locator', `Action #${i} (assert_text_contains) requires a non-empty SemanticLocator`);
+        }
+        const expectedStr = typeof act.expected === 'string' ? act.expected : String(act.expected ?? '');
+        steps.push({
+          kind: 'assert_text_contains',
+          locator: act.locator,
+          expected_template: parameterizeText(expectedStr),
+        });
+        break;
+      }
+      case 'human_checkpoint': {
+        const reasonStr =
+          typeof act.reason === 'string' && act.reason.trim()
+            ? act.reason.trim()
+            : 'Human review required';
+        steps.push({ kind: 'human_checkpoint', reason: reasonStr });
+        break;
+      }
+      default:
+        throw new ApiError(400, 'invalid_action', `Unsupported recorded action kind`);
+    }
+  }
+
+  const slug =
+    typeof meta.slug === 'string' && meta.slug.trim()
+      ? slugifyName(meta.slug)
+      : slugifyName(name);
+  const appId =
+    typeof meta.app_id === 'string' && meta.app_id.trim()
+      ? meta.app_id.trim()
+      : `${slug}-${crypto.randomBytes(4).toString('hex')}`;
+  const appIdCheck = validateAutomationAppId(appId);
+  if (!appIdCheck.valid) {
+    throw new ApiError(400, 'invalid_app_id', appIdCheck.error);
+  }
+
+  const manifest: AutomationScriptApp = {
+    schema_version: AUTOMATION_APP_SCHEMA_VERSION_V1,
+    app_id: appIdCheck.normalized,
+    slug,
+    name,
+    version: typeof meta.version === 'string' && meta.version.trim() ? meta.version.trim() : '1.0.0',
+    description: typeof meta.description === 'string' ? meta.description.trim() : '',
+    category: typeof meta.category === 'string' && meta.category.trim() ? meta.category.trim() : 'automation',
+    target_domains: Array.from(domainsSet).slice(0, AUTOMATION_APP_LIMITS.maxDomainsCount),
+    parameters: Array.from(paramsMap.values()).slice(0, AUTOMATION_APP_LIMITS.maxParametersCount),
+    steps,
+    required_capabilities: Array.from(capabilities),
+    author_id: String(authorUserId),
+    source_trace_summary: `Distilled ${steps.length} deterministic step(s) from trace ${typeof trace.trace_id === 'string' && trace.trace_id.trim() ? trace.trace_id.trim() : 'recording'}`,
+  };
+
+  // Defense-in-depth secret leak scan on distilled manifest!
+  const leakScan = scanJsonForSecretLeaks(manifest, {
+    context: 'app',
+    parameters: manifest.parameters,
+  });
+  if (!leakScan.safe) {
+    const first = leakScan.findings[0];
+    throw new ApiError(
+      422,
+      'secret_leak_detected',
+      `Distilled script contains unredacted secret (${first?.reason ?? 'secret_pattern'} at ${first?.path ?? '$'})`,
+      { findings: leakScan.findings },
+    );
+  }
+
+  return manifest;
 }
 
 // ============================================================================
@@ -2959,25 +3961,36 @@ export function registerBrowserControlRoutes(
   // 1. Desktop Pairing (`pair/create` & `pair/claim`)
   router.post('/api/v1/browser/pair/create', async (ctx) => {
     const auth = requireAuth(db, ctx);
-    const body = await readJsonBody<{ label?: string; ttl_secs?: number }>(ctx.req);
+    const body = await readJsonBody<{ label?: unknown; ttl_secs?: unknown }>(ctx.req);
+    const label = optionalTrimmedString(body.label, 'label', 120);
+    const ttlSecs = optionalFiniteNumber(body.ttl_secs, 'ttl_secs');
     const ticket = bridge.createPairingTicket(auth.userId, resolveBaseUrl(ctx), {
-      label: body.label,
-      ttlSecs: body.ttl_secs,
+      label,
+      ttlSecs,
     });
     sendJson(ctx.res, 200, ticket);
   });
 
   router.post('/api/v1/browser/pair/claim', async (ctx) => {
     const body = await readJsonBody<{
-      pair_code?: string;
-      controller_label?: string;
-      device_name?: string;
+      pair_code?: unknown;
+      pairing_code?: unknown;
+      code?: unknown;
+      controller_label?: unknown;
+      device_name?: unknown;
     }>(ctx.req);
-    const ticket = bridge.claimPairingTicket(
-      body.pair_code ?? '',
-      body.controller_label ?? body.device_name,
-      resolveBaseUrl(ctx),
-    );
+    const rawCode = body.pair_code ?? body.pairing_code ?? body.code;
+    if (rawCode === undefined || rawCode === null) {
+      throw new ApiError(400, 'missing_pair_code', 'pair_code is required');
+    }
+    if (typeof rawCode !== 'string') {
+      throw new ApiError(400, 'invalid_parameter', 'pair_code must be a string');
+    }
+    const controllerLabel =
+      body.controller_label !== undefined
+        ? optionalTrimmedString(body.controller_label, 'controller_label', 120)
+        : optionalTrimmedString(body.device_name, 'device_name', 120);
+    const ticket = bridge.claimPairingTicket(rawCode, controllerLabel, resolveBaseUrl(ctx));
     sendJson(ctx.res, 200, ticket);
   });
 
@@ -3010,7 +4023,8 @@ export function registerBrowserControlRoutes(
 
   router.get('/api/v1/browser/targets/:targetId/poll', async (ctx) => {
     const auth = bridge.requireBrowserAuth(ctx);
-    const waitMs = Number(ctx.query.get('wait_ms') ?? 0);
+    const waitMsRaw = Number(ctx.query.get('wait_ms') ?? 0);
+    const waitMs = Number.isFinite(waitMsRaw) ? Math.max(0, waitMsRaw) : 0;
     const cmd = await bridge.pollNextTabCommand(auth.userId, ctx.params.targetId!, waitMs);
     sendJson(ctx.res, 200, { command: cmd });
   });
@@ -3020,7 +4034,7 @@ export function registerBrowserControlRoutes(
     const body = await readJsonBody<BrowserCommandResult>(ctx.req);
     const resolved = bridge.resolveTabCommandResult(auth.userId, {
       ...body,
-      target_id: body.target_id ?? ctx.params.targetId!,
+      target_id: body.target_id !== undefined ? body.target_id : ctx.params.targetId!,
     });
     sendJson(ctx.res, 200, { ok: resolved });
   });
@@ -3036,16 +4050,20 @@ export function registerBrowserControlRoutes(
   const handleRevoke = async (ctx: RequestContext): Promise<void> => {
     const auth = bridge.requireBrowserAuth(ctx);
     const body = await readJsonBody<{
-      target_id?: string;
-      revoke_tokens?: boolean;
-      disable_remote_control?: boolean;
-      reason?: string;
+      target_id?: unknown;
+      revoke_tokens?: unknown;
+      disable_remote_control?: unknown;
+      reason?: unknown;
     }>(ctx.req);
+    const targetId = optionalTrimmedString(body.target_id, 'target_id', 128);
+    const revokeTokens = optionalBoolean(body.revoke_tokens, 'revoke_tokens');
+    const disableRemoteControl = optionalBoolean(body.disable_remote_control, 'disable_remote_control');
+    const reason = optionalTrimmedString(body.reason, 'reason', 256);
     const res = bridge.revokeControl(auth.userId, {
-      targetId: body.target_id,
-      revokeTokens: body.revoke_tokens,
-      disableRemoteControl: body.disable_remote_control,
-      reason: body.reason,
+      targetId,
+      revokeTokens,
+      disableRemoteControl,
+      reason,
     });
     sendJson(ctx.res, 200, res);
   };
@@ -3064,16 +4082,33 @@ export function registerBrowserControlRoutes(
   const handleHeadlessOpen = async (ctx: RequestContext): Promise<void> => {
     const auth = bridge.requireBrowserAuth(ctx);
     const body = await readJsonBody<{
-      url?: string;
-      viewport?: { width?: number; height?: number };
-      width?: number;
-      height?: number;
-      prefer_fallback?: boolean;
-      backend?: 'chromium_cdp' | 'http_dom_fallback';
+      url?: unknown;
+      viewport?: unknown;
+      width?: unknown;
+      height?: unknown;
+      prefer_fallback?: unknown;
+      backend?: unknown;
     }>(ctx.req);
+
+    if (body.width !== undefined && (typeof body.width !== 'number' || !Number.isFinite(body.width))) {
+      throw new ApiError(400, 'invalid_viewport', 'width must be a finite number');
+    }
+    if (body.height !== undefined && (typeof body.height !== 'number' || !Number.isFinite(body.height))) {
+      throw new ApiError(400, 'invalid_viewport', 'height must be a finite number');
+    }
+    const viewportInput =
+      body.viewport !== undefined
+        ? body.viewport
+        : body.width !== undefined || body.height !== undefined
+          ? {
+              ...(body.width !== undefined ? { width: body.width } : {}),
+              ...(body.height !== undefined ? { height: body.height } : {}),
+            }
+          : undefined;
+
     const opened = await bridge.openHeadlessSession(auth, {
       url: body.url,
-      viewport: body.viewport ?? { width: body.width, height: body.height },
+      viewport: viewportInput,
       preferFallback: body.prefer_fallback,
       backend: body.backend,
     });
@@ -3104,15 +4139,19 @@ export function registerBrowserControlRoutes(
   const handleHeadlessAction = async (ctx: RequestContext): Promise<void> => {
     const auth = bridge.requireBrowserAuth(ctx);
     const body = await readJsonBody<
-      BrowserCommandRequest & { session_id?: string; expression?: string; value?: string }
+      BrowserCommandRequest & { session_id?: unknown; expression?: unknown; value?: unknown }
     >(ctx.req);
-    const sessionId = ctx.params.sessionId ?? body.session_id ?? '';
-    if (!sessionId) {
+    const rawSid = ctx.params.sessionId ?? body.session_id;
+    if (typeof rawSid !== 'string' || !rawSid.trim()) {
       throw new ApiError(400, 'missing_session_id', 'session_id is required');
     }
-    const res = await bridge.executeHeadlessAction(auth, sessionId, {
+    const rawText = body.text ?? body.value ?? body.expression;
+    if (rawText !== undefined && rawText !== null && typeof rawText !== 'string') {
+      throw new ApiError(400, 'invalid_parameter', 'text/value/expression must be a string');
+    }
+    const res = await bridge.executeHeadlessAction(auth, rawSid.trim(), {
       ...body,
-      text: body.text ?? body.value ?? body.expression,
+      text: typeof rawText === 'string' ? rawText : undefined,
     });
     sendJson(ctx.res, 200, res);
   };
@@ -3122,12 +4161,12 @@ export function registerBrowserControlRoutes(
   const handleHeadlessScreenshot = async (ctx: RequestContext): Promise<void> => {
     const auth = bridge.requireBrowserAuth(ctx);
     const body =
-      ctx.method === 'POST' ? await readJsonBody<{ session_id?: string }>(ctx.req) : {};
-    const sessionId = ctx.params.sessionId ?? body.session_id ?? '';
-    if (!sessionId) {
+      ctx.method === 'POST' ? await readJsonBody<{ session_id?: unknown }>(ctx.req) : {};
+    const rawSid = ctx.params.sessionId ?? body.session_id;
+    if (typeof rawSid !== 'string' || !rawSid.trim()) {
       throw new ApiError(400, 'missing_session_id', 'session_id is required');
     }
-    const shot = await bridge.captureHeadlessScreenshot(auth, sessionId);
+    const shot = await bridge.captureHeadlessScreenshot(auth, rawSid.trim());
     sendJson(ctx.res, 200, shot);
   };
   router.get('/api/v1/browser/headless/:sessionId/screenshot', handleHeadlessScreenshot);
@@ -3137,25 +4176,129 @@ export function registerBrowserControlRoutes(
   const handleHeadlessClose = async (ctx: RequestContext): Promise<void> => {
     const auth = bridge.requireBrowserAuth(ctx);
     const body =
-      ctx.method === 'POST' ? await readJsonBody<{ session_id?: string }>(ctx.req) : {};
-    const sessionId = ctx.params.sessionId ?? body.session_id ?? '';
-    if (!sessionId) {
+      ctx.method === 'POST' ? await readJsonBody<{ session_id?: unknown }>(ctx.req) : {};
+    const rawSid = ctx.params.sessionId ?? body.session_id;
+    if (typeof rawSid !== 'string' || !rawSid.trim()) {
       throw new ApiError(400, 'missing_session_id', 'session_id is required');
     }
-    const closed = await bridge.closeHeadlessSession(auth, sessionId);
+    const closed = await bridge.closeHeadlessSession(auth, rawSid.trim());
     sendJson(ctx.res, 200, closed);
   };
   router.post('/api/v1/browser/headless/:sessionId/close', handleHeadlessClose);
   router.delete('/api/v1/browser/headless/:sessionId', handleHeadlessClose);
   router.post('/api/v1/browser/headless/close', handleHeadlessClose);
 
-  // 5. MCP JSON-RPC 2.0 Server (`/api/v1/mcp/manifest` & `/api/v1/mcp/rpc`)
+  // 5. Script Distillation, Zero-LLM CDP Replay & Control Mode (`v1.6.11`)
+  router.post('/api/v1/browser/scripts/distill', async (ctx) => {
+    const auth = bridge.requireBrowserAuth(ctx);
+    const body = await readJsonBody<{
+      trace?: unknown;
+      metadata?: unknown;
+    }>(ctx.req);
+    if (!isPlainObject(body.trace) || !isPlainObject(body.metadata)) {
+      throw new ApiError(400, 'invalid_request', 'trace and metadata JSON objects are required');
+    }
+    const manifest = distillBrowserActionTrace(
+      body.trace as unknown as BrowserActionTrace,
+      body.metadata as unknown as ScriptAppMetadata,
+      auth.userId,
+    );
+    sendJson(ctx.res, 200, { ok: true, manifest, app: manifest });
+  });
+
+  router.post('/api/v1/browser/scripts/replay', async (ctx) => {
+    const auth = bridge.requireBrowserAuth(ctx);
+    const body = await readJsonBody<{
+      manifest?: unknown;
+      app?: unknown;
+      params?: unknown;
+      session_id?: unknown;
+    }>(ctx.req);
+    const rawManifest = body.manifest ?? body.app;
+    if (!isPlainObject(rawManifest) || !Array.isArray(rawManifest.steps)) {
+      throw new ApiError(400, 'invalid_manifest', 'manifest with steps array is required');
+    }
+    if (body.params !== undefined && body.params !== null && !isPlainObject(body.params)) {
+      throw new ApiError(400, 'invalid_parameter', 'params must be a JSON object');
+    }
+    const sessionId = optionalTrimmedString(body.session_id, 'session_id', 128);
+    const safeParams: Record<string, string> = {};
+    if (isPlainObject(body.params)) {
+      for (const [k, v] of Object.entries(body.params)) {
+        safeParams[k] = typeof v === 'string' ? v : String(v ?? '');
+      }
+    }
+    const report = await bridge.replayScriptApp(
+      auth,
+      rawManifest as unknown as AutomationScriptApp,
+      safeParams,
+      sessionId,
+    );
+    sendJson(ctx.res, 200, { ok: report.success, report, ...report });
+  });
+
+  router.get('/api/v1/browser/control-mode', (ctx) => {
+    const auth = bridge.requireBrowserAuth(ctx);
+    sendJson(ctx.res, 200, {
+      ok: true,
+      control_mode: bridge.getControlMode(auth.userId),
+      control_generation: bridge.getGeneration(auth.userId),
+    });
+  });
+
+  const VALID_CONTROL_MODE_ACTIONS = new Set(['takeover', 'resume', 'cancel', 'request_takeover']);
+  router.post('/api/v1/browser/control-mode', async (ctx) => {
+    const auth = bridge.requireBrowserAuth(ctx);
+    const body = await readJsonBody<{
+      action?: unknown;
+      reason?: unknown;
+      paused_at_step?: unknown;
+      active_step?: unknown;
+      status_text?: unknown;
+    }>(ctx.req);
+    const rawAction = body.action === undefined ? 'takeover' : body.action;
+    if (typeof rawAction !== 'string' || !VALID_CONTROL_MODE_ACTIONS.has(rawAction)) {
+      throw new ApiError(
+        400,
+        'invalid_parameter',
+        'action must be one of: takeover, resume, cancel, request_takeover',
+      );
+    }
+    const reason = optionalTrimmedString(body.reason, 'reason', 256);
+    const statusText = optionalTrimmedString(body.status_text, 'status_text', 256);
+    const pausedAtStep = optionalFiniteNumber(body.paused_at_step, 'paused_at_step') ?? 0;
+    const activeStep = optionalFiniteNumber(body.active_step, 'active_step') ?? 0;
+
+    let nextMode: BrowserControlMode;
+    if (rawAction === 'takeover') {
+      bridge.revokeControl(auth.userId, { revokeTokens: false, reason: reason ?? 'user_takeover' });
+      nextMode = { mode: 'user_takeover', paused_at_step: Math.max(0, Math.floor(pausedAtStep)) };
+    } else if (rawAction === 'request_takeover') {
+      nextMode = { mode: 'waiting_for_takeover', reason: reason ?? 'Human input requested' };
+    } else if (rawAction === 'resume') {
+      nextMode = {
+        mode: 'ai_controlling',
+        active_step: Math.max(0, Math.floor(activeStep)),
+        status_text: statusText ?? 'Resumed automation',
+      };
+    } else {
+      nextMode = { mode: 'idle' };
+    }
+    bridge.setControlMode(auth.userId, nextMode);
+    sendJson(ctx.res, 200, {
+      ok: true,
+      control_mode: nextMode,
+      control_generation: bridge.getGeneration(auth.userId),
+    });
+  });
+
+  // 6. MCP JSON-RPC 2.0 Server (`/api/v1/mcp/manifest` & `/api/v1/mcp/rpc`)
   router.get('/api/v1/mcp/manifest', (ctx) => {
     const baseUrl = resolveBaseUrl(ctx);
     sendJson(ctx.res, 200, {
       name: 'gpui-telegram-web-browser-bridge',
-      version: '1.2.0',
-      protocolVersion: '2024-11-05',
+      version: '1.6.11',
+      protocolVersion: '2025-11-25',
       rpc_endpoint: `${baseUrl}/api/v1/mcp/rpc`,
       ws_bridge_endpoint: `${baseUrl.replace(/^http/i, 'ws')}/api/v1/browser/ws`,
       chromium_cdp_available: isChromiumBinaryAvailable(),

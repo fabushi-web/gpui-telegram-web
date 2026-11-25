@@ -307,11 +307,31 @@ describe('@gpui-telegram/server — Clean Production Mode (Zero Fake Data, v1.6.
     expect(wasmBuf.length).toBeGreaterThan(500_000);
     expect(wasmBuf.subarray(0, 4).equals(Buffer.from([0x00, 0x61, 0x73, 0x6d]))).toBe(true);
 
-    // Real globe texture asset
+    // Real globe texture asset + static /miniapps/fabushi-globe/* assets (BEFORE /:botUsername/:shortName)
     const texResp = await fetch(`${prodBaseUrl}/api/v1/fabushi-miniapp/assets/earth_texture.jpg`);
     expect(texResp.status).toBe(200);
     expect(texResp.headers.get('content-type')).toContain('image/jpeg');
     expect((await texResp.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
+
+    const staticWasm = await fetch(`${prodBaseUrl}/miniapps/fabushi-globe/fabushi_miniapp.wasm`);
+    expect(staticWasm.status).toBe(200);
+    expect(staticWasm.headers.get('content-type')).toContain('application/wasm');
+    const staticWasmBuf = Buffer.from(await staticWasm.arrayBuffer());
+    expect(staticWasmBuf.subarray(0, 4).equals(Buffer.from([0x00, 0x61, 0x73, 0x6d]))).toBe(true);
+
+    const staticTex = await fetch(`${prodBaseUrl}/miniapps/fabushi-globe/earth_texture.jpg`);
+    expect(staticTex.status).toBe(200);
+    expect(staticTex.headers.get('content-type')).toContain('image/jpeg');
+
+    const staticIndex = await fetch(`${prodBaseUrl}/miniapps/fabushi-globe`);
+    expect(staticIndex.status).toBe(200);
+    expect(staticIndex.headers.get('content-type')).toContain('text/html');
+
+    const staticTraversal = await fetch(`${prodBaseUrl}/miniapps/fabushi-globe/..%2fpackage.json`);
+    expect([400, 404]).toContain(staticTraversal.status);
+
+    const protoAsset = await fetch(`${prodBaseUrl}/api/v1/fabushi-miniapp/assets/constructor`);
+    expect(protoAsset.status).toBe(404);
 
     // SQLite-backed Fabushi bootstrap -> transfer -> practice session -> leaderboard -> heartbeat
     const boot = await apiJson(prodBaseUrl, 'GET', '/api/v1/fabushi-miniapp/bootstrap', {
@@ -447,5 +467,197 @@ describe('@gpui-telegram/server — Clean Production Mode (Zero Fake Data, v1.6.
       });
     });
     expect(localBrowserPong).toBe(9001);
+  });
+
+  it('enforces M3 zero-fake-data invariants across AI Vault/Magpie (F2-F5), Fabushi/Hermes (F6-F9), MCP/Talk/Computers/Tailnet/Tasks (F10-F14), Bots/VIP/Wallet (F15) & Browser CDP (F18)', async () => {
+    const login = await apiJson(prodBaseUrl, 'POST', '/api/v1/auth/login', {
+      body: { username: 'prod_real_user', password: 'StrongPassword#2026' },
+    });
+    expect(login.status).toBe(200);
+    const token = String(login.data.token);
+
+    // F2 / F3 / F4 / F5: Magpie & AI Gateway — require auth, zero local_hermes, honest 503 with zero [DONE] on error
+    for (const [method, path, body] of [
+      ['GET', '/v1/models', undefined],
+      ['GET', '/api/v1/magpie/v1/models', undefined],
+      ['POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }],
+      ['POST', '/api/v1/magpie/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }],
+    ] as const) {
+      const unauth = await apiJson(prodBaseUrl, method, path, { body });
+      expect(unauth.status).toBe(401);
+    }
+
+    const magpieState = await apiJson(prodBaseUrl, 'GET', '/api/v1/fabushi/magpie/state', { token });
+    expect(magpieState.status).toBe(200);
+    expect(magpieState.data.providers).toEqual([]);
+    expect(magpieState.data.has_configured_provider).toBe(false);
+    expect(magpieState.data.needs_provider_selection).toBe(true);
+    expect(magpieState.data.allow_local_fallback).toBe(false);
+    const stateSerialized = JSON.stringify(magpieState.data);
+    expect(stateSerialized).not.toContain('local_hermes');
+    expect(stateSerialized).not.toContain('hermes-local-v1');
+
+    const badLocalProv = await apiJson(prodBaseUrl, 'POST', '/api/v1/fabushi/magpie/providers', {
+      token,
+      body: { provider_id: 'local_hermes', base_url: 'http://127.0.0.1:9999/v1' },
+    });
+    expect(badLocalProv.status).toBe(400);
+
+    const noProvSync = await apiJson(prodBaseUrl, 'POST', '/api/v1/magpie/v1/chat/completions', {
+      token,
+      body: { messages: [{ role: 'user', content: 'hello' }], stream: false },
+    });
+    expect(noProvSync.status).toBe(503);
+    expect(noProvSync.data.error).toBe('provider_not_configured');
+    expect(noProvSync.data.needs_provider_selection).toBe(true);
+    expect(noProvSync.data.action).toBe('hermes:open_ai_providers');
+
+    const noProvStream = await apiJson(prodBaseUrl, 'POST', '/api/v1/magpie/v1/chat/completions', {
+      token,
+      body: { messages: [{ role: 'user', content: 'hello' }], stream: true },
+    });
+    expect(noProvStream.status).toBe(503);
+    expect(noProvStream.rawText).not.toContain('data: [DONE]');
+    expect(noProvStream.rawText).not.toContain('[Magpie');
+
+    const scanSubs = await apiJson(prodBaseUrl, 'POST', '/api/v1/fabushi/magpie/subscriptions/scan', {
+      token,
+      body: {},
+    });
+    expect(scanSubs.status).toBe(200);
+    expect(scanSubs.data.subscriptions).toEqual([]);
+
+    // F6 / F7 / F8 / F9: Fabushi / Hermes Agent — zero local_hermes, zero "Executed /..." stubs, honest 503 cron trigger
+    const hermesStatus = await apiJson(prodBaseUrl, 'GET', '/api/v1/fabushi/status', { token });
+    expect(hermesStatus.status).toBe(200);
+    expect(hermesStatus.data.has_configured_provider).toBe(false);
+    expect(hermesStatus.data.active_provider).not.toBe('local_hermes');
+    expect(hermesStatus.data.active_model).not.toBe('hermes-local-v1');
+    expect(hermesStatus.data.chat_id).not.toBe(106);
+
+    const badCmd = await apiJson(prodBaseUrl, 'POST', '/api/v1/fabushi/command', {
+      token,
+      body: { command: '/nonexistent_cmd' },
+    });
+    expect(badCmd.status).toBe(400);
+    expect(JSON.stringify(badCmd.data)).not.toContain('Executed /');
+
+    const unimplCmd = await apiJson(prodBaseUrl, 'POST', '/api/v1/fabushi/command', {
+      token,
+      body: { command: '/vision' },
+    });
+    expect(unimplCmd.status).toBe(501);
+    expect(JSON.stringify(unimplCmd.data)).not.toContain('Executed /');
+
+    const cronCreate = await apiJson(prodBaseUrl, 'POST', '/api/v1/fabushi/cron', {
+      token,
+      body: { name: 'Digest', schedule_expr: '*/15 * * * *', prompt: 'Summarize' },
+    });
+    expect(cronCreate.status).toBe(201);
+    const cronJobId = String(cronCreate.data.job_id ?? cronCreate.data.id);
+    const cronTrig = await apiJson(
+      prodBaseUrl,
+      'POST',
+      `/api/v1/fabushi/cron/${encodeURIComponent(cronJobId)}/trigger`,
+      { token },
+    );
+    expect(cronTrig.status).toBe(503);
+    expect(cronTrig.data.error).toBe('provider_not_configured');
+
+    // F10: MCP Tools & Official OAuth 2.1 MCP — zero fake mcp_filesystem tools, 401 WWW-Authenticate on /mcp
+    const mcpTools = await apiJson(prodBaseUrl, 'GET', '/api/v1/mcp/tools', { token });
+    expect(mcpTools.status).toBe(200);
+    expect(mcpTools.data.tools).toEqual([]);
+
+    const fakeToolInvoke = await apiJson(prodBaseUrl, 'POST', '/api/v1/mcp/invoke', {
+      token,
+      body: { tool_name: 'fs_read_file', arguments: {} },
+    });
+    expect([400, 404]).toContain(fakeToolInvoke.status);
+    expect(JSON.stringify(fakeToolInvoke.data)).not.toContain('Executed MCP tool');
+
+    const unauthMcp = await apiJson(prodBaseUrl, 'POST', '/mcp', {
+      body: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    });
+    expect(unauthMcp.status).toBe(401);
+    expect(unauthMcp.headers.get('www-authenticate') ?? '').toContain('resource_metadata=');
+
+    // F11: Talk Mode — honest 503 when unconfigured (zero "Heard ..." echo)
+    const talkRes = await apiJson(prodBaseUrl, 'POST', '/api/v1/talk/audio', {
+      token,
+      body: { transcript: 'hello' },
+    });
+    expect(talkRes.status).toBe(503);
+    expect(JSON.stringify(talkRes.data)).not.toContain('Heard');
+
+    // F12: Computer Workbench — cloud node starts offline (online: false), command returns 503 (zero SVG/sandbox:default)
+    const cloudNode = await apiJson(prodBaseUrl, 'POST', '/api/v1/computers/cloud', {
+      token,
+      body: { display_name: 'Prod Cloud', host: '198.51.100.22' },
+    });
+    expect(cloudNode.status).toBe(201);
+    expect(cloudNode.data.online).toBe(false);
+    expect(cloudNode.data.frame_svg_data_url).toBeUndefined();
+    const offlineExec = await apiJson(
+      prodBaseUrl,
+      'POST',
+      `/api/v1/computers/${encodeURIComponent(String(cloudNode.data.node_id))}/commands`,
+      { token, body: { operation: { op: 'system_info' } } },
+    );
+    expect(offlineExec.status).toBe(503);
+
+    // F13: Tailnet — honest disconnected state (zero fake 100.64.0.1)
+    const tailnet = await apiJson(prodBaseUrl, 'GET', '/api/v1/tailnet/status', { token });
+    expect(tailnet.status).toBe(200);
+    expect(tailnet.data.connected).toBe(false);
+    expect(tailnet.data.peers).toEqual([]);
+    expect(tailnet.data.self_peer?.ipv4).not.toBe('100.64.0.1');
+    expect(tailnet.data.self_peer?.online).toBe(false);
+
+    // F14: Task Center — honest progress 0 & empty logs (zero synthetic 35/40)
+    const taskCreate = await apiJson(prodBaseUrl, 'POST', '/api/v1/tasks', {
+      token,
+      body: { title: 'Truthful task', state: 'running' },
+    });
+    expect(taskCreate.status).toBe(201);
+    expect(taskCreate.data.progress).toBe(0);
+    expect(taskCreate.data.logs).toEqual([]);
+
+    // F15: SDK zero fake Alice/1001, VIP & Wallet topup strictly gated with 402 payment_required
+    const sdkResp = await fetch(`${prodBaseUrl}/js/telegram-web-app.js`);
+    expect(sdkResp.status).toBe(200);
+    const sdkText = await sdkResp.text();
+    expect(sdkText).not.toContain('Alice');
+    expect(sdkText).not.toContain('1001');
+    expect(sdkText).toContain('modelContext');
+
+    const unpaidVip = await apiJson(prodBaseUrl, 'POST', '/api/v1/fabushi-miniapp/membership', {
+      token,
+      body: { plan: 'monthly' },
+    });
+    expect(unpaidVip.status).toBe(402);
+    expect(unpaidVip.data.error).toBe('payment_required');
+
+    const unpaidTopup = await apiJson(prodBaseUrl, 'POST', '/api/v1/wallet/topup', {
+      token,
+      body: { amount_stars: 500 },
+    });
+    expect(unpaidTopup.status).toBe(402);
+    expect(unpaidTopup.data.error).toBe('payment_required');
+
+    // F18: Browser CDP — zero HTTP DOM SVG fallback
+    const fallbackPref = await apiJson(prodBaseUrl, 'POST', '/api/v1/browser/headless/open', {
+      token,
+      body: { url: 'about:blank', prefer_fallback: true },
+    });
+    expect(fallbackPref.status).toBe(400);
+    expect(fallbackPref.data.error).toBe('unsupported_backend');
+
+    const fallbackBackend = await apiJson(prodBaseUrl, 'POST', '/api/v1/browser/headless/open', {
+      token,
+      body: { url: 'about:blank', backend: 'http_dom_fallback' },
+    });
+    expect(fallbackBackend.status).toBe(400);
+    expect(fallbackBackend.data.error).toBe('unsupported_backend');
   });
 });

@@ -774,6 +774,308 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       date_ms INTEGER NOT NULL,
       PRIMARY KEY (caller_user_id, chat_id, bot_user_id, client_nonce)
     );
+
+    -- =========================================================================
+    -- M3 Domain 1: Per-User ChaCha20-Poly1305 AI Vault & Multi-Agent Workspaces
+    -- =========================================================================
+    CREATE TABLE IF NOT EXISTS user_provider_vaults (
+      user_id INTEGER PRIMARY KEY,
+      encrypted_state TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS group_workspaces (
+      chat_id INTEGER PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS group_workspace_entries (
+      chat_id INTEGER NOT NULL,
+      entry_key TEXT NOT NULL,
+      value_json TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (chat_id, entry_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_workspace_entries_chat
+      ON group_workspace_entries(chat_id, entry_key);
+
+    -- =========================================================================
+    -- M3 Domain 2: Decoupled MiniApps/Bots, Official OAuth 2.1 MCP, Remote Assist, Verified Billing
+    -- =========================================================================
+    CREATE TABLE IF NOT EXISTS user_bot_permissions (
+      user_id INTEGER NOT NULL,
+      bot_user_id INTEGER NOT NULL,
+      allows_write_to_pm INTEGER NOT NULL DEFAULT 0,
+      has_started_chat INTEGER NOT NULL DEFAULT 0,
+      app_tos_accepted_at INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (user_id, bot_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
+      client_id TEXT PRIMARY KEY,
+      client_name TEXT NOT NULL,
+      redirect_uris_json TEXT NOT NULL,
+      token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+      client_secret_hash TEXT,
+      is_cimd INTEGER NOT NULL DEFAULT 0,
+      created_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS mcp_oauth_codes (
+      code_hash TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      resource TEXT NOT NULL DEFAULT '',
+      code_challenge TEXT NOT NULL,
+      code_challenge_method TEXT NOT NULL DEFAULT 'S256',
+      scopes_json TEXT NOT NULL,
+      allowed_node_ids_json TEXT NOT NULL DEFAULT '[]',
+      issued_family_id TEXT,
+      expires_at_ms INTEGER NOT NULL,
+      consumed_at_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_oauth_codes_expires
+      ON mcp_oauth_codes(expires_at_ms);
+
+    CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
+      token_id TEXT PRIMARY KEY,
+      family_id TEXT NOT NULL,
+      token_kind TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      client_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      resource TEXT NOT NULL DEFAULT '',
+      scopes_json TEXT NOT NULL,
+      allowed_node_ids_json TEXT NOT NULL DEFAULT '[]',
+      created_at_ms INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      last_used_at_ms INTEGER,
+      revoked_at_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_oauth_tokens_family
+      ON mcp_oauth_tokens(family_id);
+    CREATE INDEX IF NOT EXISTS idx_mcp_oauth_tokens_user
+      ON mcp_oauth_tokens(user_id, revoked_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_mcp_oauth_tokens_hash
+      ON mcp_oauth_tokens(token_hash);
+
+    CREATE TABLE IF NOT EXISTS mcp_tool_audit_log (
+      audit_id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      client_id TEXT NOT NULL,
+      family_id TEXT NOT NULL DEFAULT '',
+      session_id TEXT NOT NULL DEFAULT '',
+      tool_name TEXT NOT NULL,
+      target_node_id TEXT,
+      args_summary TEXT NOT NULL DEFAULT '',
+      ok INTEGER NOT NULL,
+      error_code TEXT,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_user_time
+      ON mcp_tool_audit_log(user_id, created_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS remote_assist_devices (
+      user_id INTEGER NOT NULL,
+      device_id TEXT NOT NULL,
+      assist_id TEXT NOT NULL UNIQUE,
+      allow_assist INTEGER NOT NULL DEFAULT 1,
+      code_mode TEXT NOT NULL DEFAULT 'temporary',
+      code_hash TEXT NOT NULL DEFAULT '',
+      temp_code TEXT,
+      failed_attempts INTEGER NOT NULL DEFAULT 0,
+      locked_until_ms INTEGER,
+      expires_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (user_id, device_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_assist_id
+      ON remote_assist_devices(assist_id);
+
+    CREATE TABLE IF NOT EXISTS remote_sessions (
+      session_id TEXT PRIMARY KEY,
+      owner_user_id INTEGER NOT NULL,
+      controller_user_id INTEGER,
+      controller_kind TEXT NOT NULL,
+      controller_name TEXT NOT NULL,
+      controller_platform TEXT NOT NULL DEFAULT '',
+      controller_id TEXT NOT NULL DEFAULT '',
+      target_node_id TEXT NOT NULL,
+      target_device_id TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'desktop',
+      active_tool TEXT,
+      relay_mode TEXT NOT NULL DEFAULT 'http_fallback',
+      rtt_ms INTEGER,
+      fps INTEGER,
+      temp_relay_token_hash TEXT,
+      started_at_ms INTEGER NOT NULL,
+      last_activity_ms INTEGER NOT NULL,
+      ended_at_ms INTEGER,
+      end_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_sessions_owner_active
+      ON remote_sessions(owner_user_id, ended_at_ms, started_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS bot_computer_profiles (
+      user_id INTEGER NOT NULL,
+      bot_id INTEGER NOT NULL,
+      profile_json TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (user_id, bot_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS payment_orders (
+      order_id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      amount_stars INTEGER NOT NULL DEFAULT 0,
+      vip_plan TEXT,
+      vip_days INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      provider TEXT NOT NULL DEFAULT '',
+      provider_tx_id TEXT,
+      paid_at_ms INTEGER,
+      consumed_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_orders_user
+      ON payment_orders(user_id, created_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS redeem_codes (
+      code_hash TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      stars_amount INTEGER NOT NULL DEFAULT 0,
+      vip_plan TEXT,
+      vip_days INTEGER NOT NULL DEFAULT 0,
+      created_by_user_id INTEGER NOT NULL DEFAULT 0,
+      redeemed_by_user_id INTEGER,
+      redeemed_at_ms INTEGER,
+      expires_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL
+    );
+
+    -- =========================================================================
+    -- M3 Domain 3: Browser Control Persistence & Automation Script App Store
+    -- =========================================================================
+    CREATE TABLE IF NOT EXISTS browser_control_generations (
+      user_id INTEGER PRIMARY KEY,
+      control_generation INTEGER NOT NULL DEFAULT 1,
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS browser_pairing_tickets (
+      pair_code TEXT PRIMARY KEY,
+      desktop_token_hash TEXT NOT NULL,
+      desktop_token TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      claimed INTEGER NOT NULL DEFAULT 0,
+      http_base_url TEXT NOT NULL,
+      ws_bridge_url TEXT NOT NULL,
+      mcp_rpc_url TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_pairing_user
+      ON browser_pairing_tickets(user_id);
+
+    CREATE TABLE IF NOT EXISTS browser_desktop_tokens (
+      token_hash TEXT PRIMARY KEY,
+      desktop_token TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      issued_generation INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      revoked INTEGER NOT NULL DEFAULT 0,
+      created_at_ms INTEGER NOT NULL,
+      revoked_at_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_tokens_user
+      ON browser_desktop_tokens(user_id, revoked);
+
+    CREATE TABLE IF NOT EXISTS browser_audit_logs (
+      audit_id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      target_id TEXT NOT NULL,
+      caller TEXT NOT NULL,
+      action TEXT NOT NULL,
+      status TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      latency_ms INTEGER NOT NULL DEFAULT 0,
+      timestamp_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_audit_user_time
+      ON browser_audit_logs(user_id, timestamp_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS automation_apps (
+      app_id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL,
+      author_user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT 'general',
+      target_domains_json TEXT NOT NULL DEFAULT '[]',
+      latest_version TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      install_count INTEGER NOT NULL DEFAULT 0,
+      run_count INTEGER NOT NULL DEFAULT 0,
+      is_published INTEGER NOT NULL DEFAULT 1,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_apps_published_rank
+      ON automation_apps(is_published, install_count DESC, run_count DESC, updated_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_automation_apps_category
+      ON automation_apps(is_published, category, updated_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_automation_apps_author
+      ON automation_apps(author_user_id, updated_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_automation_apps_slug
+      ON automation_apps(slug);
+
+    CREATE TABLE IF NOT EXISTS automation_app_versions (
+      app_id TEXT NOT NULL REFERENCES automation_apps(app_id) ON DELETE CASCADE,
+      version TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      content_sha256 TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (app_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_app_versions_created
+      ON automation_app_versions(app_id, created_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS user_automation_apps (
+      user_id INTEGER NOT NULL,
+      app_id TEXT NOT NULL REFERENCES automation_apps(app_id) ON DELETE CASCADE,
+      installed_version TEXT NOT NULL,
+      installed_at_ms INTEGER NOT NULL,
+      last_run_at_ms INTEGER,
+      PRIMARY KEY (user_id, app_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_automation_apps_user
+      ON user_automation_apps(user_id, installed_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS automation_app_runs (
+      run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES automation_apps(app_id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL,
+      version TEXT NOT NULL,
+      success INTEGER NOT NULL,
+      steps_executed INTEGER NOT NULL DEFAULT 0,
+      total_duration_ms INTEGER NOT NULL DEFAULT 0,
+      used_llm INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      recorded_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_app_runs_app_time
+      ON automation_app_runs(app_id, recorded_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_automation_app_runs_user_time
+      ON automation_app_runs(user_id, recorded_at_ms DESC);
   `);
 
   // Safe idempotent column migrations for existing SQLite databases
@@ -797,4 +1099,9 @@ export function initDatabaseSchema(db: DatabaseSync): void {
   ensureColumn('passkey_challenges', 'rp_id', 'TEXT');
   ensureColumn('account_passkeys', 'cose_alg', 'INTEGER');
   ensureColumn('account_passkeys', 'sign_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('mini_app_installs', 'last_launched_at_ms', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_mini_app_installs_recent
+      ON mini_app_installs(user_id, last_launched_at_ms DESC);
+  `);
 }

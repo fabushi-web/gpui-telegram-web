@@ -606,7 +606,7 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
       expect(closeRes.status).toBe(200);
     }
 
-    // 2. Deterministic `http_dom_fallback` driver (works on any machine without Chromium)
+    // 2. Fallback SVG driver is permanently purged -> prefer_fallback MUST return 400 unsupported_backend!
     const openFallback = await reqJson(baseUrl, 'POST', '/api/v1/browser/headless/open', {
       token: aliceAuth,
       body: {
@@ -614,50 +614,21 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
         prefer_fallback: true,
       },
     });
-    expect(openFallback.status).toBe(200);
-    expect(openFallback.data.session.backend).toBe('http_dom_fallback');
-    const fbId = openFallback.data.session.session_id as string;
+    expect(openFallback.status).toBe(400);
+    expect(openFallback.data.error).toBe('unsupported_backend');
 
-    const fbFill = await reqJson<BrowserCommandResult>(
-      baseUrl,
-      'POST',
-      `/api/v1/browser/headless/${fbId}/action`,
-      {
-        token: aliceAuth,
-        body: { action: 'fill', selector: '#search-box', text: 'Fallback State Check' },
+    const openExplicitFallback = await reqJson(baseUrl, 'POST', '/api/v1/browser/headless/open', {
+      token: aliceAuth,
+      body: {
+        url: fixtureBaseUrl,
+        backend: 'http_dom_fallback',
       },
-    );
-    expect(fbFill.status).toBe(200);
-    expect(
-      fbFill.data.snapshot?.elements.find((e) => e.id === 'search-box')?.value,
-    ).toBe('Fallback State Check');
+    });
+    expect(openExplicitFallback.status).toBe(400);
+    expect(openExplicitFallback.data.error).toBe('unsupported_backend');
+  }, 30000);
 
-    // Clicking <a id="next-link" href="/second"> navigates fallback driver to /second!
-    const fbLinkClick = await reqJson<BrowserCommandResult>(
-      baseUrl,
-      'POST',
-      `/api/v1/browser/headless/${fbId}/action`,
-      {
-        token: aliceAuth,
-        body: { action: 'click', selector: '#next-link' },
-      },
-    );
-    expect(fbLinkClick.status).toBe(200);
-    expect(fbLinkClick.data.snapshot?.title).toBe('Fixture Second Page');
-
-    const fbShot = await reqJson(
-      baseUrl,
-      'GET',
-      `/api/v1/browser/headless/${fbId}/screenshot`,
-      { token: aliceAuth },
-    );
-    expect(fbShot.status).toBe(200);
-    expect(fbShot.data.screenshot_data_url.startsWith('data:image/svg+xml;base64,')).toBe(true);
-
-    await reqJson(baseUrl, 'DELETE', `/api/v1/browser/headless/${fbId}`, { token: aliceAuth });
-  }, 25000);
-
-  it('implements MCP JSON-RPC 2.0 (`/api/v1/mcp/manifest`, `/api/v1/mcp/rpc`) and Web UI `/api/v1/mcp/invoke` browser_* tools', async () => {
+  it('implements MCP JSON-RPC 2.0 (`/api/v1/mcp/manifest`, `/api/v1/mcp/rpc`) and Web UI `/api/v1/mcp/invoke` browser_* tools over real Chromium CDP', async () => {
     const aliceAuth = (await registerTestUser(baseUrl, 'bctrl_mcp_alice')).token;
 
     // 1. Manifest discovery
@@ -698,7 +669,12 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
       'browser_headless_close',
     ]);
 
-    // 3. MCP JSON-RPC 2.0 `tools/call`: open headless -> action -> screenshot (with image content!) -> close
+    // Fresh user with zero active targets/pairings receives empty /api/v1/mcp/tools (ZERO fake mcp_filesystem!)
+    const freshDock = await reqJson(baseUrl, 'GET', '/api/v1/mcp/tools', { token: aliceAuth });
+    expect(freshDock.status).toBe(200);
+    expect(freshDock.data.tools).toEqual([]);
+
+    // 3. MCP JSON-RPC 2.0 `tools/call`: open REAL Chromium CDP -> action -> real PNG screenshot -> close
     const openCall = await reqJson<McpJsonRpcResponse<any>>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
       token: aliceAuth,
       body: {
@@ -709,69 +685,77 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
           name: 'browser_headless_open',
           arguments: {
             url: 'data:text/html,<title>MCP Inline Page</title><input id="mcp-in" value="init"/><button id="mcp-btn">Run</button>',
-            prefer_fallback: true,
           },
         },
       },
     });
     expect(openCall.data.result.isError).toBe(false);
     const openedParsed = JSON.parse(openCall.data.result.content[0].text);
+    expect(openedParsed.session.backend).toBe('chromium_cdp');
     expect(openedParsed.snapshot.title).toBe('MCP Inline Page');
     const mcpSid = openedParsed.session.session_id as string;
 
-    const actCall = await reqJson<McpJsonRpcResponse<any>>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
-      token: aliceAuth,
-      body: {
-        jsonrpc: '2.0',
-        id: 5,
-        method: 'tools/call',
-        params: {
-          name: 'browser_headless_action',
-          arguments: {
-            session_id: mcpSid,
-            action: 'fill',
-            ref: 'e1',
-            text: 'Updated via MCP JSON-RPC',
+    try {
+      // With an active headless session, Web UI `/api/v1/mcp/tools` truthfully exposes browser_* tools!
+      const activeDock = await reqJson(baseUrl, 'GET', '/api/v1/mcp/tools', { token: aliceAuth });
+      expect(activeDock.status).toBe(200);
+      expect(activeDock.data.tools.some((t: any) => t.name === 'browser_list_targets')).toBe(true);
+
+      const actCall = await reqJson<McpJsonRpcResponse<any>>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
+        token: aliceAuth,
+        body: {
+          jsonrpc: '2.0',
+          id: 5,
+          method: 'tools/call',
+          params: {
+            name: 'browser_headless_action',
+            arguments: {
+              session_id: mcpSid,
+              action: 'fill',
+              ref: 'e1',
+              text: 'Updated via MCP JSON-RPC',
+            },
           },
         },
-      },
-    });
-    expect(actCall.data.result.isError).toBe(false);
-    const actParsed = JSON.parse(actCall.data.result.content[0].text);
-    expect(actParsed.snapshot.elements[0].value).toBe('Updated via MCP JSON-RPC');
+      });
+      expect(actCall.data.result.isError).toBe(false);
+      const actParsed = JSON.parse(actCall.data.result.content[0].text);
+      expect(actParsed.snapshot.elements[0].value).toBe('Updated via MCP JSON-RPC');
 
-    const shotCall = await reqJson<McpJsonRpcResponse<any>>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
-      token: aliceAuth,
-      body: {
-        jsonrpc: '2.0',
-        id: 6,
-        method: 'tools/call',
-        params: {
-          name: 'browser_headless_screenshot',
-          arguments: { session_id: mcpSid },
+      const shotCall = await reqJson<McpJsonRpcResponse<any>>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
+        token: aliceAuth,
+        body: {
+          jsonrpc: '2.0',
+          id: 6,
+          method: 'tools/call',
+          params: {
+            name: 'browser_headless_screenshot',
+            arguments: { session_id: mcpSid },
+          },
         },
-      },
-    });
-    expect(shotCall.data.result.isError).toBe(false);
-    expect(shotCall.data.result.content.some((c: any) => c.type === 'text')).toBe(true);
-    const imgItem = shotCall.data.result.content.find((c: any) => c.type === 'image');
-    expect(imgItem).toBeDefined();
-    expect(imgItem.mimeType).toBe('image/svg+xml');
-    expect(imgItem.data.length).toBeGreaterThan(20);
-
-    const closeCall = await reqJson<McpJsonRpcResponse<any>>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
-      token: aliceAuth,
-      body: {
-        jsonrpc: '2.0',
-        id: 7,
-        method: 'tools/call',
-        params: {
-          name: 'browser_headless_close',
-          arguments: { session_id: mcpSid },
+      });
+      expect(shotCall.data.result.isError).toBe(false);
+      expect(shotCall.data.result.content.some((c: any) => c.type === 'text')).toBe(true);
+      const imgItem = shotCall.data.result.content.find((c: any) => c.type === 'image');
+      expect(imgItem).toBeDefined();
+      expect(imgItem.mimeType).toBe('image/png');
+      const pngHeader = Buffer.from(imgItem.data, 'base64').subarray(0, 4);
+      expect(Array.from(pngHeader)).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    } finally {
+      const closeCall = await reqJson<McpJsonRpcResponse<any>>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
+        token: aliceAuth,
+        body: {
+          jsonrpc: '2.0',
+          id: 7,
+          method: 'tools/call',
+          params: {
+            name: 'browser_headless_close',
+            arguments: { session_id: mcpSid },
+          },
         },
-      },
-    });
-    expect(closeCall.data.result.isError).toBe(false);
+      });
+      expect(closeCall.data.result.isError).toBe(false);
+    }
 
     // Unknown JSON-RPC method returns -32601
     const unknownRpc = await reqJson<McpJsonRpcResponse>(baseUrl, 'POST', '/api/v1/mcp/rpc', {
@@ -780,11 +764,7 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
     });
     expect(unknownRpc.data.error?.code).toBe(-32601);
 
-    // 4. Web UI MCP Tools Dock (`/api/v1/mcp/tools` & `/api/v1/mcp/invoke`)
-    const dockTools = await reqJson(baseUrl, 'GET', '/api/v1/mcp/tools', { token: aliceAuth });
-    expect(dockTools.status).toBe(200);
-    expect(dockTools.data.tools.some((t: any) => t.name === 'browser_list_targets')).toBe(true);
-
+    // 4. Web UI MCP Tools Invoke (`/api/v1/mcp/invoke`)
     const dockInvoke = await reqJson(baseUrl, 'POST', '/api/v1/mcp/invoke', {
       token: aliceAuth,
       body: { tool_name: 'browser_list_targets', arguments: {} },
@@ -792,5 +772,5 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
     expect(dockInvoke.status).toBe(200);
     expect(dockInvoke.data.status).toBe('completed');
     expect(Array.isArray(dockInvoke.data.output.targets)).toBe(true);
-  });
+  }, 30000);
 });

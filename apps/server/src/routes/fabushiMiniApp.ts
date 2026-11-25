@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ServerConfig } from '../config.js';
-import { createMessageAtomic, getUserProfileDto } from '../db/queries.js';
-import { verifyMiniAppInitData } from '../utils/crypto.js';
+import { createMessageAtomic, getUserProfileDto, parseBoundedQueryInt } from '../db/queries.js';
+import { sha256Hex, verifyMiniAppInitData } from '../utils/crypto.js';
 import {
   ApiError,
   authenticateToken,
@@ -97,14 +97,66 @@ interface FabushiLeaderboardEntryDto {
   is_self: boolean;
 }
 
-const ASSET_CONTENT_TYPES: Record<string, string> = {
-  'earth_texture.jpg': 'image/jpeg',
-  'home_world_lightfield.webp': 'image/webp',
-  'zen_room_backdrop_2d.webp': 'image/webp',
-  'concap.csv': 'text/csv; charset=utf-8',
-  'r2-files-list.json': 'application/json; charset=utf-8',
-  'fabushi_miniapp.wasm': 'application/wasm',
-};
+const ASSET_CONTENT_TYPES = new Map<string, string>([
+  ['earth_texture.jpg', 'image/jpeg'],
+  ['home_world_lightfield.webp', 'image/webp'],
+  ['zen_room_backdrop_2d.webp', 'image/webp'],
+  ['concap.csv', 'text/csv; charset=utf-8'],
+  ['r2-files-list.json', 'application/json; charset=utf-8'],
+  ['fabushi_miniapp.wasm', 'application/wasm'],
+]);
+
+function parseOptionalTrimmedString(raw: unknown, fieldName: string): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string') {
+    throw new ApiError(400, 'bad_request', `${fieldName} must be a string`);
+  }
+  return raw.trim();
+}
+
+function parseFiniteInt(
+  raw: unknown,
+  fallback: number,
+  fieldName: string,
+  min = 0,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (typeof raw !== 'number' && typeof raw !== 'string') {
+    throw new ApiError(400, 'bad_request', `${fieldName} must be a finite number`);
+  }
+  const num = Number(raw);
+  if (!Number.isFinite(num)) {
+    throw new ApiError(400, 'bad_request', `${fieldName} must be a finite number`);
+  }
+  return Math.max(min, Math.min(max, Math.trunc(num)));
+}
+
+function parseOptionalIsoFromMs(raw: unknown, fieldName: string): string | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (typeof raw !== 'number' && typeof raw !== 'string') {
+    throw new ApiError(400, 'bad_request', `${fieldName} must be a valid timestamp in milliseconds`);
+  }
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    throw new ApiError(400, 'bad_request', `${fieldName} must be a valid timestamp in milliseconds`);
+  }
+  const dt = new Date(ms);
+  if (Number.isNaN(dt.getTime())) {
+    throw new ApiError(400, 'bad_request', `${fieldName} is out of valid Date range`);
+  }
+  return dt.toISOString();
+}
+
+function parseStrictRecordId(raw: unknown): number {
+  if (typeof raw === 'number') {
+    if (Number.isSafeInteger(raw) && raw > 0) return raw;
+  } else if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) {
+    const n = Number(raw.trim());
+    if (Number.isSafeInteger(n) && n > 0) return n;
+  }
+  throw new ApiError(400, 'bad_request', 'record id must be a positive integer');
+}
 
 function formatLeaderboardBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -487,14 +539,29 @@ export function registerFabushiMiniAppRoutes(
 
   // 2. Real textures & data assets (`earth_texture.jpg`, `home_world_lightfield.webp`, etc.)
   router.get('/api/v1/fabushi-miniapp/assets/:name', (ctx) => {
-    const rawName = path.basename(ctx.params.name ?? '');
-    const contentType = ASSET_CONTENT_TYPES[rawName];
-    if (!contentType) {
-      throw new ApiError(404, 'asset_not_found', `Mini App asset "${rawName}" not found`);
+    const rawUrlPath = (ctx.req.url ?? '').split('?')[0] ?? '';
+    const paramName = ctx.params.name ?? '';
+    if (
+      /(?:^|\/|\\)\.\.(?:\/|\\|$)/.test(rawUrlPath) ||
+      /%2e%2e|%2f|%5c|\\|\0/i.test(rawUrlPath) ||
+      paramName.includes('/') ||
+      paramName.includes('\\') ||
+      paramName.includes('..') ||
+      paramName.includes('\0')
+    ) {
+      throw new ApiError(400, 'invalid_asset_path', 'Path traversal is not allowed');
     }
-    const filePath = path.join(config.fabushiAssetsDir, rawName);
+    const contentType = ASSET_CONTENT_TYPES.get(paramName);
+    if (!contentType) {
+      throw new ApiError(404, 'asset_not_found', `Mini App asset "${paramName}" not found`);
+    }
+    const baseDir = path.resolve(config.fabushiAssetsDir);
+    const filePath = path.resolve(baseDir, paramName);
+    if (!filePath.startsWith(`${baseDir}${path.sep}`)) {
+      throw new ApiError(400, 'invalid_asset_path', 'Path traversal is not allowed');
+    }
     if (!fs.existsSync(filePath)) {
-      throw new ApiError(404, 'asset_not_found', `Mini App asset "${rawName}" missing`);
+      throw new ApiError(404, 'asset_not_found', `Mini App asset "${paramName}" missing`);
     }
     const bytes = fs.readFileSync(filePath);
     ctx.res.statusCode = 200;
@@ -535,22 +602,29 @@ export function registerFabushiMiniAppRoutes(
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
     const body = await readJsonBody<{
-      content_title?: string;
-      content_kind?: string;
-      target_countries?: string[];
-      bytes_sent?: number;
-      beam_count?: number;
+      content_title?: unknown;
+      content_kind?: unknown;
+      target_countries?: unknown;
+      bytes_sent?: unknown;
+      beam_count?: unknown;
     }>(ctx.req);
 
-    const title = (body.content_title ?? '').trim();
+    const title = parseOptionalTrimmedString(body.content_title, 'content_title') ?? '';
     if (!title) throw new ApiError(400, 'bad_request', 'content_title must not be empty');
-    const targets =
-      Array.isArray(body.target_countries) && body.target_countries.length > 0
-        ? body.target_countries
-        : ['ALL'];
-    const beams = Math.max(1, Number(body.beam_count ?? targets.length));
-    const bytes = Math.max(1024, Number(body.bytes_sent ?? beams * 1024));
-    const kind = (body.content_kind ?? 'sutra').trim() || 'sutra';
+    let targets = ['ALL'];
+    if (body.target_countries !== undefined && body.target_countries !== null) {
+      if (!Array.isArray(body.target_countries)) {
+        throw new ApiError(400, 'bad_request', 'target_countries must be an array of strings');
+      }
+      const cleaned = body.target_countries
+        .filter((t): t is string => typeof t === 'string')
+        .map((t) => t.trim())
+        .filter(Boolean);
+      if (cleaned.length > 0) targets = cleaned;
+    }
+    const beams = parseFiniteInt(body.beam_count, targets.length, 'beam_count', 1, 100_000);
+    const bytes = parseFiniteInt(body.bytes_sent, beams * 1024, 'bytes_sent', 1024, 1_000_000_000_000);
+    const kind = parseOptionalTrimmedString(body.content_kind, 'content_kind') || 'sutra';
     const now = Date.now();
 
     db.prepare(`
@@ -590,24 +664,26 @@ export function registerFabushiMiniAppRoutes(
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
     const body = await readJsonBody<{
-      sutra?: string;
-      sutra_name?: string;
-      duration_minutes?: number;
-      chant_count?: number;
-      start_time_ms?: number;
-      end_time_ms?: number;
-      notes?: string | null;
+      sutra?: unknown;
+      sutra_name?: unknown;
+      duration_minutes?: unknown;
+      chant_count?: unknown;
+      start_time_ms?: unknown;
+      end_time_ms?: unknown;
+      notes?: unknown;
     }>(ctx.req);
 
-    const sutra = (body.sutra ?? body.sutra_name ?? '').trim();
+    const rawSutra = body.sutra !== undefined ? body.sutra : body.sutra_name;
+    const sutra = parseOptionalTrimmedString(rawSutra, 'sutra') ?? '';
     if (!sutra) throw new ApiError(400, 'bad_request', 'sutra must not be empty');
-    const durationMinutes = Math.max(0, Math.trunc(Number(body.duration_minutes ?? 0)));
-    const chantCount = Math.max(0, Math.trunc(Number(body.chant_count ?? 0)));
+    const durationMinutes = parseFiniteInt(body.duration_minutes, 0, 'duration_minutes', 0, 100_000);
+    const chantCount = parseFiniteInt(body.chant_count, 0, 'chant_count', 0, 10_000_000);
     const nowIso = new Date().toISOString();
     const recDate = todayDateStr();
     const localTime = nowTimeHm();
-    const startIso = body.start_time_ms ? new Date(body.start_time_ms).toISOString() : null;
-    const endIso = body.end_time_ms ? new Date(body.end_time_ms).toISOString() : null;
+    const startIso = parseOptionalIsoFromMs(body.start_time_ms, 'start_time_ms');
+    const endIso = parseOptionalIsoFromMs(body.end_time_ms, 'end_time_ms');
+    const notes = parseOptionalTrimmedString(body.notes, 'notes') || null;
 
     const info = db
       .prepare(`
@@ -623,7 +699,7 @@ export function registerFabushiMiniAppRoutes(
         chantCount,
         recDate,
         localTime,
-        body.notes?.trim() || null,
+        notes,
         startIso,
         endIso,
         nowIso,
@@ -640,7 +716,7 @@ export function registerFabushiMiniAppRoutes(
       record_date: recDate,
       local_time: localTime,
       is_manual: false,
-      notes: body.notes?.trim() || null,
+      notes,
       start_time: startIso,
       end_time: endIso,
       created_at: nowIso,
@@ -678,17 +754,23 @@ export function registerFabushiMiniAppRoutes(
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
     const body = await readJsonBody<{
-      sutra_name?: string;
-      sutra?: string;
-      chant_count?: number;
-      duration_minutes?: number;
-      record_date?: string;
-      local_time?: string;
-      notes?: string | null;
+      sutra_name?: unknown;
+      sutra?: unknown;
+      chant_count?: unknown;
+      duration_minutes?: unknown;
+      record_date?: unknown;
+      local_time?: unknown;
+      notes?: unknown;
     }>(ctx.req);
 
-    const sutra = (body.sutra_name ?? body.sutra ?? '').trim();
+    const rawSutra = body.sutra_name !== undefined ? body.sutra_name : body.sutra;
+    const sutra = parseOptionalTrimmedString(rawSutra, 'sutra_name') ?? '';
     if (!sutra) throw new ApiError(400, 'bad_request', 'sutra_name must not be empty');
+    const durationMinutes = parseFiniteInt(body.duration_minutes, 0, 'duration_minutes', 0, 100_000);
+    const chantCount = parseFiniteInt(body.chant_count, 1, 'chant_count', 0, 10_000_000);
+    const recordDate = parseOptionalTrimmedString(body.record_date, 'record_date') || todayDateStr();
+    const localTime = parseOptionalTrimmedString(body.local_time, 'local_time') || nowTimeHm();
+    const notes = parseOptionalTrimmedString(body.notes, 'notes') || null;
     db.prepare(`
       INSERT INTO fabushi_practice_records (
         user_id, sutra_name, sutra_source, duration_minutes, chant_count,
@@ -697,11 +779,11 @@ export function registerFabushiMiniAppRoutes(
     `).run(
       auth.userId,
       sutra,
-      Math.max(0, Math.trunc(Number(body.duration_minutes ?? 0))),
-      Math.max(0, Math.trunc(Number(body.chant_count ?? 1))),
-      body.record_date?.trim() || todayDateStr(),
-      body.local_time?.trim() || nowTimeHm(),
-      body.notes?.trim() || null,
+      durationMinutes,
+      chantCount,
+      recordDate,
+      localTime,
+      notes,
       new Date().toISOString(),
     );
 
@@ -718,21 +800,24 @@ export function registerFabushiMiniAppRoutes(
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
     const body = await readJsonBody<{
-      id?: number;
-      sutra_name?: string;
-      sutra?: string;
-      chant_count?: number;
-      duration_minutes?: number;
-      record_date?: string;
-      local_time?: string;
-      notes?: string | null;
+      id?: unknown;
+      sutra_name?: unknown;
+      sutra?: unknown;
+      chant_count?: unknown;
+      duration_minutes?: unknown;
+      record_date?: unknown;
+      local_time?: unknown;
+      notes?: unknown;
     }>(ctx.req);
-    const recordId = Number(ctx.params.id ?? body.id);
-    if (!Number.isInteger(recordId) || recordId <= 0) {
-      throw new ApiError(400, 'bad_request', 'record id is required');
-    }
-    const sutra = (body.sutra_name ?? body.sutra ?? '').trim();
+    const recordId = parseStrictRecordId(ctx.params.id ?? body.id);
+    const rawSutra = body.sutra_name !== undefined ? body.sutra_name : body.sutra;
+    const sutra = parseOptionalTrimmedString(rawSutra, 'sutra_name') ?? '';
     if (!sutra) throw new ApiError(400, 'bad_request', 'sutra_name must not be empty');
+    const chantCount = parseFiniteInt(body.chant_count, 1, 'chant_count', 0, 10_000_000);
+    const durationMinutes = parseFiniteInt(body.duration_minutes, 0, 'duration_minutes', 0, 100_000);
+    const recordDate = parseOptionalTrimmedString(body.record_date, 'record_date') || todayDateStr();
+    const localTime = parseOptionalTrimmedString(body.local_time, 'local_time') || nowTimeHm();
+    const notes = parseOptionalTrimmedString(body.notes, 'notes') || null;
 
     const res = db
       .prepare(`
@@ -742,11 +827,11 @@ export function registerFabushiMiniAppRoutes(
       `)
       .run(
         sutra,
-        Math.max(0, Math.trunc(Number(body.chant_count ?? 1))),
-        Math.max(0, Math.trunc(Number(body.duration_minutes ?? 0))),
-        body.record_date?.trim() || todayDateStr(),
-        body.local_time?.trim() || nowTimeHm(),
-        body.notes?.trim() || null,
+        chantCount,
+        durationMinutes,
+        recordDate,
+        localTime,
+        notes,
         recordId,
         auth.userId,
       );
@@ -767,7 +852,7 @@ export function registerFabushiMiniAppRoutes(
   router.delete('/api/v1/fabushi-miniapp/practice/record/:id', (ctx) => {
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
-    const recordId = Number(ctx.params.id);
+    const recordId = parseStrictRecordId(ctx.params.id);
     const res = db
       .prepare(`DELETE FROM fabushi_practice_records WHERE id = ? AND user_id = ?`)
       .run(recordId, auth.userId);
@@ -798,17 +883,43 @@ export function registerFabushiMiniAppRoutes(
     const auth = resolveFabushiAuth(db, ctx);
     const existing = ensureFabushiProfile(db, auth);
     const body = await readJsonBody<{
-      display_name?: string;
-      bio?: string;
-      locked_practice?: FabushiLockedPractice;
-      locale?: string;
+      display_name?: unknown;
+      bio?: unknown;
+      locked_practice?: unknown;
+      locale?: unknown;
     }>(ctx.req);
 
-    const nextDisplayName = body.display_name?.trim() || existing.profile.display_name;
-    const nextBio = body.bio !== undefined ? body.bio : existing.profile.bio;
-    const nextLocale = body.locale?.trim() || existing.profile.locale;
+    const displayNameInput = parseOptionalTrimmedString(body.display_name, 'display_name');
+    const nextDisplayName = displayNameInput || existing.profile.display_name;
+    let nextBio = existing.profile.bio;
+    if (body.bio !== undefined) {
+      if (typeof body.bio !== 'string') {
+        throw new ApiError(400, 'bad_request', 'bio must be a string');
+      }
+      nextBio = body.bio;
+    }
+    const localeInput = parseOptionalTrimmedString(body.locale, 'locale');
+    const nextLocale = localeInput || existing.profile.locale;
+
     // 一门深入: once locked, cannot be overwritten
-    const nextLocked = existing.locked_practice ?? body.locked_practice ?? null;
+    let nextLocked: FabushiLockedPractice | null = existing.locked_practice ?? null;
+    if (!nextLocked && body.locked_practice !== undefined && body.locked_practice !== null) {
+      if (typeof body.locked_practice !== 'object' || Array.isArray(body.locked_practice)) {
+        throw new ApiError(400, 'bad_request', 'locked_practice must be an object');
+      }
+      const lp = body.locked_practice as Record<string, unknown>;
+      const lpTitle = parseOptionalTrimmedString(lp.title, 'locked_practice.title') ?? '';
+      if (!lpTitle) {
+        throw new ApiError(400, 'bad_request', 'locked_practice.title must be a non-empty string');
+      }
+      nextLocked = {
+        title: lpTitle,
+        category: parseOptionalTrimmedString(lp.category, 'locked_practice.category') || 'sutra',
+        file_path: parseOptionalTrimmedString(lp.file_path, 'locked_practice.file_path') || '',
+        selected_at_ms: parseFiniteInt(lp.selected_at_ms, Date.now(), 'locked_practice.selected_at_ms', 0),
+        is_locked: lp.is_locked !== false,
+      };
+    }
 
     db.prepare(`
       UPDATE fabushi_profiles
@@ -831,21 +942,109 @@ export function registerFabushiMiniAppRoutes(
     });
   });
 
-  // 8. Membership (`POST /api/v1/fabushi-miniapp/membership`)
+  // 8. Membership (`POST /api/v1/fabushi-miniapp/membership`) — Strictly gated behind verified payment order or redeem code!
   router.post('/api/v1/fabushi-miniapp/membership', async (ctx) => {
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
-    const body = await readJsonBody<{ plan?: string }>(ctx.req);
-    const rawPlan = (body.plan ?? 'yearly').trim().toLowerCase();
-    const plan = rawPlan === 'monthly' ? 'monthly' : rawPlan === 'quarterly' ? 'quarterly' : 'yearly';
-    const days = plan === 'monthly' ? 30 : plan === 'quarterly' ? 90 : 365;
-    const expiresAt = new Date(Date.now() + days * 86_400_000).toISOString();
+    const body = await readJsonBody<{
+      plan?: string;
+      order_id?: string;
+      redeem_code?: string;
+    }>(ctx.req);
 
-    db.prepare(`
-      UPDATE fabushi_profiles
-      SET is_vip = 1, vip_plan = ?, vip_expires_at = ?, updated_at_ms = ?
-      WHERE user_id = ?
-    `).run(plan, expiresAt, Date.now(), auth.userId);
+    const orderId = typeof body.order_id === 'string' ? body.order_id.trim() : '';
+    const redeemCode = typeof body.redeem_code === 'string' ? body.redeem_code.trim() : '';
+
+    if (!orderId && !redeemCode) {
+      throw new ApiError(
+        402,
+        'payment_required',
+        'Verified payment receipt (order_id) or admin-issued redeem_code is required to activate VIP membership',
+      );
+    }
+
+    const now = Date.now();
+    let plan = 'yearly';
+    let days = 365;
+
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      if (redeemCode) {
+        const codeHash = sha256Hex(redeemCode);
+        const codeRow = db
+          .prepare(
+            `SELECT kind, vip_plan, vip_days, redeemed_at_ms, expires_at_ms
+             FROM redeem_codes WHERE code_hash = ?`,
+          )
+          .get(codeHash) as
+          | {
+              kind: string;
+              vip_plan: string | null;
+              vip_days: number;
+              redeemed_at_ms: number | null;
+              expires_at_ms: number | null;
+            }
+          | undefined;
+        if (
+          !codeRow ||
+          codeRow.kind !== 'vip' ||
+          codeRow.redeemed_at_ms !== null ||
+          (codeRow.expires_at_ms !== null && Number(codeRow.expires_at_ms) < now)
+        ) {
+          db.exec('ROLLBACK;');
+          throw new ApiError(402, 'payment_required', 'Invalid, expired, or already redeemed VIP code');
+        }
+        plan = codeRow.vip_plan || 'yearly';
+        days = Math.max(1, Number(codeRow.vip_days || 365));
+        db.prepare(
+          `UPDATE redeem_codes SET redeemed_by_user_id = ?, redeemed_at_ms = ? WHERE code_hash = ?`,
+        ).run(auth.userId, now, codeHash);
+      } else {
+        const orderRow = db
+          .prepare(
+            `SELECT user_id, kind, vip_plan, vip_days, status, consumed_at_ms
+             FROM payment_orders WHERE order_id = ?`,
+          )
+          .get(orderId) as
+          | {
+              user_id: number;
+              kind: string;
+              vip_plan: string | null;
+              vip_days: number;
+              status: string;
+              consumed_at_ms: number | null;
+            }
+          | undefined;
+        if (
+          !orderRow ||
+          Number(orderRow.user_id) !== auth.userId ||
+          orderRow.kind !== 'vip' ||
+          orderRow.status !== 'paid' ||
+          orderRow.consumed_at_ms !== null
+        ) {
+          db.exec('ROLLBACK;');
+          throw new ApiError(402, 'payment_required', 'Verified paid order is required to activate VIP membership');
+        }
+        plan = orderRow.vip_plan || 'yearly';
+        days = Math.max(1, Number(orderRow.vip_days || 365));
+        db.prepare(`UPDATE payment_orders SET consumed_at_ms = ? WHERE order_id = ?`).run(now, orderId);
+      }
+
+      const expiresAt = new Date(now + days * 86_400_000).toISOString();
+      db.prepare(`
+        UPDATE fabushi_profiles
+        SET is_vip = 1, vip_plan = ?, vip_expires_at = ?, updated_at_ms = ?
+        WHERE user_id = ?
+      `).run(plan, expiresAt, now, auth.userId);
+      db.exec('COMMIT;');
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK;');
+      } catch {
+        // Already rolled back
+      }
+      throw err;
+    }
 
     const refreshed = ensureFabushiProfile(db, auth);
     sendJson(ctx.res, 200, {
@@ -858,8 +1057,10 @@ export function registerFabushiMiniAppRoutes(
   router.post('/api/v1/fabushi-miniapp/follow', async (ctx) => {
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
-    const body = await readJsonBody<{ target_username?: string }>(ctx.req);
-    const targetUsername = (body.target_username ?? '').trim().replace(/^@/, '');
+    const body = await readJsonBody<{ target_username?: unknown }>(ctx.req);
+    const targetUsername = (
+      parseOptionalTrimmedString(body.target_username, 'target_username') ?? ''
+    ).replace(/^@/, '');
     if (!targetUsername) throw new ApiError(400, 'bad_request', 'target_username must not be empty');
 
     const target = db
@@ -904,7 +1105,7 @@ export function registerFabushiMiniAppRoutes(
     const auth = resolveFabushiAuth(db, ctx);
     ensureFabushiProfile(db, auth);
     const kind = ctx.query.get('kind')?.toLowerCase() === 'practice' ? 'practice' : 'global';
-    const limit = Math.max(1, Math.min(100, Number(ctx.query.get('limit') ?? 50)));
+    const limit = parseBoundedQueryInt(ctx.query.get('limit'), 50, 1, 100);
     const entries = getLeaderboard(db, auth.userId, kind, limit);
     sendJson(ctx.res, 200, {
       type: 'leaderboard_fetched',
@@ -936,13 +1137,32 @@ export function registerFabushiMiniAppRoutes(
     const auth = resolveFabushiAuth(db, ctx);
     const { profile, locked_practice } = ensureFabushiProfile(db, auth);
     const body = await readJsonBody<{
-      message?: string;
-      prompt?: string;
-      history?: Array<{ text: string; is_user: boolean }>;
+      message?: unknown;
+      prompt?: unknown;
+      history?: unknown;
     }>(ctx.req);
 
-    const question = (body.message ?? body.prompt ?? '').trim();
+    const rawQuestion = body.message !== undefined ? body.message : body.prompt;
+    const question = parseOptionalTrimmedString(rawQuestion, 'message') ?? '';
     if (!question) throw new ApiError(400, 'bad_request', 'message must not be empty');
+
+    if (body.history !== undefined && body.history !== null && !Array.isArray(body.history)) {
+      throw new ApiError(400, 'bad_request', 'history must be an array');
+    }
+    const safeHistory: Array<{ text: string; is_user: boolean }> = [];
+    if (Array.isArray(body.history)) {
+      for (const item of body.history) {
+        if (item && typeof item === 'object' && !Array.isArray(item)) {
+          const rec = item as Record<string, unknown>;
+          if (typeof rec.text === 'string' && rec.text.trim()) {
+            safeHistory.push({
+              text: rec.text,
+              is_user: Boolean(rec.is_user),
+            });
+          }
+        }
+      }
+    }
 
     const systemPrompt = [
       '你现在是「全球法布施 (@fabushi_bot)」小程序内的慈悲修行助手。请以温和、恭敬、简明、正念的语言回答用户的佛法修行、诵经、禅修与全球法布施问题。切勿编造虚假的实时数据。',
@@ -953,7 +1173,7 @@ export function registerFabushiMiniAppRoutes(
 
     const llmMessages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
-      ...(body.history ?? []).slice(-6).map((m) => ({
+      ...safeHistory.slice(-6).map((m) => ({
         role: m.is_user ? 'user' : 'assistant',
         content: m.text,
       })),
@@ -969,14 +1189,24 @@ export function registerFabushiMiniAppRoutes(
       return;
     }
 
-    const fallbackReply =
-      profile.locale === 'en'
-        ? `No external AI model is configured yet. Open Settings → Magpie LLM Gateway to connect an OpenAI, Anthropic, Gemini, or DeepSeek API key for live Dharma Q&A.`
-        : `当前尚未配置外部 AI 模型密钥。请前往「设置 → Magpie 模型网关」配置您的 OpenAI / Anthropic / Gemini / DeepSeek 或兼容接口密钥，即可启用实时修行问答。`;
+    if (completion.unconfigured) {
+      throw new ApiError(
+        503,
+        'provider_not_configured',
+        profile.locale === 'en'
+          ? 'No AI model provider is configured. Configure one in Settings -> Magpie LLM Gateway.'
+          : '当前尚未配置可用的 AI 模型提供商。请前往「设置 → Magpie 模型网关」配置 API Key。',
+        {
+          needs_provider_selection: true,
+          action: 'hermes:open_ai_providers',
+        },
+      );
+    }
 
-    sendJson(ctx.res, 200, {
-      type: 'ai_chat_reply',
-      reply: fallbackReply,
-    });
+    throw new ApiError(
+      502,
+      'upstream_unreachable',
+      completion.error || 'Upstream AI provider failed to respond',
+    );
   });
 }
