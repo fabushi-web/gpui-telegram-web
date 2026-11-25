@@ -1,13 +1,28 @@
 import * as fs from 'node:fs';
-import { defineConfig } from '@playwright/test';
-import { getBaseUrl } from './helpers/server';
+import * as path from 'node:path';
+import { chromium, defineConfig } from '@playwright/test';
+import {
+  CHROMIUM_LAUNCH_ARGS,
+  getBaseUrl,
+  resolveChromiumExecutablePath,
+} from './helpers/server';
 
-const E2E_ROOT = '/home/antigravity/gpui-telegram-web/e2e';
-const E2E_DATA_DIR = `${E2E_ROOT}/.e2e-data`;
-const E2E_TMP_DIR = `${E2E_DATA_DIR}/tmp`;
+const E2E_ROOT = path.resolve(__dirname);
+const REPO_ROOT = path.resolve(E2E_ROOT, '..');
+const E2E_DATA_DIR = path.join(E2E_ROOT, '.e2e-data');
+const requestedTmpDir = process.env.E2E_TMP_DIR?.trim();
+const resolvedRequested = requestedTmpDir ? path.resolve(requestedTmpDir) : '';
+const E2E_TMP_DIR =
+  resolvedRequested && resolvedRequested.startsWith(E2E_DATA_DIR + path.sep)
+    ? resolvedRequested
+    : path.join(E2E_DATA_DIR, 'tmp');
 
-// Redirect temporary browser/runner artifacts strictly into e2e/.e2e-data/tmp (never /tmp).
-fs.mkdirSync(E2E_TMP_DIR, { recursive: true });
+const isListMode = process.argv.includes('--list');
+
+// Redirect temporary browser/runner artifacts strictly into e2e/.e2e-data (never /tmp).
+if (!isListMode) {
+  fs.mkdirSync(E2E_TMP_DIR, { recursive: true });
+}
 process.env.TMPDIR = E2E_TMP_DIR;
 process.env.TMP = E2E_TMP_DIR;
 process.env.TEMP = E2E_TMP_DIR;
@@ -15,13 +30,40 @@ process.env.TEMP = E2E_TMP_DIR;
 const rawEnvBaseUrl = process.env.E2E_BASE_URL?.trim();
 const baseURL = getBaseUrl();
 
-const workers = process.env.PLAYWRIGHT_WORKERS
+const parsedWorkers = process.env.PLAYWRIGHT_WORKERS
   ? Number(process.env.PLAYWRIGHT_WORKERS)
-  : process.env.CI
-    ? 1
-    : 2;
+  : 1;
+const workers =
+  Number.isInteger(parsedWorkers) && parsedWorkers >= 1 ? parsedWorkers : 1;
 
-const isListMode = process.argv.includes('--list');
+const parsedExpectTimeout = process.env.E2E_EXPECT_TIMEOUT_MS
+  ? Number(process.env.E2E_EXPECT_TIMEOUT_MS)
+  : 8_000;
+const expectTimeout =
+  Number.isFinite(parsedExpectTimeout) && parsedExpectTimeout >= 500
+    ? parsedExpectTimeout
+    : 8_000;
+
+let bundledChromiumPath: string | undefined;
+try {
+  bundledChromiumPath = chromium.executablePath();
+} catch {
+  bundledChromiumPath = undefined;
+}
+const resolvedExecutablePath = resolveChromiumExecutablePath(bundledChromiumPath);
+
+const webServerEnv = Object.fromEntries(
+  Object.entries({
+    ...process.env,
+    PORT: '4173',
+    HOST: '127.0.0.1',
+    ENABLE_TEST_RESET: '1',
+    DATA_DIR: E2E_DATA_DIR,
+    TMPDIR: E2E_TMP_DIR,
+    TMP: E2E_TMP_DIR,
+    TEMP: E2E_TMP_DIR,
+  }).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+);
 
 export default defineConfig({
   testDir: '.',
@@ -32,14 +74,14 @@ export default defineConfig({
     'tier4/**/*.spec.ts',
     'tier5/**/*.spec.ts',
   ],
-  outputDir: '/home/antigravity/gpui-telegram-web/e2e/test-results',
+  outputDir: path.join(E2E_ROOT, 'test-results'),
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: 0,
   workers,
   timeout: 30_000,
   expect: {
-    timeout: 8_000,
+    timeout: expectTimeout,
   },
   reporter: isListMode
     ? [['list']]
@@ -48,7 +90,7 @@ export default defineConfig({
         [
           'html',
           {
-            outputFolder: '/home/antigravity/gpui-telegram-web/e2e/playwright-report',
+            outputFolder: path.join(E2E_ROOT, 'playwright-report'),
             open: 'never',
           },
         ],
@@ -64,12 +106,8 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'off',
     launchOptions: {
-      executablePath: '/usr/lib/chromium/chromium',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--use-fake-ui-for-media-stream',
-      ],
+      ...(resolvedExecutablePath ? { executablePath: resolvedExecutablePath } : {}),
+      args: [...CHROMIUM_LAUNCH_ARGS],
     },
   },
   projects: [
@@ -83,8 +121,9 @@ export default defineConfig({
   webServer: rawEnvBaseUrl
     ? undefined
     : {
-        command:
-          'PORT=4173 HOST=127.0.0.1 ENABLE_TEST_RESET=1 DATA_DIR=/home/antigravity/gpui-telegram-web/e2e/.e2e-data npm --prefix /home/antigravity/gpui-telegram-web start',
+        command: 'npm start',
+        cwd: REPO_ROOT,
+        env: webServerEnv,
         url: 'http://127.0.0.1:4173/api/v1/health',
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,

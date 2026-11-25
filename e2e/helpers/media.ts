@@ -41,14 +41,14 @@ function buildPngChunk(type: string, data: Buffer): Buffer {
 
 /**
  * Generates a valid CRC32-signed 8-bit RGBA PNG Buffer purely in memory via `node:zlib`.
- * Defaults to 64x64 Telegram Blue (#3390EC: r=51, g=144, b=236, a=255).
+ * Defaults to 64x64 Apple Blue (#0A84FF: r=10, g=132, b=255, a=255).
  */
 export function createPngBuffer(options: PngBufferOptions = {}): Buffer {
   const width = Math.max(1, Math.min(4096, Math.floor(options.width ?? 64)));
   const height = Math.max(1, Math.min(4096, Math.floor(options.height ?? 64)));
-  const baseR = (options.r ?? 51) & 0xff;
-  const baseG = (options.g ?? 144) & 0xff;
-  const baseB = (options.b ?? 236) & 0xff;
+  const baseR = (options.r ?? 10) & 0xff;
+  const baseG = (options.g ?? 132) & 0xff;
+  const baseB = (options.b ?? 255) & 0xff;
   const baseA = (options.a ?? 255) & 0xff;
   const pattern = options.pattern ?? 'solid';
 
@@ -66,12 +66,14 @@ export function createPngBuffer(options: PngBufferOptions = {}): Buffer {
 
   for (let y = 0; y < height; y++) {
     const rowOffset = y * rowStride;
-    rawScanlines[rowOffset] = 0; // Filter type 0 (None)
+    rawScanlines[rowOffset] = 0;
     for (let x = 0; x < width; x++) {
       const px = rowOffset + 1 + x * 4;
       if (pattern === 'gradient') {
-        rawScanlines[px] = (baseR + Math.floor((x / Math.max(1, width - 1)) * 40)) & 0xff;
-        rawScanlines[px + 1] = (baseG + Math.floor((y / Math.max(1, height - 1)) * 40)) & 0xff;
+        rawScanlines[px] =
+          (baseR + Math.floor((x / Math.max(1, width - 1)) * 40)) & 0xff;
+        rawScanlines[px + 1] =
+          (baseG + Math.floor((y / Math.max(1, height - 1)) * 40)) & 0xff;
         rawScanlines[px + 2] = baseB;
         rawScanlines[px + 3] = baseA;
       } else {
@@ -113,8 +115,8 @@ export function createWavBuffer(options: WavBufferOptions = {}): Buffer {
   wav.writeUInt32LE(36 + dataByteLength, 4);
   wav.write('WAVE', 8, 4, 'ascii');
   wav.write('fmt ', 12, 4, 'ascii');
-  wav.writeUInt32LE(16, 16); // PCM fmt chunk length
-  wav.writeUInt16LE(1, 20); // AudioFormat = 1 (PCM)
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
   wav.writeUInt16LE(numChannels, 22);
   wav.writeUInt32LE(sampleRate, 24);
   wav.writeUInt32LE(sampleRate * numChannels * bytesPerSample, 28);
@@ -153,7 +155,7 @@ function escapePdfAsciiTitle(input: string): string {
  * with exact byte-offset 20-byte `xref` table entries.
  */
 export function createPdfBuffer(
-  title = 'GPUI Telegram E2E Document',
+  title = 'Fabushi Web E2E Document',
 ): Buffer {
   const safeTitle = escapePdfAsciiTitle(title);
   const streamContent = `BT\n/F1 16 Tf\n50 740 Td\n(${safeTitle}) Tj\nET\n`;
@@ -200,14 +202,14 @@ export function createPdfBuffer(
  * Generates a UTF-8 plain-text Buffer purely in memory.
  */
 export function createTextBuffer(
-  content = 'GPUI Telegram Web E2E plain-text fixture\n你好世界 — CJK UTF-8 line\n',
+  content = 'Fabushi Web E2E plain-text fixture\n你好世界 — CJK UTF-8 line\n',
 ): Buffer {
   return Buffer.from(content, 'utf8');
 }
 
 /**
  * Generates deterministic non-image header bytes (neither PNG, JPEG, GIF, nor WebP)
- * for negative media-upload tests (Tier 2 F11).
+ * for negative media-upload tests.
  */
 export function createCorruptImageBuffer(): Buffer {
   return Buffer.from([

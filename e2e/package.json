@@ -1,8 +1,8 @@
 {
-  "name": "gpui-telegram-web-e2e",
-  "version": "1.0.0",
+  "name": "fabushi-web-e2e",
+  "version": "1.6.11",
   "private": true,
-  "description": "Opaque-box Playwright E2E verification suite for gpui-telegram-web",
+  "description": "Opaque-box Playwright E2E verification suite for Fabushi Web v1.6.11",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
@@ -11,6 +11,7 @@
     "test:tier2": "playwright test tier2",
     "test:tier3": "playwright test tier3",
     "test:tier4": "playwright test tier4",
+    "test:tier5": "playwright test tier5",
     "verify:fail-closed": "node scripts/verify-fail-closed.mjs"
   },
   "devDependencies": {

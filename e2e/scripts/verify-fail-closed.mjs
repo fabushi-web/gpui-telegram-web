@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import { registerHooks } from 'node:module';
@@ -12,17 +13,20 @@ const __filename = fileURLToPath(import.meta.url);
 const SCRIPTS_DIR = path.dirname(__filename);
 const E2E_ROOT = path.resolve(SCRIPTS_DIR, '..');
 const E2E_DATA_DIR = path.join(E2E_ROOT, '.e2e-data');
-const E2E_TMP_DIR = path.join(E2E_DATA_DIR, 'tmp');
-const PROBE_DIR = path.join(E2E_DATA_DIR, 'probe');
+// Keep per-run unique directory short (p<4hex>) so both Google Chrome (101B) and Playwright
+// Chromium (105B) AF_UNIX SingletonSocket paths stay strictly under Linux's 107-byte
+// sockaddr_un.sun_path limit while remaining concurrency-safe.
+const RUN_ID = crypto.randomBytes(2).toString('hex');
+const PROBE_DIR = path.join(E2E_DATA_DIR, `p${RUN_ID}`);
+const E2E_TMP_DIR = PROBE_DIR;
 
-// Ensure zero /tmp usage across Node, npx, Playwright, and Chromium.
+// Redirect temporary browser/runner artifacts strictly into per-run isolated directory inside e2e/.e2e-data.
 fs.mkdirSync(E2E_TMP_DIR, { recursive: true });
+process.env.E2E_TMP_DIR = E2E_TMP_DIR;
 process.env.TMPDIR = E2E_TMP_DIR;
 process.env.TMP = E2E_TMP_DIR;
 process.env.TEMP = E2E_TMP_DIR;
 
-// Synchronous Node 24 module hooks so direct imports of ../helpers/*.ts work
-// cleanly regardless of extensionless internal relative imports or type-only imports.
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (
@@ -75,7 +79,7 @@ const DUMMY_HTML = `<!doctype html>
     <title>Dummy Placeholder Server</title>
   </head>
   <body>
-    <main id="dummy-placeholder">Not gpui-telegram-web</main>
+    <main id="dummy-placeholder">Not fabushi-web</main>
   </body>
 </html>`;
 
@@ -85,10 +89,10 @@ const PURPLE_DARK_HTML = `<!doctype html>
     <meta charset="utf-8" />
     <title>Purple Dark Anti-Regression Probe</title>
     <style>
-      html, body { margin: 0; background-color: #17212B; color: #F5F5F5; }
-      #app-shell { display: flex; min-height: 100vh; background-color: #17212B; }
-      #left-column { width: 320px; background-color: #17212B; border-right: 1px solid #0E1621; }
-      #middle-column { flex: 1; background-color: #17212B; padding: 16px; }
+      html, body { margin: 0; background-color: #121212; color: #F5F5F5; }
+      #app-shell { display: flex; min-height: 100vh; background-color: #121212; }
+      #left-column { width: 288px; background-color: #0E0E0E; border-right: 1px solid #2C2C2C; }
+      #middle-column { flex: 1; background-color: #161616; padding: 16px; }
       [data-testid="message-bubble"] {
         background-color: #8774E1;
         color: #FFFFFF;
@@ -118,22 +122,23 @@ const VALID_DARK_HTML = `<!doctype html>
 <html lang="en" data-theme="night">
   <head>
     <meta charset="utf-8" />
-    <title>Valid Telegram Blue Dark Probe</title>
+    <title>Valid Apple Dark Probe — Fabushi Web v1.6.11</title>
     <style>
-      html, body { margin: 0; background-color: #17212B; color: #F5F5F5; }
-      #app-shell { display: flex; min-height: 100vh; background-color: #17212B; }
-      #left-column { width: 320px; background-color: #17212B; border-right: 1px solid #0E1621; }
-      #middle-column { flex: 1; background-color: #0E1621; padding: 16px; }
+      html, body { margin: 0; background-color: #121212; color: #F5F5F5; }
+      #app-shell { display: flex; min-height: 100vh; background-color: #121212; }
+      #left-column { width: 288px; background-color: #0E0E0E; border-right: 1px solid #2C2C2C; }
+      #middle-column { flex: 1; background-color: #161616; padding: 16px; }
+      #cmp-input-wrap { background-color: #1F1F1F; border: 1px solid #2C2C2C; border-radius: 22px; padding: 8px 14px; }
       [data-testid="message-bubble"] {
-        background-color: #2B5278;
-        color: #F5F5F5;
-        border: 1px solid #2B5278;
+        background-image: linear-gradient(180deg, #1884FC 0%, #116DD2 100%);
+        color: #FFFFFF;
         padding: 10px 14px;
+        border-radius: 18px;
       }
       button {
-        background-color: #3390EC;
+        background-color: #0A84FF;
         color: #FFFFFF;
-        border: 1px solid #3390EC;
+        border: 1px solid #0A84FF;
         padding: 8px 16px;
       }
     </style>
@@ -142,32 +147,415 @@ const VALID_DARK_HTML = `<!doctype html>
     <div id="app-shell">
       <aside id="left-column">Left</aside>
       <main id="middle-column">
-        <div data-testid="message-bubble">Valid Telegram Blue outgoing bubble (#2B5278)</div>
-        <button id="btn-blue-cta" type="button">Telegram Blue Action (#3390EC)</button>
+        <div data-testid="message-bubble">Valid Apple Dark gradient bubble (#1884FC -> #116DD2)</div>
+        <div id="cmp-input-wrap"><button id="btn-blue-cta" type="button">Apple Blue Action (#0A84FF)</button></div>
       </main>
     </div>
   </body>
 </html>`;
 
-function collectSpecFiles(dirPath) {
+function collectFiles(dirPath, suffix) {
   if (!fs.existsSync(dirPath)) return [];
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
   const results = [];
   for (const entry of entries) {
     const full = path.join(dirPath, entry.name);
     if (entry.isDirectory()) {
-      results.push(...collectSpecFiles(full));
-    } else if (entry.isFile() && entry.name.endsWith('.spec.ts')) {
+      results.push(...collectFiles(full, suffix));
+    } else if (entry.isFile() && entry.name.endsWith(suffix)) {
       results.push(full);
     }
   }
   return results.sort();
 }
 
+function collectSpecFiles(dirPath) {
+  return collectFiles(dirPath, '.spec.ts');
+}
+
+function getLineCol(sf, node) {
+  const pos = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+  return `${pos.line + 1}:${pos.character + 1}`;
+}
+
+function subtreeHasAssertionCall(node, sf) {
+  let found = false;
+  const visit = (n) => {
+    if (found) return;
+    if (ts.isCallExpression(n)) {
+      const expr = n.expression;
+      const name = ts.isIdentifier(expr)
+        ? expr.text
+        : ts.isPropertyAccessExpression(expr)
+          ? expr.expression.getText(sf)
+          : '';
+      if (name === 'expect' || name === 'assertNoPurpleOnDark' || name.startsWith('assert')) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
+}
+
+function subtreeHasUiGuardCall(node) {
+  let found = false;
+  const visit = (n) => {
+    if (found) return;
+    if (ts.isPropertyAccessExpression(n)) {
+      if (n.name.text === 'isVisible' || n.name.text === 'isEnabled') {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
+}
+
+function isSwallowingFallbackExpr(node) {
+  let expr = node;
+  while (ts.isParenthesizedExpression(expr)) {
+    expr = expr.expression;
+  }
+  if (expr.kind === ts.SyntaxKind.NullKeyword || expr.kind === ts.SyntaxKind.FalseKeyword) {
+    return true;
+  }
+  if (ts.isIdentifier(expr) && expr.text === 'undefined') {
+    return true;
+  }
+  if (ts.isStringLiteral(expr) && expr.text === '') {
+    return true;
+  }
+  if (ts.isObjectLiteralExpression(expr) && expr.properties.length === 0) {
+    return true;
+  }
+  if (ts.isArrayLiteralExpression(expr) && expr.elements.length === 0) {
+    return true;
+  }
+  return false;
+}
+
+function isSwallowingCatchCallback(arg) {
+  if (!ts.isArrowFunction(arg) && !ts.isFunctionExpression(arg)) return false;
+  if (!ts.isBlock(arg.body)) {
+    return isSwallowingFallbackExpr(arg.body);
+  }
+  if (arg.body.statements.length === 0) return true;
+  if (arg.body.statements.length === 1) {
+    const stmt = arg.body.statements[0];
+    if (ts.isReturnStatement(stmt)) {
+      return !stmt.expression || isSwallowingFallbackExpr(stmt.expression);
+    }
+  }
+  return false;
+}
+
+function isDefaultZeroishRight(node) {
+  let expr = node;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  if (ts.isNumericLiteral(expr) && expr.text === '0') return 'zero';
+  if (expr.kind === ts.SyntaxKind.FalseKeyword) return 'false';
+  if (ts.isArrayLiteralExpression(expr) && expr.elements.length === 0) return 'emptyArray';
+  if (ts.isStringLiteral(expr) && expr.text === '') return 'emptyString';
+  return null;
+}
+
+function unwrapParens(node) {
+  let cur = node;
+  while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+  return cur;
+}
+
+/**
+ * Step 1/5: Fast TypeScript AST static anti-vacuity & opaque-box integrity gate
+ * covering ALL spec files under e2e/tier1..tier4 and ALL helper files under e2e/helpers.
+ */
+function verifyStaticSpecIntegrity() {
+  const violations = [];
+  const forbiddenTestProps = new Set(['skip', 'fixme', 'todo', 'only', 'fail']);
+  const forbiddenImportRoots = new Set(['packages', 'apps']);
+
+  const helperFiles = collectFiles(path.join(E2E_ROOT, 'helpers'), '.ts');
+  const tierDirs = ['tier1', 'tier2', 'tier3', 'tier4'];
+  const tierCounts = { tier1: 0, tier2: 0, tier3: 0, tier4: 0 };
+  const allSpecFiles = [];
+
+  for (const tier of tierDirs) {
+    const specs = collectSpecFiles(path.join(E2E_ROOT, tier));
+    for (const filePath of specs) {
+      allSpecFiles.push({ tier, filePath });
+    }
+  }
+
+  const checkOpaqueImports = (sf, filePath) => {
+    const rel = path.relative(E2E_ROOT, filePath);
+    const validateSpecifier = (specText, node) => {
+      if (!specText.startsWith('.')) return;
+      const resolved = path.resolve(path.dirname(filePath), specText);
+      if (resolved.startsWith(E2E_ROOT + path.sep) || resolved === E2E_ROOT) return;
+      const segments = specText.split('/');
+      if (segments.some((seg) => forbiddenImportRoots.has(seg))) {
+        violations.push(`${rel}:${getLineCol(sf, node)} forbidden non-opaque import "${specText}"`);
+      }
+    };
+
+    const visit = (node) => {
+      if (
+        (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteral(node.moduleSpecifier)
+      ) {
+        validateSpecifier(node.moduleSpecifier.text, node);
+      } else if (
+        ts.isCallExpression(node) &&
+        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        node.arguments.length >= 1 &&
+        ts.isStringLiteral(node.arguments[0])
+      ) {
+        validateSpecifier(node.arguments[0].text, node);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  };
+
+  for (const helperPath of helperFiles) {
+    const source = fs.readFileSync(helperPath, 'utf8');
+    const sf = ts.createSourceFile(helperPath, source, ts.ScriptTarget.ES2023, true);
+    checkOpaqueImports(sf, helperPath);
+  }
+
+  for (const { tier, filePath } of allSpecFiles) {
+    const rel = path.relative(E2E_ROOT, filePath);
+    const source = fs.readFileSync(filePath, 'utf8');
+    const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.ES2023, true);
+    checkOpaqueImports(sf, filePath);
+
+    let fileTestCount = 0;
+
+    const inspectTestBody = (bodyNode) => {
+      if (!subtreeHasAssertionCall(bodyNode, sf)) {
+        violations.push(`${rel}:${getLineCol(sf, bodyNode)} test body has zero assertions`);
+      }
+
+      const walk = (node, inFinally, inBrowserEval) => {
+        // Detect browser evaluate callbacks (DOM logic inside browser does not hold Playwright assertions)
+        let nextInBrowserEval = inBrowserEval;
+        if (
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression) &&
+          (node.expression.name.text === 'evaluate' ||
+            node.expression.name.text === 'evaluateHandle' ||
+            node.expression.name.text === 'addInitScript')
+        ) {
+          nextInBrowserEval = true;
+        }
+
+        // 1. Forbidden modifiers & tautologies
+        if (ts.isPropertyAccessExpression(node)) {
+          const baseName = ts.isIdentifier(node.expression) ? node.expression.text : '';
+          const propName = node.name.text;
+          if ((baseName === 'test' || baseName === 'describe') && forbiddenTestProps.has(propName)) {
+            violations.push(
+              `${rel}:${getLineCol(sf, node)} forbidden test modifier "${baseName}.${propName}"`,
+            );
+          }
+          if (baseName === 'expect' && propName === 'soft') {
+            violations.push(`${rel}:${getLineCol(sf, node)} forbidden soft assertion modifier`);
+          }
+        }
+
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'expect') {
+          if (node.arguments.length === 1) {
+            const arg = unwrapParens(node.arguments[0]);
+            if (
+              arg.kind === ts.SyntaxKind.TrueKeyword ||
+              arg.kind === ts.SyntaxKind.FalseKeyword ||
+              (ts.isNumericLiteral(arg) && arg.text === '1')
+            ) {
+              violations.push(`${rel}:${getLineCol(sf, node)} forbidden tautological literal assertion`);
+            }
+          }
+
+          // Check mixed 2xx/4xx or 500 status arrays in expect([...]).toContain(...)
+          if (
+            node.arguments.length >= 1 &&
+            ts.isArrayLiteralExpression(unwrapParens(node.arguments[0])) &&
+            node.parent &&
+            ts.isPropertyAccessExpression(node.parent) &&
+            node.parent.name.text === 'toContain'
+          ) {
+            const arr = unwrapParens(node.arguments[0]);
+            const nums = [];
+            for (const el of arr.elements) {
+              if (ts.isNumericLiteral(el)) nums.push(Number(el.text));
+            }
+            if (nums.length > 0 && nums.length === arr.elements.length) {
+              if (nums.includes(500)) {
+                violations.push(
+                  `${rel}:${getLineCol(sf, node)} status array allows HTTP 500 (${JSON.stringify(nums)})`,
+                );
+              }
+              const has2xx = nums.some((n) => n >= 200 && n < 300);
+              const has4xxOr5xx = nums.some((n) => n >= 400 && n < 600);
+              if (has2xx && has4xxOr5xx) {
+                violations.push(
+                  `${rel}:${getLineCol(sf, node)} status array mixes 2xx with 4xx/5xx (${JSON.stringify(nums)})`,
+                );
+              }
+            }
+          }
+
+          // Check nullish-coalescing defaults masking missing fields directly inside expect(...)
+          if (node.arguments.length >= 1 && node.parent && ts.isPropertyAccessExpression(node.parent)) {
+            const arg = unwrapParens(node.arguments[0]);
+            if (
+              ts.isBinaryExpression(arg) &&
+              arg.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+            ) {
+              const rhsKind = isDefaultZeroishRight(arg.right);
+              const matcherName = node.parent.name.text;
+              const matcherCall = node.parent.parent;
+              if (rhsKind && ts.isCallExpression(matcherCall)) {
+                const firstMatcherArg = matcherCall.arguments[0]
+                  ? unwrapParens(matcherCall.arguments[0])
+                  : null;
+                const matchesZero =
+                  rhsKind === 'zero' &&
+                  matcherName === 'toBe' &&
+                  firstMatcherArg &&
+                  ts.isNumericLiteral(firstMatcherArg) &&
+                  firstMatcherArg.text === '0';
+                const matchesFalse =
+                  rhsKind === 'false' &&
+                  matcherName === 'toBe' &&
+                  firstMatcherArg &&
+                  firstMatcherArg.kind === ts.SyntaxKind.FalseKeyword;
+                const matchesEmptyArr =
+                  rhsKind === 'emptyArray' &&
+                  matcherName === 'toHaveLength' &&
+                  firstMatcherArg &&
+                  ts.isNumericLiteral(firstMatcherArg) &&
+                  firstMatcherArg.text === '0';
+                const matchesEmptyStr =
+                  rhsKind === 'emptyString' &&
+                  matcherName === 'toBe' &&
+                  firstMatcherArg &&
+                  ts.isStringLiteral(firstMatcherArg) &&
+                  firstMatcherArg.text === '';
+                if (matchesZero || matchesFalse || matchesEmptyArr || matchesEmptyStr) {
+                  violations.push(
+                    `${rel}:${getLineCol(sf, node)} nullish default masks missing field in expect(...).${matcherName}(...)`,
+                  );
+                }
+              }
+            }
+          }
+        }
+
+        // 2. Unbranched `if (...)` guarding assertions or UI visibility checks inside test bodies
+        if (!inFinally && !inBrowserEval && ts.isIfStatement(node) && !node.elseStatement) {
+          if (subtreeHasAssertionCall(node.thenStatement, sf)) {
+            violations.push(
+              `${rel}:${getLineCol(sf, node)} unbranched if-statement guards expect/assert call without else branch`,
+            );
+          } else if (subtreeHasUiGuardCall(node.expression)) {
+            violations.push(
+              `${rel}:${getLineCol(sf, node)} unbranched if-statement guards UI isVisible/isEnabled branch`,
+            );
+          }
+        }
+
+        // 3. Assertion/error-swallowing .catch(...) outside finally blocks & browser evals
+        if (
+          !inFinally &&
+          !inBrowserEval &&
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === 'catch' &&
+          node.arguments.length >= 1 &&
+          isSwallowingCatchCallback(node.arguments[0])
+        ) {
+          violations.push(
+            `${rel}:${getLineCol(sf, node)} error-swallowing .catch() fallback inside test body`,
+          );
+        }
+
+        if (ts.isTryStatement(node)) {
+          walk(node.tryBlock, inFinally, nextInBrowserEval);
+          if (node.catchClause) walk(node.catchClause, inFinally, nextInBrowserEval);
+          if (node.finallyBlock) walk(node.finallyBlock, true, nextInBrowserEval);
+          return;
+        }
+
+        ts.forEachChild(node, (child) => walk(child, inFinally, nextInBrowserEval));
+      };
+
+      walk(bodyNode, false, false);
+    };
+
+    const topVisit = (node) => {
+      if (ts.isPropertyAccessExpression(node)) {
+        const baseName = ts.isIdentifier(node.expression) ? node.expression.text : '';
+        const propName = node.name.text;
+        if ((baseName === 'test' || baseName === 'describe') && forbiddenTestProps.has(propName)) {
+          violations.push(
+            `${rel}:${getLineCol(sf, node)} forbidden test modifier "${baseName}.${propName}"`,
+          );
+        }
+      }
+
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'test' &&
+        node.arguments.length >= 2
+      ) {
+        const lastArg = node.arguments[node.arguments.length - 1];
+        if (ts.isArrowFunction(lastArg) || ts.isFunctionExpression(lastArg)) {
+          fileTestCount += 1;
+          tierCounts[tier] += 1;
+          inspectTestBody(lastArg.body);
+          return;
+        }
+      }
+      ts.forEachChild(node, topVisit);
+    };
+
+    topVisit(sf);
+
+    if ((tier === 'tier1' || tier === 'tier2') && fileTestCount < 5) {
+      violations.push(`${rel}: expected >= 5 tests per ${tier} file, found ${fileTestCount}`);
+    }
+  }
+
+  assert.ok(tierCounts.tier1 >= 80, `Expected tier1 >= 80 tests, got ${tierCounts.tier1}`);
+  assert.ok(tierCounts.tier2 >= 80, `Expected tier2 >= 80 tests, got ${tierCounts.tier2}`);
+  assert.ok(tierCounts.tier3 >= 16, `Expected tier3 >= 16 tests, got ${tierCounts.tier3}`);
+  assert.ok(tierCounts.tier4 >= 8, `Expected tier4 >= 8 tests, got ${tierCounts.tier4}`);
+
+  if (violations.length > 0) {
+    throw new Error(
+      `Static AST anti-vacuity & opaque-box gate found ${violations.length} violation(s):\n${violations
+        .slice(0, 40)
+        .map((v) => `  - ${v}`)
+        .join('\n')}`,
+    );
+  }
+
+  const totalTests = tierCounts.tier1 + tierCounts.tier2 + tierCounts.tier3 + tierCounts.tier4;
+  console.log(
+    `[verify:fail-closed] Step 1/5 PASS — AST anti-vacuity & opaque-box gate verified ${totalTests} tests across ${allSpecFiles.length} spec files (tier1=${tierCounts.tier1} tier2=${tierCounts.tier2} tier3=${tierCounts.tier3} tier4=${tierCounts.tier4}) + ${helperFiles.length} helper files with 0 violations.`,
+  );
+}
+
 async function verifyMediaHelpers(media) {
-  // 1. PNG
   assert.equal(typeof media.createPngBuffer, 'function', 'media.createPngBuffer must be exported');
-  const png = media.createPngBuffer({ width: 16, height: 16, r: 51, g: 144, b: 236 });
+  const png = media.createPngBuffer({ width: 16, height: 16, r: 10, g: 132, b: 255 });
   assert.ok(Buffer.isBuffer(png), 'createPngBuffer must return a Buffer');
   assert.ok(png.length > 64, `PNG buffer too small (${png.length} bytes)`);
   assert.deepEqual(
@@ -179,7 +567,6 @@ async function verifyMediaHelpers(media) {
   assert.ok(png.includes(Buffer.from('IDAT')), 'PNG missing IDAT chunk');
   assert.ok(png.includes(Buffer.from('IEND')), 'PNG missing IEND chunk');
 
-  // 2. WAV
   assert.equal(typeof media.createWavBuffer, 'function', 'media.createWavBuffer must be exported');
   const wav = media.createWavBuffer({ durationMs: 250, frequencyHz: 440, sampleRate: 16000 });
   assert.ok(Buffer.isBuffer(wav), 'createWavBuffer must return a Buffer');
@@ -189,7 +576,6 @@ async function verifyMediaHelpers(media) {
   assert.equal(wav.subarray(12, 16).toString('ascii'), 'fmt ', 'WAV missing fmt chunk');
   assert.ok(wav.includes(Buffer.from('data')), 'WAV missing data chunk');
 
-  // 3. PDF
   assert.equal(typeof media.createPdfBuffer, 'function', 'media.createPdfBuffer must be exported');
   const pdf = media.createPdfBuffer('Fail-Closed Verification Doc');
   assert.ok(Buffer.isBuffer(pdf), 'createPdfBuffer must return a Buffer');
@@ -197,17 +583,12 @@ async function verifyMediaHelpers(media) {
   assert.equal(pdf.subarray(0, 7).toString('ascii'), '%PDF-1.', 'PDF missing %PDF-1.x header');
   assert.ok(pdf.toString('ascii').trimEnd().endsWith('%%EOF'), 'PDF missing %%EOF trailer');
 
-  // 4. Text
   assert.equal(typeof media.createTextBuffer, 'function', 'media.createTextBuffer must be exported');
-  const txt = media.createTextBuffer('gpui-telegram-web e2e text payload');
+  const txt = media.createTextBuffer('fabushi-web e2e text payload');
   assert.ok(Buffer.isBuffer(txt), 'createTextBuffer must return a Buffer');
-  assert.ok(txt.length >= 30, `Text buffer too small (${txt.length} bytes)`);
-  assert.ok(
-    txt.toString('utf8').includes('gpui-telegram-web'),
-    'Text buffer content mismatch',
-  );
+  assert.ok(txt.length >= 24, `Text buffer too small (${txt.length} bytes)`);
+  assert.ok(txt.toString('utf8').includes('fabushi-web'), 'Text buffer content mismatch');
 
-  // 5. Corrupt Image
   assert.equal(
     typeof media.createCorruptImageBuffer,
     'function',
@@ -226,7 +607,45 @@ async function verifyMediaHelpers(media) {
   const notGif = corrupt.subarray(0, 4).toString('ascii') !== 'GIF8';
   assert.ok(notPng && notJpeg && notGif, 'Corrupt image buffer must not have valid image magic bytes');
 
-  console.log('[verify:fail-closed] Step 1/4 PASS — media.ts magic bytes & lengths verified.');
+  console.log('[verify:fail-closed] Step 2/5 PASS — helper contracts & media.ts magic bytes verified.');
+}
+
+function runCommandAsync(command, args, options) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, options.timeout ?? 45_000);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      resolve({
+        status: timedOut ? 124 : (code ?? 1),
+        stdout,
+        stderr,
+        timedOut,
+      });
+    });
+  });
 }
 
 function startDummyServer() {
@@ -245,7 +664,13 @@ function startDummyServer() {
       return;
     }
 
-    if (reqUrl.pathname.startsWith('/api/')) {
+    if (
+      reqUrl.pathname.startsWith('/api/') ||
+      reqUrl.pathname.startsWith('/oauth/') ||
+      reqUrl.pathname.startsWith('/.well-known/') ||
+      reqUrl.pathname.startsWith('/v1/') ||
+      reqUrl.pathname === '/mcp'
+    ) {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, error: 'DUMMY_ENDPOINT' }));
       return;
@@ -263,7 +688,6 @@ function startDummyServer() {
       return;
     }
 
-    // Both '/' and '/dummy' (and any SPA fallback path) return dummy HTML lacking #auth-screen / #app-shell.
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(DUMMY_HTML);
   });
@@ -282,61 +706,117 @@ function startDummyServer() {
 }
 
 async function main() {
-  const media = await import('../helpers/media.ts');
-  const ui = await import('../helpers/ui.ts');
-  const selectors = await import('../helpers/selectors.ts');
-  const serverHelpers = await import('../helpers/server.ts');
-
-  assert.equal(
-    typeof ui.assertNoPurpleOnDark,
-    'function',
-    'helpers/ui.ts must export assertNoPurpleOnDark',
-  );
-  assert.equal(typeof selectors.DOM?.appShell, 'string', 'helpers/selectors.ts must export DOM');
-  assert.equal(
-    typeof serverHelpers.getBaseUrl,
-    'function',
-    'helpers/server.ts must export getBaseUrl',
-  );
-
-  // Verify getBaseUrl rejects 0.0.0.0 fail-closed
-  const prevBaseUrl = process.env.E2E_BASE_URL;
-  try {
-    process.env.E2E_BASE_URL = 'http://0.0.0.0:4173';
-    assert.throws(
-      () => serverHelpers.getBaseUrl(),
-      /0\.0\.0\.0/,
-      'getBaseUrl must reject 0.0.0.0',
-    );
-  } finally {
-    if (prevBaseUrl === undefined) {
-      delete process.env.E2E_BASE_URL;
-    } else {
-      process.env.E2E_BASE_URL = prevBaseUrl;
-    }
-  }
-
-  // Step (a): Verify deterministic media builders
-  await verifyMediaHelpers(media);
-
-  // Step (b): Start ephemeral 127.0.0.1:0 dummy server
-  const { server, baseUrl } = await startDummyServer();
-  console.log(`[verify:fail-closed] Step 2/4 PASS — ephemeral dummy server bound at ${baseUrl}`);
-
+  let server = null;
   let browser = null;
   try {
-    // Step (c): Headless /usr/lib/chromium/chromium render + anti-purple positive/negative probes
+    // Step 1/5: Static AST anti-vacuity & opaque-box integrity audit over all 46 specs + helpers
+    verifyStaticSpecIntegrity();
+
+    const media = await import('../helpers/media.ts');
+    const ui = await import('../helpers/ui.ts');
+    const selectors = await import('../helpers/selectors.ts');
+    const serverHelpers = await import('../helpers/server.ts');
+    const apiHelpers = await import('../helpers/api.ts');
+
+    // Step 2/5: Verify helper exports, canonical schemas, and media magic bytes
+    assert.equal(typeof ui.assertNoPurpleOnDark, 'function', 'helpers/ui.ts must export assertNoPurpleOnDark');
+    assert.equal(
+      typeof ui.ensureDarkThemeAndAssertNoPurple,
+      'function',
+      'helpers/ui.ts must export ensureDarkThemeAndAssertNoPurple',
+    );
+    assert.equal(typeof ui.registerAndLoginUser, 'function', 'helpers/ui.ts must export registerAndLoginUser');
+    assert.equal(typeof ui.assertNoDemoAuthControls, 'function', 'helpers/ui.ts must export assertNoDemoAuthControls');
+    assert.equal('btnDemoLogin' in selectors.DOM, false, 'DOM must not contain removed demo login selector');
+    assert.equal('btnSimulateQrScan' in selectors.DOM, false, 'DOM must not contain removed QR simulation selector');
+    assert.equal('btnMtprotoConfig' in selectors.DOM, false, 'DOM must not contain removed MTProto config selector');
+    assert.equal(typeof selectors.DOM.appShell, 'string', 'DOM.appShell must exist');
+    assert.equal(typeof selectors.DOM.browserWorkspace, 'string', 'DOM.browserWorkspace must exist');
+    assert.equal(typeof selectors.DOM.sidebarPinnedChatsGrid, 'string', 'DOM.sidebarPinnedChatsGrid must exist');
+    assert.equal(typeof selectors.DOM.automationAppStorePanel, 'string', 'DOM.automationAppStorePanel must exist');
+    assert.equal(typeof selectors.DOM.oauthMcpGrantsPanel, 'string', 'DOM.oauthMcpGrantsPanel must exist');
+    assert.equal(typeof selectors.DOM.remoteAssistPanel, 'string', 'DOM.remoteAssistPanel must exist');
+    assert.equal(typeof selectors.DOM.vaultSettingsPanel, 'string', 'DOM.vaultSettingsPanel must exist');
+    assert.equal(typeof serverHelpers.getBaseUrl, 'function', 'helpers/server.ts must export getBaseUrl');
+    assert.equal(
+      typeof serverHelpers.resolveChromiumExecutablePath,
+      'function',
+      'helpers/server.ts must export resolveChromiumExecutablePath',
+    );
+    assert.equal(apiHelpers.MCP_SUPPORTED_SCOPES.length, 14, 'MCP_SUPPORTED_SCOPES must have 14 canonical scopes');
+    assert.equal(
+      Buffer.from(apiHelpers.generateWrappedRootKeyB64(), 'base64').length,
+      60,
+      'generateWrappedRootKeyB64 must produce 60 raw bytes (12B nonce + 32B key + 16B tag)',
+    );
+    assert.equal(
+      typeof apiHelpers.startEphemeralOpenAiStub,
+      'function',
+      'helpers/api.ts must export startEphemeralOpenAiStub',
+    );
+    assert.equal(
+      typeof apiHelpers.obtainOfficialMcpAuthCode,
+      'function',
+      'helpers/api.ts must export obtainOfficialMcpAuthCode',
+    );
+    const sampleManifest = apiHelpers.buildValidAutomationAppManifest();
+    assert.ok(
+      sampleManifest.parameters.some((p) => p.is_secret === true && p.default_value === null),
+      'buildValidAutomationAppManifest must emit canonical ScriptParameter.is_secret',
+    );
+
+    // Verify getBaseUrl rejects 0.0.0.0 fail-closed
+    const prevBaseUrl = process.env.E2E_BASE_URL;
+    try {
+      process.env.E2E_BASE_URL = 'http://0.0.0.0:4173';
+      assert.throws(() => serverHelpers.getBaseUrl(), /0\.0\.0\.0/, 'getBaseUrl must reject 0.0.0.0');
+    } finally {
+      if (prevBaseUrl === undefined) delete process.env.E2E_BASE_URL;
+      else process.env.E2E_BASE_URL = prevBaseUrl;
+    }
+
+    // Verify resolveChromiumExecutablePath throws fail-closed on invalid explicit path
+    const prevChromePath = process.env.PLAYWRIGHT_CHROME_PATH;
+    try {
+      process.env.PLAYWRIGHT_CHROME_PATH = '/nonexistent/path/to/chrome-binary';
+      assert.throws(
+        () => serverHelpers.resolveChromiumExecutablePath(),
+        /does not exist or is not executable/i,
+        'resolveChromiumExecutablePath must reject invalid PLAYWRIGHT_CHROME_PATH',
+      );
+    } finally {
+      if (prevChromePath === undefined) delete process.env.PLAYWRIGHT_CHROME_PATH;
+      else process.env.PLAYWRIGHT_CHROME_PATH = prevChromePath;
+    }
+
+    await verifyMediaHelpers(media);
+
+    // Step 3/5: Start ephemeral dummy server
+    const started = await startDummyServer();
+    server = started.server;
+    const baseUrl = started.baseUrl;
+    console.log(`[verify:fail-closed] Step 3/5 PASS — ephemeral dummy server bound at ${baseUrl}`);
+
+    // Step 4/5: Real auto-detected Chromium render & assertNoPurpleOnDark self-test
+    let bundledPath;
+    try {
+      bundledPath = chromium.executablePath();
+    } catch {
+      bundledPath = undefined;
+    }
+    const executablePath = serverHelpers.resolveChromiumExecutablePath(bundledPath);
+
     browser = await chromium.launch({
-      executablePath: '/usr/lib/chromium/chromium',
+      ...(executablePath ? { executablePath } : {}),
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--use-fake-ui-for-media-stream'],
+      args: [...serverHelpers.CHROMIUM_LAUNCH_ARGS],
     });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
 
     await page.goto(`${baseUrl}/dummy`, { waitUntil: 'domcontentloaded' });
     const dummyText = await page.locator('#dummy-placeholder').textContent();
-    assert.equal(dummyText?.trim(), 'Not gpui-telegram-web', 'Dummy DOM render failed');
+    assert.equal(dummyText?.trim(), 'Not fabushi-web', 'Dummy DOM render failed');
     assert.equal(await page.locator('#auth-screen').count(), 0, 'Dummy page must lack #auth-screen');
     assert.equal(await page.locator('#app-shell').count(), 0, 'Dummy page must lack #app-shell');
 
@@ -349,7 +829,7 @@ async function main() {
     }
     if (!purpleRejected) {
       throw new Error(
-        'FAIL-CLOSED VIOLATION: assertNoPurpleOnDark did NOT throw on /purple-dark (#8774E1 on #17212B under data-theme="night")',
+        'FAIL-CLOSED VIOLATION: assertNoPurpleOnDark did NOT throw on /purple-dark under data-theme="night"',
       );
     }
 
@@ -360,17 +840,29 @@ async function main() {
     await browser.close();
     browser = null;
     console.log(
-      '[verify:fail-closed] Step 3/4 PASS — Chromium headless render & assertNoPurpleOnDark (/purple-dark rejected, /valid-dark accepted).',
+      `[verify:fail-closed] Step 4/5 PASS — auto-detected Chromium (${executablePath ?? 'playwright-bundled'}) render & assertNoPurpleOnDark (/purple-dark rejected, Apple Dark /valid-dark accepted).`,
     );
 
-    // Step (d): Execute npx playwright test fail-closed probe against dummy server
-    const tier1Specs = collectSpecFiles(path.join(E2E_ROOT, 'tier1'));
-    const probeOutputDir = path.join(PROBE_DIR, 'test-results');
+    // Step 5/5: Probe representative spec from ALL 4 tiers sequentially against dummy server
+    const tiers = ['tier1', 'tier2', 'tier3', 'tier4'];
+    const tierTargets = [];
+    for (const tier of tiers) {
+      const specs = collectSpecFiles(path.join(E2E_ROOT, tier));
+      assert.ok(
+        specs.length > 0,
+        `Expected at least 1 spec file inside ${tier}/ for 4-tier fail-closed proof`,
+      );
+      tierTargets.push({ tier, relSpec: path.relative(E2E_ROOT, specs[0]) });
+    }
+
+    const probeOutputDir = path.join(PROBE_DIR, 'out');
     fs.mkdirSync(PROBE_DIR, { recursive: true });
 
     const childEnv = {
       ...process.env,
       E2E_BASE_URL: baseUrl,
+      E2E_EXPECT_TIMEOUT_MS: '2500',
+      E2E_TMP_DIR,
       PLAYWRIGHT_WORKERS: '1',
       CI: '1',
       TMPDIR: E2E_TMP_DIR,
@@ -378,135 +870,84 @@ async function main() {
       TEMP: E2E_TMP_DIR,
     };
 
-    let pwArgs;
-    if (tier1Specs.length > 0) {
-      const firstRelSpec = path.relative(E2E_ROOT, tier1Specs[0]);
-      console.log(
-        `[verify:fail-closed] Probing existing Tier 1 spec (${firstRelSpec}) against dummy server...`,
-      );
-      pwArgs = [
-        'playwright',
-        'test',
-        firstRelSpec,
-        '--max-failures=1',
-        '--retries=0',
-        '--timeout=8000',
-        '--reporter=list',
-        `--output=${probeOutputDir}`,
-      ];
-    } else {
-      console.log(
-        '[verify:fail-closed] tier1/ has 0 specs — materializing ephemeral .e2e-data/probe/smoke.spec.ts & playwright.probe.config.mjs...',
-      );
-      fs.writeFileSync(
-        path.join(PROBE_DIR, 'playwright.probe.config.mjs'),
-        `import { defineConfig } from '@playwright/test';
-
-export default defineConfig({
-  testDir: '.',
-  testMatch: ['smoke.spec.ts'],
-  outputDir: '/home/antigravity/gpui-telegram-web/e2e/.e2e-data/probe/test-results',
-  fullyParallel: false,
-  retries: 0,
-  workers: 1,
-  timeout: 6000,
-  expect: { timeout: 2000 },
-  reporter: 'list',
-  use: {
-    baseURL: process.env.E2E_BASE_URL,
-    headless: true,
-    actionTimeout: 2500,
-    navigationTimeout: 5000,
-    trace: 'off',
-    screenshot: 'off',
-    video: 'off',
-    launchOptions: {
-      executablePath: '/usr/lib/chromium/chromium',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--use-fake-ui-for-media-stream'],
-    },
-  },
-  projects: [
-    {
-      name: 'chromium',
-      use: { browserName: 'chromium' },
-    },
-  ],
-});
-`,
-        'utf8',
-      );
-
-      fs.writeFileSync(
-        path.join(PROBE_DIR, 'smoke.spec.ts'),
-        `import { test, expect } from '../../helpers/fixtures';
-import { DOM } from '../../helpers/selectors';
-
-test('fail-closed smoke probe rejects dummy server lacking #auth-screen and #app-shell', async ({ authPage }) => {
-  await expect(authPage.locator(DOM.appShell)).toBeVisible({ timeout: 2000 });
-});
-`,
-        'utf8',
-      );
-
-      pwArgs = [
-        'playwright',
-        'test',
-        '-c',
-        '.e2e-data/probe/playwright.probe.config.mjs',
-        '--max-failures=1',
-      ];
-    }
-
-    const runResult = spawnSync('npx', pwArgs, {
-      cwd: E2E_ROOT,
-      env: childEnv,
-      encoding: 'utf8',
-      timeout: 45_000,
-    });
-
-    const combinedOutput = `${runResult.stdout || ''}\n${runResult.stderr || ''}`;
-    if (runResult.status === 0) {
-      throw new Error(
-        `FAIL-CLOSED VIOLATION: Playwright exited 0 against dummy server!\nOutput:\n${combinedOutput}`,
-      );
-    }
-
     const fatalHarnessError =
-      /Cannot find module|ERR_MODULE_NOT_FOUND|SyntaxError|No tests found|Executable doesn't exist|Unknown option/i;
-    if (fatalHarnessError.test(combinedOutput)) {
-      throw new Error(
-        `Playwright failed due to harness/config/import error rather than genuine UI assertion:\n${combinedOutput}`,
+      /Cannot find module|ERR_MODULE_NOT_FOUND|SyntaxError|No tests found|Executable doesn't exist|Unknown option|does not exist or is not executable|No executable Chromium\/Chrome|while setting up "resetServerHook"/i;
+    const genuineContractMarker =
+      /#auth-screen|#app-shell|#chat-list|locator\(|expect\(|DUMMY_ENDPOINT|HTTP\s+404|failed with HTTP|register|toBeVisible|toBe\(/i;
+
+    for (const { tier, relSpec } of tierTargets) {
+      console.log(
+        `[verify:fail-closed] Probing ${tier} (${relSpec}) against dummy server...`,
       );
-    }
+      const runResult = await runCommandAsync(
+        'npx',
+        [
+          'playwright',
+          'test',
+          relSpec,
+          '--max-failures=1',
+          '--retries=0',
+          '--timeout=8000',
+          '--reporter=list',
+          `--output=${path.join(probeOutputDir, tier)}`,
+        ],
+        {
+          cwd: E2E_ROOT,
+          env: childEnv,
+          timeout: 45_000,
+        },
+      );
 
-    const genuineFailureMarker = /\b[1-9]\d*\s+failed\b/i.test(combinedOutput);
-    const missingDomContractMarker =
-      /#auth-screen|#app-shell|#btn-demo-login|#chat-list|locator\(/i;
+      const combinedOutput = `${runResult.stdout || ''}\n${runResult.stderr || ''}`;
+      if (runResult.status === 0) {
+        throw new Error(
+          `FAIL-CLOSED VIOLATION: ${tier} (${relSpec}) exited 0 against dummy server!\nOutput:\n${combinedOutput}`,
+        );
+      }
 
-    if (!genuineFailureMarker || !missingDomContractMarker.test(combinedOutput)) {
-      throw new Error(
-        `Playwright exited ${runResult.status}, but output lacked expected missing-DOM assertion markers:\n${combinedOutput}`,
+      if (runResult.timedOut) {
+        throw new Error(
+          `${tier} (${relSpec}) timed out waiting on child Playwright process:\n${combinedOutput}`,
+        );
+      }
+
+      if (fatalHarnessError.test(combinedOutput)) {
+        throw new Error(
+          `${tier} (${relSpec}) failed due to harness/config/import/browser error rather than genuine contract failure:\n${combinedOutput}`,
+        );
+      }
+
+      const genuineFailureMarker = /\b[1-9]\d*\s+failed\b/i.test(combinedOutput);
+      if (!genuineFailureMarker || !genuineContractMarker.test(combinedOutput)) {
+        throw new Error(
+          `${tier} (${relSpec}) exited ${runResult.status}, but output lacked expected contract failure markers:\n${combinedOutput}`,
+        );
+      }
+
+      console.log(
+        `[verify:fail-closed] ${tier} (${relSpec}) PASS — exited non-zero (${runResult.status}) with genuine contract failure.`,
       );
     }
 
     console.log(
-      `[verify:fail-closed] Step 4/4 PASS — Playwright exited non-zero (${runResult.status}) with genuine missing-DOM contract failure.`,
+      '[verify:fail-closed] Step 5/5 PASS — all 4 tiers proved fail-closed against dummy server.',
     );
-    console.log('[verify:fail-closed] ALL FAIL-CLOSED VERIFICATION CHECKS PASSED.');
+    console.log('[verify:fail-closed] ALL 5 FAIL-CLOSED VERIFICATION CHECKS PASSED.');
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
     }
-    server.closeAllConnections?.();
-    await new Promise((resolve) => server.close(() => resolve()));
+    if (server) {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(() => resolve()));
+    }
     fs.rmSync(PROBE_DIR, { recursive: true, force: true });
-    fs.rmSync(E2E_TMP_DIR, { recursive: true, force: true });
     try {
       if (fs.existsSync(E2E_DATA_DIR) && fs.readdirSync(E2E_DATA_DIR).length === 0) {
         fs.rmdirSync(E2E_DATA_DIR);
       }
     } catch {
-      // Preserve .e2e-data if non-empty
+      // Preserve .e2e-data if another concurrent run is active
     }
   }
 }

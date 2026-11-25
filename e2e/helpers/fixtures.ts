@@ -1,45 +1,88 @@
-import { test as base, expect, type Page } from '@playwright/test';
-import { clearClientState, getBaseUrl, resetTestServer } from './server';
-import { loginViaDemo } from './ui';
+import {
+  test as base,
+  expect,
+  type BrowserContext,
+  type Page,
+} from '@playwright/test';
+import {
+  clearClientState,
+  getBaseUrl,
+  registerUserViaApi,
+  resetTestServer,
+  type RegisteredUserSession,
+  type RegisterUserOptions,
+} from './server';
+import { loginWithPassword, registerAndLoginUser } from './ui';
 
-export interface E2EFixtureOptions {
-  /**
-   * When explicitly set via `test.use({ allowSandbox404: true })` for standalone
-   * serverless sandbox specs, permits HTTP 404 from `POST /api/v1/test/reset`.
-   * Defaults to `false` (strict fail-closed).
-   */
-  allowSandbox404: boolean;
+export interface AuthSessionFixture {
+  page: Page;
+  user: RegisteredUserSession;
 }
 
-export interface E2EFixtures extends E2EFixtureOptions {
-  /** Auto-fixture resetting backend SQLite WAL & seeded state before each test. */
+export interface SecondUserContextResult {
+  context: BrowserContext;
+  page: Page;
+  user: RegisteredUserSession;
+}
+
+export interface E2EFixtures {
+  /** Auto-fixture cleanly wiping backend SQLite WAL tables before each test. */
   resetServerHook: void;
-  /** Pre-authenticated Page after full client+server reset and 1-click Demo login. */
+  /** Newly registered real user signed in via browser UI with 0 chats (truthful empty state). */
+  emptyAuthPage: Page;
+  /** Newly registered real user signed in via browser UI after full clean reset. */
   authPage: Page;
+  /** Real API-registered user signed into the UI, returning both Page and Bearer token. */
+  authSession: AuthSessionFixture;
   /** Opens a second Page in the same BrowserContext at `/` for BroadcastChannel sync tests. */
   openSecondTab: () => Promise<Page>;
+  /** Opens an isolated second BrowserContext logged in as a real second registered user. */
+  openSecondUserContext: (
+    options?: RegisterUserOptions,
+  ) => Promise<SecondUserContextResult>;
 }
 
 export const test = base.extend<E2EFixtures>({
-  allowSandbox404: [false, { option: true }],
-
   resetServerHook: [
-    async ({ request, allowSandbox404 }, use) => {
-      await resetTestServer(request, { allowSandbox404 });
+    async ({ request }, use) => {
+      await resetTestServer(request);
       await use();
     },
     { auto: true },
   ],
 
-  authPage: async ({ page, request, allowSandbox404, resetServerHook: _resetHook }, use) => {
+  emptyAuthPage: async ({ page, request, resetServerHook: _resetHook }, use) => {
     await clearClientState(page);
-    await resetTestServer(request, { allowSandbox404 });
+    await resetTestServer(request);
 
     const baseUrl = getBaseUrl();
     await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
-    await loginViaDemo(page);
+    await registerAndLoginUser(page);
 
     await use(page);
+  },
+
+  authPage: async ({ page, request, resetServerHook: _resetHook }, use) => {
+    await clearClientState(page);
+    await resetTestServer(request);
+
+    const baseUrl = getBaseUrl();
+    await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
+    await registerAndLoginUser(page);
+
+    await use(page);
+  },
+
+  authSession: async ({ page, request, resetServerHook: _resetHook }, use) => {
+    await clearClientState(page);
+    await resetTestServer(request);
+
+    const user = await registerUserViaApi(request);
+    const baseUrl = getBaseUrl();
+    await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
+    await loginWithPassword(page, user.username, user.password);
+
+    await use({ page, user });
   },
 
   openSecondTab: async ({ context, resetServerHook: _resetHook }, use) => {
@@ -60,6 +103,34 @@ export const test = base.extend<E2EFixtures>({
         if (!tab.isClosed()) {
           await tab.close().catch(() => undefined);
         }
+      }
+    }
+  },
+
+  openSecondUserContext: async ({ browser, request, resetServerHook: _resetHook }, use) => {
+    const openedContexts: BrowserContext[] = [];
+    const baseUrl = getBaseUrl();
+
+    const openContext = async (
+      options?: RegisterUserOptions,
+    ): Promise<SecondUserContextResult> => {
+      const user = await registerUserViaApi(request, options);
+      const context = await browser.newContext({
+        viewport: { width: 1440, height: 900 },
+        ignoreHTTPSErrors: true,
+      });
+      openedContexts.push(context);
+      const page = await context.newPage();
+      await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
+      await loginWithPassword(page, user.username, user.password);
+      return { context, page, user };
+    };
+
+    try {
+      await use(openContext);
+    } finally {
+      for (const ctx of openedContexts.reverse()) {
+        await ctx.close().catch(() => undefined);
       }
     }
   },

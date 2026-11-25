@@ -3,10 +3,13 @@ import {
   chatRowById,
   DOM,
   escapeCssAttrValue,
+  FORBIDDEN_DEMO_BUTTON_TEXT,
+  FORBIDDEN_DEMO_CONTROL_SELECTOR,
   messageBubbleById,
   NAV_DESTS,
   type NavDestKey,
 } from './selectors';
+import { generateUniqueUsername } from './server';
 
 export type NavDestination = NavDestKey;
 
@@ -20,7 +23,7 @@ const NAV_DESTINATION_MAP: Record<
   talk: { trigger: NAV_DESTS.talk, target: DOM.talkModeOrb },
   computer: { trigger: NAV_DESTS.computer, target: DOM.computerWorkbench },
   hermes: { trigger: NAV_DESTS.hermes, target: DOM.hermesStudioPanel },
-  browser: { trigger: NAV_DESTS.browser, target: DOM.browserControlWorkspace },
+  browser: { trigger: NAV_DESTS.browser, target: DOM.browserWorkspaceAny },
   settings: { trigger: NAV_DESTS.settings, target: DOM.settingsPanel },
 };
 
@@ -65,6 +68,14 @@ export const BILINGUAL_PATTERNS = {
   approve: /approve|allow|accept|批准|允许|同意/i,
   reject: /reject|deny|decline|拒绝|拦截/i,
   takeover: /take\s*over|接管/i,
+  startBot: /\bstart\b|开始|启动机器人/i,
+  install: /\binstall\b|安装/i,
+  uninstall: /uninstall|卸载/i,
+  publish: /publish|发布/i,
+  distill: /distill|compile|蒸馏|编译/i,
+  disconnectAll: /disconnect\s*all|kill\s*switch|全部断开|紧急断开|一键断开/i,
+  revoke: /revoke|撤销|吊销/i,
+  configureAiProvider: /configure\s*ai\s*provider|ai\s*provider|配置.*模型|配置.*供应商|打开.*magpie/i,
 } as const;
 
 export type BilingualActionKey = keyof typeof BILINGUAL_PATTERNS;
@@ -169,12 +180,62 @@ export async function openContextMenuAndClick(
   await item.click();
 }
 
+export interface RegisterAndLoginOptions {
+  username?: string;
+  password?: string;
+  firstName?: string;
+  existingUser?: boolean;
+  waitForChatList?: boolean;
+}
+
+export interface UiAuthResult {
+  username: string;
+  password: string;
+  firstName: string;
+}
+
 /**
- * Navigates to `/` if the page has not navigated yet, awaits `#auth-screen` or `#app-shell`,
- * clicks `#btn-demo-login` when `#auth-screen` is shown, and strictly asserts `#app-shell`
- * and `#chat-list` become visible (fail-closed against empty/dummy servers).
+ * Strictly asserts that `#auth-screen` is visible and contains ZERO removed
+ * demo-login, standalone-sandbox, or simulated-QR buttons.
  */
-export async function loginViaDemo(page: Page): Promise<void> {
+export async function assertNoDemoAuthControls(page: Page): Promise<void> {
+  const authScreen = page.locator(DOM.authScreen);
+  await expect(authScreen).toBeVisible();
+  await expect(
+    page.locator(FORBIDDEN_DEMO_CONTROL_SELECTOR),
+  ).toHaveCount(0);
+  await expect(
+    authScreen.getByRole('button', { name: FORBIDDEN_DEMO_BUTTON_TEXT }),
+  ).toHaveCount(0);
+}
+
+/**
+ * Strictly asserts that a newly registered account starts in a truthful empty
+ * workspace: `#app-shell` and `#chat-list` are visible, and zero fake chats
+ * exist in `#chat-list`.
+ */
+export async function assertEmptyTruthfulWorkspace(page: Page): Promise<void> {
+  const appShell = page.locator(DOM.appShell);
+  const chatList = page.locator(DOM.chatList);
+  await expect(appShell).toBeVisible();
+  await expect(chatList).toBeVisible();
+  await expect(chatList.locator(DOM.chatRow)).toHaveCount(0);
+}
+
+/**
+ * Registers a real account (or signs in an existing account when `existingUser: true`)
+ * via `#auth-screen` `#tab-auth-password`, verifies zero demo controls exist, and
+ * asserts `#app-shell` becomes visible & `#auth-screen` hides (fail-closed).
+ */
+export async function registerAndLoginUser(
+  page: Page,
+  options: RegisterAndLoginOptions = {},
+): Promise<UiAuthResult> {
+  const username = options.username ?? generateUniqueUsername('e2euser');
+  const password = options.password ?? 'FabushiE2e!2026';
+  const firstName = options.firstName ?? 'E2E User';
+  const waitForChatList = options.waitForChatList ?? true;
+
   const currentUrl = page.url();
   if (!currentUrl || currentUrl === 'about:blank' || !currentUrl.startsWith('http')) {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
@@ -184,28 +245,76 @@ export async function loginViaDemo(page: Page): Promise<void> {
   const appShell = page.locator(DOM.appShell);
   const chatList = page.locator(DOM.chatList);
 
-  await expect(authScreen.or(appShell).first()).toBeVisible();
+  await expect(authScreen).toBeVisible();
+  await assertNoDemoAuthControls(page);
 
-  if (await authScreen.isVisible()) {
-    const demoBtn = page.locator(DOM.btnDemoLogin);
-    await expect(demoBtn).toBeVisible();
-    await expect(demoBtn).toBeEnabled();
-    await demoBtn.click();
+  const passwordTab = page.locator(DOM.tabAuthPassword);
+  await expect(passwordTab).toBeVisible();
+  await passwordTab.click();
+
+  const usernameInput = page.locator(DOM.authUsernameInput);
+  const passwordInput = page.locator(DOM.authPasswordInput);
+  const submitBtn = page.locator(DOM.btnAuthPasswordSubmit);
+  await expect(usernameInput).toBeVisible();
+  await expect(passwordInput).toBeVisible();
+
+  if (!options.existingUser) {
+    const modeToggle = page.locator(DOM.authModeRegisterToggle);
+    await expect(modeToggle).toBeVisible();
+    const toggleText = (await modeToggle.textContent()) ?? '';
+    const submitText = (await submitBtn.textContent()) ?? '';
+    const alreadyInRegisterMode =
+      /sign\s*in|log\s*in|已有账号|登录/i.test(toggleText) ||
+      /register|create\s*account|sign\s*up|注册|创建账号/i.test(submitText);
+    if (!alreadyInRegisterMode) {
+      await modeToggle.click();
+    }
   }
+
+  await usernameInput.fill(username);
+  const firstNameInput = authScreen
+    .locator('input[name="firstName"], input[name="first_name"], #auth-first-name-input')
+    .first();
+  if (!options.existingUser && (await firstNameInput.count()) > 0 && (await firstNameInput.isVisible())) {
+    await firstNameInput.fill(firstName);
+  }
+  await passwordInput.fill(password);
+
+  await expect(submitBtn).toBeVisible();
+  await expect(submitBtn).toBeEnabled();
+  await submitBtn.click();
 
   await expect(appShell).toBeVisible();
   await expect(authScreen).toBeHidden();
 
-  // On narrow mobile/tablet viewports (<= 925px), if a default chat auto-opened MiddleColumn,
-  // step back to LeftColumn so #chat-list is guaranteed visible upon return.
-  if (!(await chatList.isVisible())) {
-    const backBtn = page.locator(DOM.btnBackToChats);
-    if (await backBtn.isVisible()) {
-      await backBtn.click();
+  if (waitForChatList) {
+    if (!(await chatList.isVisible())) {
+      const backBtn = page.locator(DOM.btnBackToChats);
+      if (await backBtn.isVisible()) {
+        await backBtn.click();
+      }
     }
+    await expect(chatList).toBeVisible();
   }
 
-  await expect(chatList).toBeVisible();
+  return { username, password, firstName };
+}
+
+/**
+ * Signs in an already-registered real user through `#auth-screen` `#tab-auth-password`.
+ */
+export async function loginWithPassword(
+  page: Page,
+  username: string,
+  password: string,
+  options?: { waitForChatList?: boolean },
+): Promise<UiAuthResult> {
+  return registerAndLoginUser(page, {
+    username,
+    password,
+    existingUser: true,
+    waitForChatList: options?.waitForChatList,
+  });
 }
 
 /**
@@ -710,7 +819,7 @@ export async function openNavDestination(
 ): Promise<Locator> {
   const { trigger, target } = NAV_DESTINATION_MAP[dest];
   const triggerLoc = page.locator(trigger);
-  const targetLoc = page.locator(target);
+  const targetLoc = page.locator(target).first();
 
   if (!(await triggerLoc.isVisible())) {
     const backBtn = page.locator(DOM.btnBackToChats);
@@ -981,7 +1090,21 @@ export async function assertNoPurpleOnDark(page: Page): Promise<void> {
       '#magpie-gateway-panel',
       '#task-center-workspace',
       '#mcp-tools-dock',
+      '#oauth-mcp-grants-panel',
       '#computer-workbench',
+      '#remote-assist-panel',
+      '#vault-settings-panel',
+      '#browser-workspace',
+      '#browser-control-workspace',
+      '#browser-inspector-tabs',
+      '#automation-app-store-panel',
+      '#sidebar-pinned-chats-grid',
+      '#apple-compose-stage',
+      '#bot-prestart-bar',
+      '#cmp-input-wrap',
+      '#stage-toast-pill',
+      '#window-toast-banner',
+      '#miniapp-pip-overlay',
       'header',
       'nav',
       'aside',
@@ -1100,4 +1223,31 @@ export async function assertNoPurpleOnDark(page: Page): Promise<void> {
       )
       .join('\n')}`,
   ).toEqual([]);
+}
+
+/**
+ * Guarantees the app is switched to a dark theme (`night` or `tinted`) and
+ * unconditionally executes `assertNoPurpleOnDark(page)`. Eliminates any risk
+ * of skipping the dark anti-purple check when a toggle lands on a light theme.
+ */
+export async function ensureDarkThemeAndAssertNoPurple(page: Page): Promise<string> {
+  const readTheme = () =>
+    page.evaluate(() => (document.documentElement.getAttribute('data-theme') ?? '').toLowerCase());
+
+  let theme = await readTheme();
+  if (theme !== 'night' && theme !== 'tinted') {
+    await openBurgerMenu(page);
+    await page.locator(DOM.menuToggleNightMode).click();
+    await expect
+      .poll(readTheme, {
+        timeout: 5_000,
+        message: 'Expected #menu-toggle-night-mode to switch document data-theme to dark ("night" or "tinted")',
+      })
+      .toMatch(/^(night|tinted)$/);
+    theme = await readTheme();
+  }
+
+  expect(['night', 'tinted']).toContain(theme);
+  await assertNoPurpleOnDark(page);
+  return theme;
 }
