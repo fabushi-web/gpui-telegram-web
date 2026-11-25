@@ -1,9 +1,9 @@
-# Caddy v2 automatic-HTTPS reverse proxy configuration for ombhrum.com Web Edition
+# Caddy v2 automatic-HTTPS reverse proxy configuration for Fabushi Web v1.6.11 (ombhrum.com)
 # Usage:
 #   caddy run --config deploy/Caddyfile
 #
-# Ensure `gpui-telegram-web` is running on 127.0.0.1:4173 (either standalone Node.js
-# production mode OR with UPSTREAM_SERVER_URL=http://<rust-server>:8080).
+# Ensure `fabushi-web` is running on 127.0.0.1:4173 (either standalone Node.js
+# production mode OR with UPSTREAM_SERVER_URL=https://<rust-server>).
 
 web.ombhrum.com {
     encode zstd gzip

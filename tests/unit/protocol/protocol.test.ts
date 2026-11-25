@@ -4,6 +4,7 @@ import {
   DATA_TEST_IDS,
   DOM_IDS,
   E2EE_SAFETY_EMOJIS,
+  FABUSHI_PROTOCOL_VERSION,
   ImeSafetyFsm,
   TELEGRAM_WAVEFORM_BARS,
   TELEGRAM_WAVEFORM_BYTES,
@@ -42,12 +43,14 @@ import {
 } from '@gpui-telegram/protocol';
 
 describe('@gpui-telegram/protocol — Canonical DOM IDs & Domain Mappers', () => {
-  it('exports all 137 unique canonical DOM IDs without leading # and domain DTO mappers', () => {
+  it('exports all 150 unique canonical DOM IDs without leading # and domain DTO mappers', () => {
+    expect(FABUSHI_PROTOCOL_VERSION).toBe('1.6.11');
+
     const entries = Object.entries(DOM_IDS);
-    expect(entries.length).toBe(137);
+    expect(entries.length).toBe(150);
 
     const uniqueValues = new Set(entries.map(([, v]) => v));
-    expect(uniqueValues.size).toBe(137);
+    expect(uniqueValues.size).toBe(150);
 
     for (const [, val] of entries) {
       expect(val.startsWith('#')).toBe(false);
@@ -57,6 +60,19 @@ describe('@gpui-telegram/protocol — Canonical DOM IDs & Domain Mappers', () =>
     expect(domSelector(DOM_IDS.AUTH_SCREEN)).toBe('#auth-screen');
     expect(domSelector(DOM_IDS.NAV_DEST_BROWSER)).toBe('#nav-dest-browser');
     expect(domSelector(DOM_IDS.BROWSER_CONTROL_WORKSPACE)).toBe('#browser-control-workspace');
+    expect(domSelector(DOM_IDS.SIDEBAR_PINNED_CHATS_GRID)).toBe('#sidebar-pinned-chats-grid');
+    expect(domSelector(DOM_IDS.APPLE_COMPOSE_STAGE)).toBe('#apple-compose-stage');
+    expect(domSelector(DOM_IDS.BOT_PRESTART_BAR)).toBe('#bot-prestart-bar');
+    expect(domSelector(DOM_IDS.CMP_INPUT_WRAP)).toBe('#cmp-input-wrap');
+    expect(domSelector(DOM_IDS.STAGE_TOAST_PILL)).toBe('#stage-toast-pill');
+    expect(domSelector(DOM_IDS.WINDOW_TOAST_BANNER)).toBe('#window-toast-banner');
+    expect(domSelector(DOM_IDS.MINIAPP_PIP_OVERLAY)).toBe('#miniapp-pip-overlay');
+    expect(domSelector(DOM_IDS.BROWSER_WORKSPACE)).toBe('#browser-workspace');
+    expect(domSelector(DOM_IDS.BROWSER_INSPECTOR_TABS)).toBe('#browser-inspector-tabs');
+    expect(domSelector(DOM_IDS.AUTOMATION_APP_STORE_PANEL)).toBe('#automation-app-store-panel');
+    expect(domSelector(DOM_IDS.OAUTH_MCP_GRANTS_PANEL)).toBe('#oauth-mcp-grants-panel');
+    expect(domSelector(DOM_IDS.REMOTE_ASSIST_PANEL)).toBe('#remote-assist-panel');
+    expect(domSelector(DOM_IDS.VAULT_SETTINGS_PANEL)).toBe('#vault-settings-panel');
     expect(DATA_TEST_IDS.CHAT_ROW).toBe('chat-row');
     expect(DATA_TEST_IDS.MESSAGE_BUBBLE).toBe('message-bubble');
     expect(DATA_ATTRS.CHAT_ID).toBe('data-chat-id');

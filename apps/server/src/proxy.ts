@@ -15,29 +15,109 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ]);
 
+const MCP_EXPOSED_HEADERS = ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate'] as const;
+
+function extractPathname(pathnameOrUrl: string): string {
+  const trimmed = pathnameOrUrl.trim();
+  if (!trimmed) return '/';
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      return (parsed.pathname || '/').replace(/^\/+/, '/');
+    } catch {
+      // Fall through to string extraction
+    }
+  }
+  const idx = trimmed.search(/[?#]/);
+  const rawPath = idx >= 0 ? trimmed.slice(0, idx) : trimmed;
+  // Neutralize WHATWG URL parser quirks before relative URL resolution:
+  // 1) Strip ASCII \t, \r, \n (removed by WHATWG URL §4.3 before parsing, which turns '/\t/evil.com/...' into '//evil.com/...')
+  // 2) Normalize '\' to '/' and collapse leading slashes so '/\...', '\...', and '//...' can never parse as scheme-relative authorities
+  const cleanedRaw = rawPath.replace(/[\t\r\n]/g, '').replace(/\\/g, '/');
+  const prefixed = `/${cleanedRaw.replace(/^\/+/, '')}`;
+  try {
+    const parsed = new URL(prefixed, 'http://localhost');
+    if (parsed.hostname !== 'localhost') return '/';
+    return (parsed.pathname || '/').replace(/^\/+/, '/');
+  } catch {
+    return prefixed;
+  }
+}
+
 /**
  * Determines whether a request pathname should be transparently forwarded to
- * `UPSTREAM_SERVER_URL` (e.g. a real Rust `gpui_telegram_server` instance on `ombhrum.com` or GCE).
+ * `UPSTREAM_SERVER_URL` (e.g. a real Rust `gpui_telegram_server` instance on `ombhrum.com`).
  */
 export function shouldProxyPathname(pathname: string): boolean {
+  const cleanPath = extractPathname(pathname);
+  const probePath = cleanPath.length > 1 ? cleanPath.replace(/\/+$/, '') : cleanPath;
   // Always serve container liveness probes locally so Docker/Render/Fly healthchecks pass in proxy mode
-  if (pathname === '/api/v1/health' || pathname === '/healthz' || pathname === '/api/v1/ready') {
-    return false;
-  }
-  // Serve bundled 833KB Fabushi WASM & textures locally unless explicitly proxied
   if (
-    pathname === '/api/v1/fabushi-miniapp/app.wasm' ||
-    pathname.startsWith('/api/v1/fabushi-miniapp/assets/')
+    probePath === '/api/v1/health' ||
+    probePath === '/healthz' ||
+    probePath === '/api/v1/ready'
   ) {
     return false;
   }
   return (
-    pathname.startsWith('/api/') ||
-    pathname === '/health' ||
-    pathname.startsWith('/v1/') ||
-    pathname.startsWith('/bot/') ||
-    pathname === '/js/telegram-web-app.js'
+    cleanPath.startsWith('/api/') ||
+    cleanPath === '/health' ||
+    cleanPath.startsWith('/v1/') ||
+    cleanPath.startsWith('/.well-known/') ||
+    cleanPath.startsWith('/oauth/') ||
+    cleanPath === '/mcp' ||
+    cleanPath.startsWith('/mcp/') ||
+    cleanPath.startsWith('/miniapps/') ||
+    cleanPath.startsWith('/bot/') ||
+    /^\/bot[^/]+\//.test(cleanPath) ||
+    cleanPath.startsWith('/js/')
   );
+}
+
+export interface ProxyWebSocketOptions {
+  proxyBrowserWs?: boolean;
+  env?: NodeJS.ProcessEnv;
+}
+
+function resolveProxyBrowserWs(
+  optionsOrEnv?: boolean | ProxyWebSocketOptions | NodeJS.ProcessEnv,
+): boolean {
+  if (typeof optionsOrEnv === 'boolean') return optionsOrEnv;
+  if (optionsOrEnv && typeof optionsOrEnv === 'object') {
+    if ('proxyBrowserWs' in optionsOrEnv && typeof optionsOrEnv.proxyBrowserWs === 'boolean') {
+      return optionsOrEnv.proxyBrowserWs;
+    }
+    if ('env' in optionsOrEnv) {
+      const envCandidate = (optionsOrEnv as ProxyWebSocketOptions).env;
+      if (envCandidate && typeof envCandidate === 'object') {
+        return envCandidate.PROXY_BROWSER_WS === '1';
+      }
+      if (envCandidate === undefined) {
+        return process.env.PROXY_BROWSER_WS === '1';
+      }
+    }
+    return (optionsOrEnv as NodeJS.ProcessEnv).PROXY_BROWSER_WS === '1';
+  }
+  return process.env.PROXY_BROWSER_WS === '1';
+}
+
+/**
+ * Determines whether a WebSocket upgrade path should be forwarded to `UPSTREAM_SERVER_URL`.
+ * Forwards `/api/v1/ws` and `/api/v1/tailnet/derp`; keeps `/api/v1/browser/ws` local by
+ * default unless `PROXY_BROWSER_WS=1` (or `{ proxyBrowserWs: true }`).
+ */
+export function shouldProxyWebSocketPathname(
+  pathnameOrUrl: string,
+  optionsOrEnv?: boolean | ProxyWebSocketOptions | NodeJS.ProcessEnv,
+): boolean {
+  const cleanPath = extractPathname(pathnameOrUrl);
+  if (cleanPath === '/api/v1/ws' || cleanPath === '/api/v1/tailnet/derp') {
+    return true;
+  }
+  if (cleanPath === '/api/v1/browser/ws') {
+    return resolveProxyBrowserWs(optionsOrEnv);
+  }
+  return false;
 }
 
 /**
@@ -89,6 +169,24 @@ export function proxyHttpRequest(
         if (lower.startsWith('access-control-')) continue;
         if (v !== undefined) respHeaders[k] = v;
       }
+      const existingExposeRaw = res.getHeader('Access-Control-Expose-Headers');
+      const existingExpose = Array.isArray(existingExposeRaw)
+        ? existingExposeRaw.join(', ')
+        : typeof existingExposeRaw === 'string'
+          ? existingExposeRaw
+          : '';
+      const exposeList = existingExpose
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean);
+      const seenLower = new Set(exposeList.map((h) => h.toLowerCase()));
+      for (const headerName of MCP_EXPOSED_HEADERS) {
+        if (!seenLower.has(headerName.toLowerCase())) {
+          exposeList.push(headerName);
+          seenLower.add(headerName.toLowerCase());
+        }
+      }
+      res.setHeader('Access-Control-Expose-Headers', exposeList.join(', '));
       res.writeHead(proxyRes.statusCode ?? 502, respHeaders);
       proxyRes.pipe(res);
     },

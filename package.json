@@ -1,8 +1,8 @@
 {
-  "name": "gpui-telegram-web",
-  "version": "1.3.0",
+  "name": "fabushi-web",
+  "version": "1.6.11",
   "private": true,
-  "description": "Protocol-aligned TypeScript web edition of bhrum/gpui-telegram v1.3.0 with Telegram Web A/K parity",
+  "description": "Fabushi Web v1.6.11 — Protocol-aligned TypeScript full-stack web edition of bhrumom/gpui-telegram v1.6.11",
   "type": "module",
   "engines": {
     "node": ">=22.13.0"

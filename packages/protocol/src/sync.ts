@@ -30,6 +30,13 @@ import type {
   BrowserStateReportPayload,
   BrowserTargetDescriptor,
 } from './browserControl.js';
+import type { CodingHostCommand, CodingHostEvent } from './codingAgents.js';
+import type {
+  MiniAppControlStatus,
+  MiniAppTakeoverState,
+  MiniAppWebMcpCommand,
+  MiniAppWebMcpResponse,
+} from './miniAppWebMcp.js';
 
 export type TypingAction =
   | 'typing'
@@ -75,7 +82,7 @@ export type ChatActionEvent =
 
 /**
  * Complete discriminated union of real-time `UpdateEvent` variants (`tag = "type", content = "data"`),
- * encompassing all 23 upstream `sync/events.rs` variants plus server gateway aliases.
+ * encompassing all 27 upstream `sync/events.rs` variants plus server gateway aliases.
  */
 export type UpdateEvent =
   | { type: 'NewMessage'; data: MessageItem }
@@ -111,7 +118,19 @@ export type UpdateEvent =
   | { type: 'MiniAppStatePatch'; data: { app_id: string; chat_id?: number; patch: Record<string, unknown> } }
   | { type: 'AgentFloorChanged'; data: { chat_id: number; current_speaker: string | null; queued_count: number; loop_hops: number } }
   | { type: 'AgentWorkspaceUpdated'; data: { chat_id: number; revision: number; key: string; value: unknown; updated_by: string } }
-  | { type: 'AgentHandoffEvent'; data: { chat_id: number; from_agent: string; to_agent: string; hop: number; max_hops: number } };
+  | { type: 'AgentHandoffEvent'; data: { chat_id: number; from_agent: string; to_agent: string; hop: number; max_hops: number } }
+  | {
+      type: 'BotActivityChanged';
+      data: {
+        chat_id: number;
+        bot_user_id: number;
+        state: string;
+        detail?: string | null;
+      };
+    }
+  | { type: 'MiniAppWebMcpCommand'; data: MiniAppWebMcpCommand }
+  | { type: 'MiniAppControlStatus'; data: MiniAppControlStatus }
+  | { type: 'CodingHostCommand'; data: CodingHostCommand };
 
 export interface PtsUpdate {
   chat_id: number;
@@ -212,6 +231,7 @@ export interface WsSendMessagePayload {
   scheduled_at_ms?: number;
   inline_keyboard?: InlineKeyboardButton[][];
   media_id?: string;
+  skip_server_bot_reply?: boolean;
 }
 
 export interface WsEditMessagePayload {
@@ -264,12 +284,15 @@ export type WsClientFrame =
   | { type: 'BrowserRegister'; payload: BrowserRegisterPayload }
   | { type: 'BrowserStateReport'; payload: BrowserStateReportPayload }
   | { type: 'BrowserCommandResult'; payload: BrowserCommandResult }
-  | { type: 'BrowserCommand'; payload: BrowserCommandRequest };
+  | { type: 'BrowserCommand'; payload: BrowserCommandRequest }
+  | { type: 'MiniAppWebMcpResult'; payload: MiniAppWebMcpResponse }
+  | { type: 'MiniAppTakeoverState'; payload: MiniAppTakeoverState }
+  | { type: 'CodingHostEvent'; payload: CodingHostEvent };
 
 export type WsServerFrame =
   | { type: 'AuthOk'; payload: { user_id: number; session_id: string; server_time_ms: number } }
   | { type: 'AuthError'; payload: { reason: string } }
-  | { type: 'Pong'; payload: { nonce?: number; client_ts?: number; server_ts: number } }
+  | { type: 'Pong'; payload: { nonce?: number; client_ts?: number; server_ts?: number } }
   | { type: 'Update'; payload: UpdateEvent }
   | { type: 'PtsPush'; payload: PtsUpdate }
   | { type: 'PtsUpdate'; payload: PtsUpdate }
@@ -280,11 +303,11 @@ export type WsServerFrame =
       payload: {
         correlation_id?: number;
         client_nonce: number;
-        chat_id: number;
+        chat_id?: number;
         message_id: number;
         pts: number;
         duplicate?: boolean;
-        date_ms: number;
+        date_ms?: number;
       };
     }
   | {

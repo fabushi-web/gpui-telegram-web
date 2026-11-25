@@ -1,3 +1,5 @@
+export const FABUSHI_PROTOCOL_VERSION = '1.6.11' as const;
+
 export * from './domIds.js';
 export * from './entities.js';
 export * from './imeSafetyFsm.js';
@@ -9,3 +11,9 @@ export * from './sync.js';
 export * from './ports.js';
 export * from './browserControl.js';
 export * from './qr.js';
+export * from './userVault.js';
+export * from './automationApps.js';
+export * from './codingAgents.js';
+export * from './remoteControl.js';
+export * from './miniAppWebMcp.js';
+export * from './officialMcp.js';

@@ -8,6 +8,7 @@
 export const DOM_IDS = {
   // 1. Auth & Lock (24 IDs)
   AUTH_SCREEN: 'auth-screen',
+  /** @deprecated Demo login is removed in v1.6.11 production UI (M4). */
   BTN_DEMO_LOGIN: 'btn-demo-login',
   TAB_AUTH_PHONE: 'tab-auth-phone',
   TAB_AUTH_QR: 'tab-auth-qr',
@@ -22,6 +23,7 @@ export const DOM_IDS = {
   AUTH_2FA_INPUT: 'auth-2fa-input',
   BTN_AUTH_SUBMIT_2FA: 'btn-auth-submit-2fa',
   QR_LOGIN_SVG: 'qr-login-svg',
+  /** @deprecated Simulated QR scan is removed in v1.6.11 production UI (M4). */
   BTN_SIMULATE_QR_SCAN: 'btn-simulate-qr-scan',
   AUTH_USERNAME_INPUT: 'auth-username-input',
   AUTH_PASSWORD_INPUT: 'auth-password-input',
@@ -32,7 +34,7 @@ export const DOM_IDS = {
   PASSCODE_LOCK_SCREEN: 'passcode-lock-screen',
   PASSCODE_UNLOCK_INPUT: 'passcode-unlock-input',
 
-  // 2. App Shell & Left Column (34 IDs)
+  // 2. App Shell & Left Column (35 IDs)
   APP_SHELL: 'app-shell',
   CONNECTION_STATUS_BANNER: 'connection-status-banner',
   LEFT_COLUMN: 'left-column',
@@ -55,6 +57,7 @@ export const DOM_IDS = {
   STORIES_BAR: 'stories-bar',
   STORIES_VIEWER: 'stories-viewer',
   CHAT_FOLDER_TABS: 'chat-folder-tabs',
+  SIDEBAR_PINNED_CHATS_GRID: 'sidebar-pinned-chats-grid',
   ARCHIVED_CHATS_ROW: 'archived-chats-row',
   CHAT_LIST: 'chat-list',
   FORUM_TOPIC_LIST: 'forum-topic-list',
@@ -68,7 +71,7 @@ export const DOM_IDS = {
   NAV_DEST_HERMES: 'nav-dest-hermes',
   NAV_DEST_SETTINGS: 'nav-dest-settings',
 
-  // 3. Middle Column & Composer (26 IDs)
+  // 3. Middle Column & Composer (31 IDs)
   MIDDLE_COLUMN: 'middle-column',
   BTN_BACK_TO_CHATS: 'btn-back-to-chats',
   CHAT_HEADER: 'chat-header',
@@ -81,6 +84,9 @@ export const DOM_IDS = {
   BTN_CHAT_MORE: 'btn-chat-more',
   PINNED_MESSAGE_BANNER: 'pinned-message-banner',
   MESSAGE_LIST: 'message-list',
+  APPLE_COMPOSE_STAGE: 'apple-compose-stage',
+  BOT_PRESTART_BAR: 'bot-prestart-bar',
+  CMP_INPUT_WRAP: 'cmp-input-wrap',
   BTN_SCROLL_TO_BOTTOM: 'btn-scroll-to-bottom',
   SELECTION_TOOLBAR: 'selection-toolbar',
   COMPOSER_REPLY_EDIT_BANNER: 'composer-reply-edit-banner',
@@ -93,10 +99,12 @@ export const DOM_IDS = {
   BTN_AI_COMPOSE: 'btn-ai-compose',
   BTN_RECORD_VOICE: 'btn-record-voice',
   BTN_SEND_MESSAGE: 'btn-send-message',
+  STAGE_TOAST_PILL: 'stage-toast-pill',
+  WINDOW_TOAST_BANNER: 'window-toast-banner',
   TOP_AUDIO_PLAYER_BAR: 'top-audio-player-bar',
   TOP_CALL_BAR: 'top-call-bar',
 
-  // 4. Right Column, Settings & Modals (32 IDs)
+  // 4. Right Column, Settings & Modals (33 IDs)
   RIGHT_COLUMN: 'right-column',
   RIGHT_PROFILE_INFO: 'right-profile-info',
   RIGHT_TABS: 'right-tabs',
@@ -110,6 +118,7 @@ export const DOM_IDS = {
   IN_CHAT_SEARCH_PREV: 'in-chat-search-prev',
   IN_CHAT_SEARCH_NEXT: 'in-chat-search-next',
   SETTINGS_PANEL: 'settings-panel',
+  VAULT_SETTINGS_PANEL: 'vault-settings-panel',
   BTN_EXPORT_CHAT_JSON: 'btn-export-chat-json',
   BTN_EXPORT_CHAT_HTML: 'btn-export-chat-html',
   LIGHTBOX_VIEWER: 'lightbox-viewer',
@@ -130,22 +139,28 @@ export const DOM_IDS = {
   MODAL_SHORTCUTS: 'modal-shortcuts',
   CALL_OVERLAY: 'call-overlay',
 
-  // 5. AI, MiniApps & Workspaces (11 IDs)
+  // 5. AI, MiniApps & Workspaces (14 IDs)
   MINIAPP_MODAL: 'miniapp-modal',
   MINIAPP_IFRAME: 'miniapp-iframe',
+  MINIAPP_PIP_OVERLAY: 'miniapp-pip-overlay',
   HERMES_STUDIO_PANEL: 'hermes-studio-panel',
   MAGPIE_GATEWAY_PANEL: 'magpie-gateway-panel',
   TASK_CENTER_WORKSPACE: 'task-center-workspace',
   MCP_TOOLS_DOCK: 'mcp-tools-dock',
+  OAUTH_MCP_GRANTS_PANEL: 'oauth-mcp-grants-panel',
   TALK_MODE_ORB: 'talk-mode-orb',
   COMPUTER_WORKBENCH: 'computer-workbench',
+  REMOTE_ASSIST_PANEL: 'remote-assist-panel',
   COMPUTER_CANVAS: 'computer-canvas',
   BTN_COMPUTER_TAKEOVER: 'btn-computer-takeover',
   WALLET_STARS_MODAL: 'wallet-stars-modal',
 
-  // 6. Browser Control & Desktop Bridge (10 IDs)
+  // 6. Browser Control & Desktop Bridge (13 IDs)
   NAV_DEST_BROWSER: 'nav-dest-browser',
   BROWSER_CONTROL_WORKSPACE: 'browser-control-workspace',
+  BROWSER_WORKSPACE: 'browser-workspace',
+  BROWSER_INSPECTOR_TABS: 'browser-inspector-tabs',
+  AUTOMATION_APP_STORE_PANEL: 'automation-app-store-panel',
   BTN_BROWSER_PAIR_DESKTOP: 'btn-browser-pair-desktop',
   BTN_BROWSER_REVOKE_CONTROL: 'btn-browser-revoke-control',
   BROWSER_PAIRING_CODE_DISPLAY: 'browser-pairing-code-display',

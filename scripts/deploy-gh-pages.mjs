@@ -7,8 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webDistDir = path.join(rootDir, 'apps', 'web', 'dist');
-const basePath = process.env.VITE_BASE_PATH || '/gpui-telegram-web/';
-const defaultServerUrl = process.env.VITE_DEFAULT_SERVER_URL || 'https://web.ombhrum.com';
+const repoSlug = process.env.GITHUB_REPOSITORY?.split('/')[1]?.trim();
+const basePath =
+  process.env.VITE_BASE_PATH?.trim() || (repoSlug ? `/${repoSlug}/` : '/fabushi-web/');
+const defaultServerUrl =
+  process.env.VITE_DEFAULT_SERVER_URL?.trim() || 'https://web.ombhrum.com';
 
 function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, {
@@ -45,7 +48,7 @@ run('npm', ['run', 'build', '--workspace=@gpui-telegram/web'], {
   },
 });
 
-const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpui-tg-pages-'));
+const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fabushi-web-pages-'));
 try {
   fs.cpSync(webDistDir, stageDir, { recursive: true });
   fs.copyFileSync(path.join(stageDir, 'index.html'), path.join(stageDir, '404.html'));
@@ -53,7 +56,7 @@ try {
 
   console.log('[deploy:pages] Publishing static bundle to origin/gh-pages...');
   run('git', ['init', '-b', 'gh-pages'], { cwd: stageDir });
-  run('git', ['config', 'user.name', gitName || 'gpui-telegram-bot'], { cwd: stageDir });
+  run('git', ['config', 'user.name', gitName || 'fabushi-web-bot'], { cwd: stageDir });
   run('git', ['config', 'user.email', gitEmail || 'noreply@github.com'], { cwd: stageDir });
   run('git', ['add', '-A'], { cwd: stageDir });
   run('git', ['commit', '-m', `deploy(pages): publish live web bundle (${new Date().toISOString()})`], {

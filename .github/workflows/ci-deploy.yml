@@ -69,7 +69,7 @@ jobs:
       - run: npm ci
       - name: Build Protocol & Web SPA for GitHub Pages
         env:
-          VITE_BASE_PATH: /gpui-telegram-web/
+          VITE_BASE_PATH: /fabushi-web/
           VITE_DEFAULT_SERVER_URL: https://web.ombhrum.com
         run: |
           npm run build --workspace=@gpui-telegram/protocol

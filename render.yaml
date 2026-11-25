@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: gpui-telegram-web
+    name: fabushi-web
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
@@ -14,10 +14,14 @@ services:
         value: "4173"
       - key: DATA_DIR
         value: /data
-      - key: OMBHRUM_API_URL
+      - key: GPUI_MASTER_SECRET
+        generateValue: true
+      - key: FABUSHI_CLOUD_GATEWAY_URL
         value: https://api.ombhrum.com
-      - key: AI_GATEWAY_URL
-        value: https://api.ombhrum.com/v1
+      - key: FABUSHI_AI_GATEWAY_URL
+        value: https://ai.ombhrum.com
+      - key: TURN_SECRET
+        sync: false
       - key: SEED_DEMO_DATA
         value: "0"
       - key: ALLOW_DEMO_AUTH
@@ -27,6 +31,6 @@ services:
       - key: ENABLE_TEST_RESET
         value: "0"
     disk:
-      name: gpui-telegram-sqlite-wal
+      name: fabushi-web-sqlite-wal
       mountPath: /data
       sizeGB: 2

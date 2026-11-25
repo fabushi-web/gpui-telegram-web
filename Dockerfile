@@ -28,6 +28,10 @@ RUN npm run build && npm prune --omit=dev
 # ==============================================================================
 FROM node:22-bookworm-slim AS runtime
 
+LABEL org.opencontainers.image.title="Fabushi Web" \
+      org.opencontainers.image.version="1.6.11" \
+      org.opencontainers.image.source="https://github.com/fabushiweb/fabushi-web"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     chromium \
@@ -37,13 +41,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Runtime defaults for FABUSHI_CLOUD_GATEWAY_URL (https://api.ombhrum.com),
+# FABUSHI_AI_GATEWAY_URL (https://ai.ombhrum.com), GPUI_MASTER_SECRET, and TURN_SECRET
+# are resolved in apps/server/src/config.ts so canonical or legacy alias env vars never shadow.
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=4173 \
     DATA_DIR=/data \
     CHROMIUM_PATH=/usr/bin/chromium \
-    OMBHRUM_API_URL=https://api.ombhrum.com \
-    AI_GATEWAY_URL=https://api.ombhrum.com/v1 \
     SEED_DEMO_DATA=0 \
     ALLOW_DEMO_AUTH=0 \
     EXPOSE_DEV_OTP_CODE=0 \

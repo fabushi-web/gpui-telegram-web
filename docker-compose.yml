@@ -1,9 +1,9 @@
 services:
-  gpui-telegram-web:
+  fabushi-web:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: gpui-telegram-web
+    container_name: fabushi-web
     restart: unless-stopped
     ports:
       - "${PORT:-4173}:4173"
@@ -12,10 +12,14 @@ services:
       HOST: 0.0.0.0
       PORT: 4173
       DATA_DIR: /data
+      GPUI_MASTER_SECRET: "${GPUI_MASTER_SECRET:-}"
       SESSION_SECRET: "${SESSION_SECRET:-}"
       UPSTREAM_SERVER_URL: "${UPSTREAM_SERVER_URL:-}"
-      OMBHRUM_API_URL: "${OMBHRUM_API_URL:-https://api.ombhrum.com}"
-      AI_GATEWAY_URL: "${AI_GATEWAY_URL:-https://api.ombhrum.com/v1}"
+      PROXY_BROWSER_WS: "${PROXY_BROWSER_WS:-0}"
+      FABUSHI_CLOUD_GATEWAY_URL: "${FABUSHI_CLOUD_GATEWAY_URL:-}"
+      OMBHRUM_API_URL: "${OMBHRUM_API_URL:-}"
+      FABUSHI_AI_GATEWAY_URL: "${FABUSHI_AI_GATEWAY_URL:-}"
+      AI_GATEWAY_URL: "${AI_GATEWAY_URL:-}"
       AI_GATEWAY_API_KEY: "${AI_GATEWAY_API_KEY:-}"
       TURN_URIS: "${TURN_URIS:-}"
       TURN_SECRET: "${TURN_SECRET:-}"
@@ -24,7 +28,7 @@ services:
       EXPOSE_DEV_OTP_CODE: "0"
       ENABLE_TEST_RESET: "0"
     volumes:
-      - gpui_telegram_data:/data
+      - fabushi_web_data:/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4173/api/v1/health"]
       interval: 30s
@@ -33,4 +37,4 @@ services:
       start_period: 10s
 
 volumes:
-  gpui_telegram_data:
+  fabushi_web_data:

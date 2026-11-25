@@ -10,6 +10,7 @@
 import type { EncryptedEnvelope } from './e2ee.js';
 import type { MessageEntity, WireMessageEntity } from './entities.js';
 import { fromWireMessageEntity, toWireMessageEntity } from './entities.js';
+import type { AuthVersion } from './userVault.js';
 
 export type WirePeerId =
   | { User: number }
@@ -885,6 +886,50 @@ export function createTextContent(text: string, entities?: MessageEntity[]): Mes
 // Auth, Session, Contacts, Privacy, Search, Stats, Media & Calls DTOs
 // ============================================================================
 
+export interface ServerStatusResponse {
+  server: string;
+  status: string;
+  version: string;
+  capabilities: string[];
+}
+
+export interface CreateChatRequest {
+  title?: string;
+  chat_type?: number | string;
+  peer_user_id?: number;
+  username?: string;
+  about?: string;
+  is_forum?: boolean;
+  member_ids?: number[];
+  member_usernames?: string[];
+  client_nonce?: string;
+}
+
+export interface SendMessageRequest {
+  chat_id?: number;
+  text?: string;
+  content?: MessageContent;
+  entities?: Array<MessageEntity | WireMessageEntity>;
+  parse_markdown?: boolean;
+  reply_to?: number | { reply_to_msg_id: number; quote_text?: string };
+  reply_to_id?: number;
+  quote_text?: string;
+  topic_id?: number;
+  client_nonce?: number;
+  forward_from_chat_id?: number;
+  forward_from_msg_id?: number;
+  forward_info?: ForwardInfo;
+  silent?: boolean;
+  schedule_at_ms?: number;
+  scheduled_at_ms?: number;
+  ttl_seconds?: number;
+  inline_keyboard?: InlineKeyboardButton[][];
+  send_as_peer_id?: number;
+  skip_server_bot_reply?: boolean;
+}
+
+export type SendMessageHttpRequest = SendMessageRequest;
+
 export interface AuthResponse {
   user_id: number;
   username: string;
@@ -894,6 +939,10 @@ export interface AuthResponse {
   last_name?: string;
   expires_at_ms?: number;
   user?: UserProfileDto;
+  account_generation?: number;
+  created_at?: string;
+  expires_at?: string;
+  auth_version?: AuthVersion;
 }
 
 export interface SessionDto {

@@ -4,6 +4,8 @@
  * Full-Duplex Talk Mode, Remote Computer Workbench, Tailnet, and Stars/TON Wallet Contracts.
  */
 
+import type { CodingAgentBotConfig } from './codingAgents.js';
+
 export interface BotCommandSpec {
   command: string;
   description: string;
@@ -32,6 +34,20 @@ export interface BotRegistryEntry {
   toolset_preset?: string;
   webhook_url?: string;
   created_at_ms: number;
+  agent_id?: string;
+  avatar_shape?: string;
+  avatar_color?: string;
+  is_fabushi_bot?: boolean;
+  attach_peer_types?: string[];
+  privacy_policy_url?: string;
+  has_settings?: boolean;
+  can_join_groups?: boolean;
+  mau_count?: number;
+  allows_write_to_pm?: boolean;
+  app_tos_accepted?: boolean;
+  is_blocked_by_viewer?: boolean;
+  coding_agent?: CodingAgentBotConfig | null;
+  created_at?: number;
 }
 
 export interface MiniAppThemeParams {
@@ -60,6 +76,20 @@ export interface MiniAppEntry {
   companion_chat_id?: number;
   install_count: number;
   created_at_ms: number;
+  bot_display_name?: string;
+  peer_types?: string[];
+  has_write_access?: boolean;
+  direct_chat_id?: number | null;
+  created_by_nl?: boolean;
+  updated_at?: number;
+  mau_count?: number;
+  is_main_app?: boolean;
+  is_recent_used?: boolean;
+  last_launched_at?: number;
+  privacy_policy_url?: string;
+  app_tos_accepted?: boolean;
+  header_color?: string | null;
+  background_color?: string | null;
 }
 
 export interface MiniAppLaunchContext {

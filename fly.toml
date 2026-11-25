@@ -1,4 +1,5 @@
-app = "gpui-telegram-web"
+# Set secrets with: fly secrets set GPUI_MASTER_SECRET=... TURN_SECRET=...
+app = "fabushi-web"
 primary_region = "sin"
 
 [build]
@@ -9,15 +10,15 @@ primary_region = "sin"
   HOST = "0.0.0.0"
   PORT = "4173"
   DATA_DIR = "/data"
-  OMBHRUM_API_URL = "https://api.ombhrum.com"
-  AI_GATEWAY_URL = "https://api.ombhrum.com/v1"
+  FABUSHI_CLOUD_GATEWAY_URL = "https://api.ombhrum.com"
+  FABUSHI_AI_GATEWAY_URL = "https://ai.ombhrum.com"
   SEED_DEMO_DATA = "0"
   ALLOW_DEMO_AUTH = "0"
   EXPOSE_DEV_OTP_CODE = "0"
   ENABLE_TEST_RESET = "0"
 
 [mounts]
-  source = "gpui_telegram_data"
+  source = "fabushi_web_data"
   destination = "/data"
 
 [http_service]

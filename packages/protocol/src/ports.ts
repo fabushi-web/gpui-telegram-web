@@ -77,7 +77,44 @@ import type {
   TypingAction,
   UpdateEvent,
 } from './sync.js';
+import type {
+  DeviceSyncActionResponse,
+  DeviceSyncApproveRequest,
+  DeviceSyncRequestDto,
+  DeviceSyncRequestResponse,
+  DeviceSyncStatusResponse,
+  KdfParamsResponse,
+  PendingDeviceSyncListResponse,
+  UpsertUserVaultItemRequest,
+  UpsertUserVaultItemResponse,
+  UserVaultEnvelopeResponse,
+  UserVaultKeyEnvelopeDto,
+  UserVaultSyncPullResponse,
+} from './userVault.js';
+import type {
+  AutomationAppDetail,
+  InstallAutomationAppResponse,
+  ListAutomationAppsQuery,
+  ListAutomationAppsResponse,
+  ListInstalledAutomationAppsResponse,
+  PublishAutomationAppRequest,
+  RecordAutomationRunRequest,
+  RecordAutomationRunResponse,
+  UninstallAutomationAppResponse,
+} from './automationApps.js';
+import type { CodingAgentsProbeRequest, CodingAgentsProbeResponse } from './codingAgents.js';
+import type {
+  AssistStartRequest,
+  AssistStartResponse,
+  RemoteAssistConfigDto,
+  RemoteSessionsResponse,
+} from './remoteControl.js';
+import type { McpAuditListResponse, OAuthGrantsResponse } from './officialMcp.js';
 
+/**
+ * Runtime transport mode.
+ * @deprecated `'sandbox'` and `'mtproto'` modes are scheduled for removal in M4 production runtime.
+ */
 export type AdapterMode = 'server' | 'sandbox' | 'mtproto';
 
 export type ConnectionState =
@@ -108,6 +145,7 @@ export interface SendMessagePortInput {
   scheduleAtMs?: number;
   ttlSeconds?: number;
   sendAsPeerId?: number;
+  skipServerBotReply?: boolean;
 }
 
 export interface HermesStudioSnapshot {
@@ -143,7 +181,9 @@ export interface TelegramClientPort {
   getDifference(req: SyncGetDifferenceRequest): Promise<SyncGetDifferenceResponse>;
 
   // F1: Auth, 2FA, QR, Passkeys & Sessions
+  /** @deprecated Demo auth is removed in v1.6.11 production runtime (M4). */
   loginDemo(slot?: number): Promise<AuthResponse>;
+  /** Note: `dev_code` is @deprecated and omitted in v1.6.11 production runtime. */
   sendPhoneCode(phone: string): Promise<{ phone_code_hash: string; timeout_secs: number; dev_code?: string }>;
   verifyPhoneCode(req: {
     phone: string;
@@ -167,10 +207,12 @@ export interface TelegramClientPort {
     first_name: string;
     last_name?: string;
   }): Promise<AuthResponse>;
+  /** Note: `dev_code` is @deprecated and omitted in v1.6.11 production runtime. */
   sendEmailCode(email: string): Promise<{ email_code_hash: string; dev_code?: string }>;
   verifyEmailCode(req: { email: string; code: string; email_code_hash?: string }): Promise<AuthResponse>;
   startAlipayAuth(): Promise<{ session_id: string; qr_url: string; svg: string; expires_at_ms: number }>;
   pollAlipayAuth(sessionId: string): Promise<{ status: string; auth?: AuthResponse }>;
+  /** @deprecated Local Alipay confirmation bypass is removed in v1.6.11 (M4). */
   confirmAlipayAuth(sessionId: string): Promise<AuthResponse>;
   getPasskeyChallenge(username?: string): Promise<{ challenge_id: string; challenge: string; rp_id: string }>;
   registerPasskey(req: { cred_id?: string; label: string; public_key_b64?: string }): Promise<{ cred_id: string; label: string }>;
@@ -192,6 +234,8 @@ export interface TelegramClientPort {
     isForum?: boolean;
     peerUserId?: number;
     memberIds?: number[];
+    memberUsernames?: string[];
+    clientNonce?: string;
   }): Promise<ChatSummary>;
   updateChat(chatId: number, patch: Partial<{ title: string; about: string; username: string; slowModeSeconds: number; isForum: boolean }>): Promise<ChatSummary>;
   deleteOrLeaveChat(chatId: number): Promise<void>;
@@ -395,8 +439,42 @@ export interface TelegramClientPort {
   }): Promise<McpServerDto>;
   deleteMcpServer?(serverId: string): Promise<void>;
 
+  // Optional v1.6.11 Split-Key V2 Vault, Device Sync, Automation Apps, Coding Agents, Remote Assist & OAuth MCP
+  getKdfParams?(usernameOrEmail: string): Promise<KdfParamsResponse>;
+  getUserVaultEnvelope?(): Promise<UserVaultEnvelopeResponse>;
+  putUserVaultEnvelope?(envelope: UserVaultKeyEnvelopeDto): Promise<UserVaultEnvelopeResponse>;
+  listUserVaultItems?(sinceRevision?: number): Promise<UserVaultSyncPullResponse>;
+  upsertUserVaultItem?(
+    category: string,
+    itemKey: string,
+    req: UpsertUserVaultItemRequest,
+  ): Promise<UpsertUserVaultItemResponse>;
+  deleteUserVaultItem?(category: string, itemKey: string): Promise<UpsertUserVaultItemResponse>;
+  requestDeviceSync?(req: DeviceSyncRequestDto): Promise<DeviceSyncRequestResponse>;
+  listPendingDeviceSyncs?(): Promise<PendingDeviceSyncListResponse>;
+  approveDeviceSync?(requestId: string, req: DeviceSyncApproveRequest): Promise<DeviceSyncActionResponse>;
+  denyDeviceSync?(requestId: string): Promise<DeviceSyncActionResponse>;
+  getDeviceSyncStatus?(requestId: string): Promise<DeviceSyncStatusResponse>;
+  listAutomationApps?(query?: ListAutomationAppsQuery): Promise<ListAutomationAppsResponse>;
+  listInstalledAutomationApps?(): Promise<ListInstalledAutomationAppsResponse>;
+  getAutomationApp?(appId: string): Promise<AutomationAppDetail>;
+  publishAutomationApp?(req: PublishAutomationAppRequest): Promise<AutomationAppDetail>;
+  installAutomationApp?(appId: string): Promise<InstallAutomationAppResponse>;
+  uninstallAutomationApp?(appId: string): Promise<UninstallAutomationAppResponse>;
+  recordAutomationRun?(appId: string, req: RecordAutomationRunRequest): Promise<RecordAutomationRunResponse>;
+  probeCodingAgents?(req?: CodingAgentsProbeRequest): Promise<CodingAgentsProbeResponse>;
+  getRemoteAssistInfo?(): Promise<RemoteAssistConfigDto>;
+  startRemoteAssist?(req: AssistStartRequest): Promise<AssistStartResponse>;
+  listRemoteSessions?(): Promise<RemoteSessionsResponse>;
+  disconnectRemoteSession?(sessionId: string): Promise<{ ok: boolean }>;
+  disconnectAllRemoteSessions?(): Promise<{ ok: boolean; disconnected: number }>;
+  listOAuthMcpGrants?(): Promise<OAuthGrantsResponse>;
+  revokeOAuthMcpGrant?(familyId: string): Promise<{ ok: boolean }>;
+  listOAuthMcpAudit?(limit?: number): Promise<McpAuditListResponse>;
+
   getTailnetStatus(): Promise<TailnetStatusDto>;
   getWalletState(): Promise<WalletStateDto>;
+  /** @deprecated Unverified direct Stars minting is replaced by verified checkout/redeem in v1.6.11. */
   topUpStars(amount: number): Promise<WalletStateDto>;
   sendStarGift(req: { toUserId: number; chatId?: number; amountStars: number; giftId?: string; message?: string }): Promise<WalletStateDto>;
 }
