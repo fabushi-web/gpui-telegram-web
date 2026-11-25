@@ -1,3 +1,5 @@
+import '../../styles/ai-miniapps.css';
+
 export { HermesStudioPanel, type HermesStudioPanelProps } from './HermesStudioPanel';
 export { MagpieGatewayPanel, type MagpieGatewayPanelProps } from './MagpieGatewayPanel';
 export {

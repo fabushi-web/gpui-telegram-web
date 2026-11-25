@@ -38,6 +38,7 @@ export type SettingsSectionId =
   | 'wallpaper'
   | 'notifications'
   | 'privacy'
+  | 'vault'
   | 'passcode'
   | 'two_fa'
   | 'passkeys'
@@ -61,6 +62,8 @@ export type ModalId =
   | 'create_group'
   | 'create_channel'
   | 'create_secret_chat'
+  | 'create_bot'
+  | 'shortcuts'
   | 'contacts'
   | 'forward_messages'
   | 'delete_confirm'
@@ -76,6 +79,22 @@ export type ModalId =
   | 'reaction_details'
   | 'passcode_setup'
   | null;
+
+export interface ComposeRecipient {
+  userId: number;
+  name: string;
+  username?: string;
+  isBot?: boolean;
+  avatarShape?: string;
+  avatarColor?: string;
+}
+
+export interface AppleComposeStageState {
+  isOpen: boolean;
+  recipients: ComposeRecipient[];
+  pendingCreation: boolean;
+  carryDraft: string;
+}
 
 export interface ContextMenuState {
   kind: 'message' | 'chat';
@@ -100,6 +119,7 @@ export interface MediaEditorState {
   isOpen: boolean;
   chatId: number;
   file: File | Blob;
+  extraFiles?: File[];
   previewUrl: string;
   fileName: string;
   mimeType: string;
@@ -145,10 +165,36 @@ export interface ActiveCallUiState {
   runtime: ActiveWebRtcCallRuntime | null;
 }
 
+export type ToastKind = 'info' | 'success' | 'warning' | 'error';
+export type ToastScope = 'window' | 'stage';
+
+export interface StageToastState {
+  id: number;
+  chatId: number;
+  message: string;
+  kind: ToastKind;
+}
+
+export interface WindowToastState {
+  id: number;
+  chatId: number | null;
+  message: string;
+  kind: ToastKind;
+}
+
 export interface ToastNotification {
   id: string;
+  numericId: number;
   message: string;
-  kind: 'info' | 'success' | 'warning' | 'error';
+  kind: ToastKind;
+  scope: ToastScope;
+  chatId: number | null;
+}
+
+export interface PushToastOptions {
+  scope?: ToastScope;
+  chatId?: number | null;
+  durationMs?: number;
 }
 
 export interface UiState {
@@ -169,6 +215,9 @@ export interface UiState {
   activeModal: ModalId;
   modalPayload: Record<string, unknown> | null;
   miniAppModalOpen: boolean;
+  miniAppPipMinimized: boolean;
+
+  appleComposeStage: AppleComposeStageState;
 
   contextMenu: ContextMenuState | null;
   lightboxState: LightboxViewerState | null;
@@ -177,6 +226,9 @@ export interface UiState {
   storiesViewerState: StoriesViewerState | null;
   audioPlayerState: AudioPlayerState;
   activeCall: ActiveCallUiState;
+
+  stageToast: StageToastState | null;
+  windowToast: WindowToastState | null;
   toasts: ToastNotification[];
 
   setLeftSidebarWidth: (width: number) => void;
@@ -200,6 +252,16 @@ export interface UiState {
   openModal: (modal: Exclude<ModalId, null>, payload?: Record<string, unknown> | null) => void;
   closeModal: () => void;
   setMiniAppModalOpen: (open: boolean) => void;
+  setMiniAppPipMinimized: (minimized: boolean) => void;
+  minimizeMiniAppToPip: () => void;
+  restoreMiniAppFromPip: () => void;
+
+  openAppleComposeStage: (carryDraft?: string) => void;
+  closeAppleComposeStage: () => void;
+  addComposeRecipient: (recipient: ComposeRecipient) => void;
+  removeComposeRecipient: (userId: number) => void;
+  setComposePending: (pending: boolean) => void;
+  setComposeCarryDraft: (draft: string) => void;
 
   openContextMenu: (menu: ContextMenuState) => void;
   closeContextMenu: () => void;
@@ -238,8 +300,16 @@ export interface UiState {
   toggleCallScreenShare: () => Promise<boolean>;
   endActiveCall: () => Promise<void>;
 
-  pushToast: (message: string, kind?: ToastNotification['kind']) => void;
+  pushToast: (
+    message: string,
+    kind?: ToastKind,
+    scopeOrOpts?: ToastScope | PushToastOptions,
+  ) => number;
+  pushStageToast: (message: string, kind?: ToastKind, chatId?: number) => number;
   dismissToast: (id: string) => void;
+  dismissStageToastIfId: (id: number) => void;
+  dismissWindowToastIfId: (id: number) => void;
+  clearToastsForChat: (chatId: number | null) => void;
 
   /**
    * Deterministic 7-Layer Escape Stack: pops strictly ONE topmost layer per Escape press!
@@ -258,7 +328,7 @@ function loadInitialSidebarWidth(): number {
   } catch {
     // Ignore
   }
-  return 340;
+  return 288;
 }
 
 function applySidebarWidthCss(width: number): void {
@@ -270,14 +340,14 @@ function applySidebarWidthCss(width: number): void {
 const initialWidth = loadInitialSidebarWidth();
 applySidebarWidthCss(initialWidth);
 
-// Shared singleton HTMLAudioElement + synthetic progress ticker for headless environments
+let nextToastSequence = 1;
 let sharedAudioEl: HTMLAudioElement | null = null;
-let synthAudioTicker: ReturnType<typeof setInterval> | null = null;
+let audioProgressTicker: ReturnType<typeof setInterval> | null = null;
 
-function clearSynthTicker(): void {
-  if (synthAudioTicker) {
-    clearInterval(synthAudioTicker);
-    synthAudioTicker = null;
+function clearAudioProgressTicker(): void {
+  if (audioProgressTicker) {
+    clearInterval(audioProgressTicker);
+    audioProgressTicker = null;
   }
 }
 
@@ -309,6 +379,14 @@ export const useUiStore = create<UiState>((set, get) => ({
   activeModal: null,
   modalPayload: null,
   miniAppModalOpen: false,
+  miniAppPipMinimized: false,
+
+  appleComposeStage: {
+    isOpen: false,
+    recipients: [],
+    pendingCreation: false,
+    carryDraft: '',
+  },
 
   contextMenu: null,
   lightboxState: null,
@@ -331,6 +409,9 @@ export const useUiStore = create<UiState>((set, get) => ({
     isMinimized: false,
     runtime: null,
   },
+
+  stageToast: null,
+  windowToast: null,
   toasts: [],
 
   setLeftSidebarWidth: (width) => {
@@ -424,7 +505,79 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   closeModal: () => set({ activeModal: null, modalPayload: null }),
 
-  setMiniAppModalOpen: (miniAppModalOpen) => set({ miniAppModalOpen }),
+  setMiniAppModalOpen: (miniAppModalOpen) =>
+    set((prev) => ({
+      miniAppModalOpen,
+      miniAppPipMinimized: miniAppModalOpen ? false : prev.miniAppPipMinimized,
+    })),
+
+  setMiniAppPipMinimized: (miniAppPipMinimized) => set({ miniAppPipMinimized }),
+
+  minimizeMiniAppToPip: () => set({ miniAppModalOpen: false, miniAppPipMinimized: true }),
+
+  restoreMiniAppFromPip: () => set({ miniAppModalOpen: true, miniAppPipMinimized: false }),
+
+  openAppleComposeStage: (carryDraft = '') => {
+    get().clearToastsForChat(null);
+    set({
+      activeNavDest: 'chats',
+      mobilePane: 'middle',
+      isBurgerOpen: false,
+      appleComposeStage: {
+        isOpen: true,
+        recipients: [],
+        pendingCreation: false,
+        carryDraft,
+      },
+    });
+  },
+
+  closeAppleComposeStage: () =>
+    set({
+      appleComposeStage: {
+        isOpen: false,
+        recipients: [],
+        pendingCreation: false,
+        carryDraft: '',
+      },
+    }),
+
+  addComposeRecipient: (recipient) =>
+    set((prev) => {
+      if (prev.appleComposeStage.recipients.some((r) => r.userId === recipient.userId)) {
+        return prev;
+      }
+      return {
+        appleComposeStage: {
+          ...prev.appleComposeStage,
+          recipients: [...prev.appleComposeStage.recipients, recipient],
+        },
+      };
+    }),
+
+  removeComposeRecipient: (userId) =>
+    set((prev) => ({
+      appleComposeStage: {
+        ...prev.appleComposeStage,
+        recipients: prev.appleComposeStage.recipients.filter((r) => r.userId !== userId),
+      },
+    })),
+
+  setComposePending: (pendingCreation) =>
+    set((prev) => ({
+      appleComposeStage: {
+        ...prev.appleComposeStage,
+        pendingCreation,
+      },
+    })),
+
+  setComposeCarryDraft: (carryDraft) =>
+    set((prev) => ({
+      appleComposeStage: {
+        ...prev.appleComposeStage,
+        carryDraft,
+      },
+    })),
 
   openContextMenu: (contextMenu) => set({ contextMenu }),
   closeContextMenu: () => set({ contextMenu: null }),
@@ -508,7 +661,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       }
       const nextGroupIdx = sv.activeGroupIndex + delta;
       if (nextGroupIdx >= 0 && nextGroupIdx < sv.groups.length) {
-        const targetStories = sv.groups[nextGroupIdx].stories;
+        const targetStories = sv.groups[nextGroupIdx]!.stories;
         return {
           storiesViewerState: {
             ...sv,
@@ -523,7 +676,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   closeStoriesViewer: () => set({ storiesViewerState: null }),
 
   playVoiceOrAudio: (chatId, message, srcUrl, fallbackDuration = 3) => {
-    clearSynthTicker();
+    clearAudioProgressTicker();
     const rate = get().audioPlayerState.rate;
     const durationSec = Math.max(1, fallbackDuration);
 
@@ -566,7 +719,7 @@ export const useUiStore = create<UiState>((set, get) => ({
           }));
         };
         sharedAudioEl.onended = () => {
-          clearSynthTicker();
+          clearAudioProgressTicker();
           set((prev) => ({
             audioPlayerState: {
               ...prev.audioPlayerState,
@@ -577,15 +730,14 @@ export const useUiStore = create<UiState>((set, get) => ({
           }));
         };
         void sharedAudioEl.play().catch(() => {
-          // Headless autoplay fallback ticker
+          // Autoplay restriction handled gracefully
         });
       } catch {
-        // Fallback ticker below handles headless environments cleanly
+        // Ignore Audio init error
       }
     }
 
-    // Deterministic progress ticker guarantees smooth progress even if headless Audio output is muted
-    synthAudioTicker = setInterval(() => {
+    audioProgressTicker = setInterval(() => {
       const st = get().audioPlayerState;
       if (!st.isOpen || !st.isPlaying) return;
       if (sharedAudioEl && !sharedAudioEl.paused && sharedAudioEl.currentTime > 0) {
@@ -593,7 +745,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       }
       const nextSec = st.currentTimeSec + 0.1 * st.rate;
       if (nextSec >= st.durationSec) {
-        clearSynthTicker();
+        clearAudioProgressTicker();
         set((prev) => ({
           audioPlayerState: {
             ...prev.audioPlayerState,
@@ -671,7 +823,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   },
 
   closeAudioPlayer: () => {
-    clearSynthTicker();
+    clearAudioProgressTicker();
     if (sharedAudioEl) {
       sharedAudioEl.pause();
     }
@@ -687,14 +839,26 @@ export const useUiStore = create<UiState>((set, get) => ({
   },
 
   startOutgoingCall: async ({ calleeId, localUserId, isVideo, chatId }) => {
-    const { getClientAdapter } = await import('../adapters');
-    const adapter = getClientAdapter();
+    const { getServerAdapter } = await import('../adapters');
+    const adapter = getServerAdapter();
     webrtcManager.setSignalSender((sig) => adapter.sendCallSignal(sig));
-    const session = await adapter.startCall(calleeId, isVideo, chatId);
+    const [session, turnCreds] = await Promise.all([
+      adapter.startCall(calleeId, isVideo, chatId),
+      adapter.getTurnCredentials().catch(() => undefined),
+    ]);
+    const iceServers: RTCIceServer[] | undefined =
+      turnCreds && Array.isArray(turnCreds.uris) && turnCreds.uris.length > 0
+        ? turnCreds.uris.map((uri) =>
+            uri.startsWith('turn:') || uri.startsWith('turns:')
+              ? { urls: uri, username: turnCreds.username, credential: turnCreds.credential }
+              : { urls: uri },
+          )
+        : undefined;
     const runtime = await webrtcManager.startCallSession({
       callSession: session,
       localUserId,
       chatId,
+      iceServers,
     });
     set({
       activeCall: {
@@ -703,6 +867,9 @@ export const useUiStore = create<UiState>((set, get) => ({
         runtime,
       },
     });
+    if (runtime.mediaError) {
+      get().pushToast(runtime.mediaError, 'error', 'window');
+    }
   },
 
   toggleCallMinimize: (minimized) =>
@@ -735,19 +902,79 @@ export const useUiStore = create<UiState>((set, get) => ({
     });
   },
 
-  pushToast: (message, kind = 'info') => {
-    const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  pushToast: (message, kind = 'info', scopeOrOpts) => {
+    const numericId = nextToastSequence++;
+    const id = `toast_${numericId}`;
+    const opts: PushToastOptions =
+      typeof scopeOrOpts === 'string' ? { scope: scopeOrOpts } : (scopeOrOpts ?? {});
+    const scope: ToastScope = opts.scope ?? 'window';
+    const chatId = opts.chatId ?? null;
+    const durationMs = opts.durationMs ?? 3_500;
+
     set((prev) => ({
-      toasts: [...prev.toasts.slice(-4), { id, message, kind }],
+      stageToast:
+        scope === 'stage'
+          ? { id: numericId, chatId: chatId ?? 0, message, kind }
+          : prev.stageToast,
+      windowToast:
+        scope === 'window'
+          ? { id: numericId, chatId, message, kind }
+          : prev.windowToast,
+      toasts: [...prev.toasts.slice(-4), { id, numericId, message, kind, scope, chatId }],
     }));
+
     setTimeout(() => {
-      get().dismissToast(id);
-    }, 3_500);
+      if (scope === 'stage') {
+        get().dismissStageToastIfId(numericId);
+      } else {
+        get().dismissWindowToastIfId(numericId);
+      }
+    }, durationMs);
+
+    return numericId;
   },
 
-  dismissToast: (id) =>
+  pushStageToast: (message, kind = 'info', chatId = 0) =>
+    get().pushToast(message, kind, { scope: 'stage', chatId }),
+
+  dismissStageToastIfId: (id) =>
     set((prev) => ({
-      toasts: prev.toasts.filter((t) => t.id !== id),
+      stageToast: prev.stageToast?.id === id ? null : prev.stageToast,
+      toasts: prev.toasts.filter((t) => !(t.scope === 'stage' && t.numericId === id)),
+    })),
+
+  dismissWindowToastIfId: (id) =>
+    set((prev) => ({
+      windowToast: prev.windowToast?.id === id ? null : prev.windowToast,
+      toasts: prev.toasts.filter((t) => !(t.scope === 'window' && t.numericId === id)),
+    })),
+
+  dismissToast: (id) =>
+    set((prev) => {
+      const target = prev.toasts.find((t) => t.id === id);
+      return {
+        toasts: prev.toasts.filter((t) => t.id !== id),
+        stageToast:
+          target && prev.stageToast?.id === target.numericId ? null : prev.stageToast,
+        windowToast:
+          target && prev.windowToast?.id === target.numericId ? null : prev.windowToast,
+      };
+    }),
+
+  clearToastsForChat: (chatId) =>
+    set((prev) => ({
+      stageToast:
+        prev.stageToast && (chatId === null || prev.stageToast.chatId === chatId)
+          ? null
+          : prev.stageToast,
+      windowToast:
+        prev.windowToast && chatId !== null && prev.windowToast.chatId === chatId
+          ? null
+          : prev.windowToast,
+      toasts: prev.toasts.filter((t) => {
+        if (t.scope === 'stage') return chatId !== null && t.chatId !== chatId;
+        return !(chatId !== null && t.chatId === chatId);
+      }),
     })),
 
   popTopEscapeLayer: (externalChatLayerHandler) => {
@@ -781,13 +1008,24 @@ export const useUiStore = create<UiState>((set, get) => ({
       return true;
     }
 
-    // Layer 3: Modals, MiniApp Modal, or Expanded Call Overlay (minimizes call to top bar!)
+    // Layer 3: Modals, Apple Compose Stage, MiniApp Modal, or Expanded Call Overlay
     if (s.activeModal !== null) {
       set({ activeModal: null, modalPayload: null });
       return true;
     }
+    if (s.appleComposeStage.isOpen) {
+      set({
+        appleComposeStage: {
+          isOpen: false,
+          recipients: [],
+          pendingCreation: false,
+          carryDraft: '',
+        },
+      });
+      return true;
+    }
     if (s.miniAppModalOpen) {
-      set({ miniAppModalOpen: false });
+      set({ miniAppModalOpen: false, miniAppPipMinimized: false });
       externalEscapeHooks.closeMiniApp?.();
       return true;
     }
@@ -805,7 +1043,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       return true;
     }
 
-    // Layer 5: Settings 25-Section Slide-Stack (pops sub-section first, then closes panel)
+    // Layer 5: Settings Slide-Stack (pops sub-section first, then closes panel)
     if (s.settingsStack.length > 1) {
       set({ settingsStack: s.settingsStack.slice(0, -1) });
       return true;

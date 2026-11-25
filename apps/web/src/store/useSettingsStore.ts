@@ -5,6 +5,7 @@ import { normalizeLocale, setActiveLocale, type LocaleCode } from '../i18n';
 export type ThemeName = SyncThemeName;
 
 export const NON_PURPLE_ACCENT_SWATCHES = [
+  '#0A84FF',
   '#3390EC',
   '#1084FE',
   '#3FC1B0',
@@ -30,7 +31,7 @@ export interface SettingsState {
   wallpaper: WallpaperPreset;
   wallpaperBlur: boolean;
   fontSize: number; // 12..20 px
-  bubbleRadius: number; // 6..18 px
+  bubbleRadius: number; // 6..22 px
   uiScale: number; // 50..200 (%)
   language: LocaleCode;
   sendByEnter: boolean;
@@ -78,11 +79,11 @@ interface PersistedSettingsSnapshot {
 
 const DEFAULT_SETTINGS: PersistedSettingsSnapshot = {
   theme: 'night',
-  accentColor: '#3390EC',
+  accentColor: '#0A84FF',
   wallpaper: 'default',
   wallpaperBlur: false,
   fontSize: 14,
-  bubbleRadius: 14,
+  bubbleRadius: 18,
   uiScale: 100,
   language: 'en-US',
   sendByEnter: true,
@@ -92,11 +93,15 @@ const DEFAULT_SETTINGS: PersistedSettingsSnapshot = {
   globalTtl: 0,
 };
 
+function defaultAccentForThemeName(theme: ThemeName): string {
+  return theme === 'classic' ? '#40A7E3' : '#0A84FF';
+}
+
 function sanitizeNonPurpleAccent(hex: string): string {
   const trimmed = hex.trim();
   const m = trimmed.match(/^#?([0-9a-f]{6})$/i);
-  if (!m) return '#3390EC';
-  const num = parseInt(m[1], 16);
+  if (!m) return '#0A84FF';
+  const num = parseInt(m[1]!, 16);
   const r = ((num >> 16) & 0xff) / 255;
   const g = ((num >> 8) & 0xff) / 255;
   const b = (num & 0xff) / 255;
@@ -109,12 +114,12 @@ function sanitizeNonPurpleAccent(hex: string): string {
     else if (max === g) h = 60 * ((b - r) / d + 2);
     else h = 60 * ((r - g) / d + 4);
     if (h < 0) h += 360;
-    // Guard against purple/violet hue band (238°..312°)
+    // Guard against purple/violet hue band (235°..315°)
     if (h >= 235 && h <= 315) {
-      return '#3390EC';
+      return '#0A84FF';
     }
   }
-  return `#${m[1].toUpperCase()}`;
+  return `#${m[1]!.toUpperCase()}`;
 }
 
 function clampNumber(val: number, min: number, max: number, fallback: number): number {
@@ -124,7 +129,6 @@ function clampNumber(val: number, min: number, max: number, fallback: number): n
 
 function normalizeUiScalePercent(raw: number): number {
   if (!Number.isFinite(raw)) return 100;
-  // Accept both ratio (0.5..2.0) and percent (50..200)
   const pct = raw <= 3 ? Math.round(raw * 100) : Math.round(raw);
   return clampNumber(pct, 50, 200, 100);
 }
@@ -132,11 +136,11 @@ function normalizeUiScalePercent(raw: number): number {
 function resolveWallpaperCss(preset: WallpaperPreset): string | null {
   switch (preset) {
     case 'ocean':
-      return 'linear-gradient(135deg, rgba(14, 22, 33, 0.92) 0%, rgba(27, 73, 120, 0.45) 100%)';
+      return 'linear-gradient(135deg, rgba(14, 14, 14, 0.94) 0%, rgba(10, 132, 255, 0.28) 100%)';
     case 'emerald':
-      return 'linear-gradient(135deg, rgba(14, 22, 33, 0.90) 0%, rgba(0, 201, 114, 0.22) 100%)';
+      return 'linear-gradient(135deg, rgba(14, 14, 14, 0.92) 0%, rgba(0, 201, 114, 0.22) 100%)';
     case 'amber':
-      return 'linear-gradient(135deg, rgba(14, 22, 33, 0.92) 0%, rgba(229, 160, 48, 0.20) 100%)';
+      return 'linear-gradient(135deg, rgba(14, 14, 14, 0.94) 0%, rgba(229, 160, 48, 0.20) 100%)';
     case 'graphite':
       return 'radial-gradient(circle at 50% 30%, rgba(41, 182, 246, 0.08), transparent 60%)';
     case 'solid':
@@ -160,12 +164,7 @@ export function applySettingsToDocument(snap: PersistedSettingsSnapshot): void {
   root.style.setProperty('--tg-bubble-radius', `${snap.bubbleRadius}px`);
   root.style.setProperty('--tg-ui-scale', String(Number((snap.uiScale / 100).toFixed(2))));
 
-  const defaultThemeAccent =
-    snap.theme === 'tinted'
-      ? '#1687FF'
-      : snap.theme === 'classic'
-        ? '#40A7E3'
-        : '#3390EC';
+  const defaultThemeAccent = defaultAccentForThemeName(snap.theme);
   const effectiveAccent = sanitizeNonPurpleAccent(snap.accentColor || defaultThemeAccent);
   root.style.setProperty('--tg-accent', effectiveAccent);
 
@@ -188,11 +187,13 @@ function loadPersistedSettings(): PersistedSettingsSnapshot {
           parsed.theme && validThemes.includes(parsed.theme) ? parsed.theme : 'night';
         return {
           theme,
-          accentColor: sanitizeNonPurpleAccent(parsed.accentColor ?? '#3390EC'),
+          accentColor: sanitizeNonPurpleAccent(
+            parsed.accentColor ?? defaultAccentForThemeName(theme),
+          ),
           wallpaper: parsed.wallpaper ?? 'default',
           wallpaperBlur: Boolean(parsed.wallpaperBlur),
           fontSize: clampNumber(Number(parsed.fontSize ?? 14), 12, 20, 14),
-          bubbleRadius: clampNumber(Number(parsed.bubbleRadius ?? 14), 6, 18, 14),
+          bubbleRadius: clampNumber(Number(parsed.bubbleRadius ?? 18), 6, 22, 18),
           uiScale: normalizeUiScalePercent(Number(parsed.uiScale ?? 100)),
           language: normalizeLocale(parsed.language),
           sendByEnter: parsed.sendByEnter !== undefined ? Boolean(parsed.sendByEnter) : true,
@@ -246,11 +247,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...initialSettings,
 
   setTheme: (theme) => {
-    const defaultAccentForTheme =
-      theme === 'tinted' ? '#1687FF' : theme === 'classic' ? '#40A7E3' : '#3390EC';
+    const defaultAccentForTheme = defaultAccentForThemeName(theme);
     set((prev) => ({
       theme,
       accentColor:
+        prev.accentColor === '#0A84FF' ||
         prev.accentColor === '#3390EC' ||
         prev.accentColor === '#1687FF' ||
         prev.accentColor === '#40A7E3'
@@ -301,7 +302,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setBubbleRadius: (px) => {
-    const bubbleRadius = clampNumber(Math.round(px), 6, 18, 14);
+    const bubbleRadius = clampNumber(Math.round(px), 6, 22, 18);
     set({ bubbleRadius });
     savePersistedSettings(get());
     broadcastSync.publish({ kind: 'settings_updated', patch: { bubbleRadius } });

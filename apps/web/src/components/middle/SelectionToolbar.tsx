@@ -80,12 +80,12 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
         padding: '8px 14px',
         margin: '0 auto 6px',
         width: '100%',
-        maxWidth: '780px',
+        maxWidth: '740px',
         boxSizing: 'border-box',
-        borderRadius: '10px',
-        backgroundColor: 'var(--tg-bg-surface, #17212B)',
-        border: '1px solid var(--tg-border, #242F3D)',
-        boxShadow: '0 6px 20px rgba(0, 0, 0, 0.28)',
+        borderRadius: '12px',
+        backgroundColor: 'var(--tg-bg-elevated)',
+        border: '1px solid var(--tg-hairline-border)',
+        boxShadow: 'inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-sm)',
         zIndex: 7,
       }}
     >

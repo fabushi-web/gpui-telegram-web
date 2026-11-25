@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { DOM_IDS, type AdapterMode } from '@gpui-telegram/protocol';
+import { DOM_IDS } from '@gpui-telegram/protocol';
 import { t } from '../../i18n';
-import { isDemoUiEnabled, useAuthStore } from '../../store/useAuthStore';
+import { useAuthStore } from '../../store/useAuthStore';
 import { useSettingsStore, type ThemeName } from '../../store/useSettingsStore';
 import { QrMatrixSvg } from './qrSvgMatrix';
 
@@ -37,16 +37,9 @@ const THEME_OPTIONS: Array<{ id: ThemeName; key: string }> = [
   { id: 'classic', key: 'settings.theme.classic' },
 ];
 
-const ADAPTER_MODES: Array<{ id: AdapterMode; shortEn: string; shortZh: string }> = [
-  { id: 'server', shortEn: 'Server', shortZh: '服务端' },
-  { id: 'sandbox', shortEn: 'Standalone Sandbox', shortZh: '离线沙盒' },
-  { id: 'mtproto', shortEn: 'MTProto', shortZh: 'MTProto' },
-];
-
 const SERVER_PRESETS: Array<{ labelZh: string; labelEn: string; url: string }> = [
   { labelZh: '当前站点', labelEn: 'Same Origin', url: '' },
   { labelZh: 'web.ombhrum.com', labelEn: 'web.ombhrum.com', url: 'https://web.ombhrum.com' },
-  { labelZh: '桌面同源后端', labelEn: 'Desktop Cloud (34.46.77.133)', url: 'http://34.46.77.133:8080' },
 ];
 
 export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
@@ -55,16 +48,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const setTheme = useSettingsStore((s) => s.setTheme);
   const toggleLanguage = useSettingsStore((s) => s.toggleLanguage);
 
-  const adapterMode = useAuthStore((s) => s.adapterMode);
   const serverUrl = useAuthStore((s) => s.serverUrl);
   const serverHealth = useAuthStore((s) => s.serverHealth);
-  const mtprotoConfig = useAuthStore((s) => s.mtprotoConfig);
   const isAddingAccount = useAuthStore((s) => s.isAddingAccount);
   const isLoading = useAuthStore((s) => s.isLoading);
   const storeError = useAuthStore((s) => s.error);
   const phoneCodeHash = useAuthStore((s) => s.phoneCodeHash);
   const pendingPhone = useAuthStore((s) => s.pendingPhone);
-  const devCodeHint = useAuthStore((s) => s.devCodeHint);
   const requires2fa = useAuthStore((s) => s.requires2fa);
   const twoFaHint = useAuthStore((s) => s.twoFaHint);
   const qrSession = useAuthStore((s) => s.qrSession);
@@ -73,17 +63,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const alipaySession = useAuthStore((s) => s.alipaySession);
 
   const clearError = useAuthStore((s) => s.clearError);
-  const setAdapterMode = useAuthStore((s) => s.setAdapterMode);
   const setServerUrl = useAuthStore((s) => s.setServerUrl);
   const probeServerHealth = useAuthStore((s) => s.probeServerHealth);
-  const setMtprotoConfig = useAuthStore((s) => s.setMtprotoConfig);
-  const loginDemo = useAuthStore((s) => s.loginDemo);
   const sendPhoneCode = useAuthStore((s) => s.sendPhoneCode);
   const verifyPhoneCode = useAuthStore((s) => s.verifyPhoneCode);
   const verify2fa = useAuthStore((s) => s.verify2fa);
   const startQrPairing = useAuthStore((s) => s.startQrPairing);
   const pollQrPairing = useAuthStore((s) => s.pollQrPairing);
-  const simulateQrAccept = useAuthStore((s) => s.simulateQrAccept);
   const loginPassword = useAuthStore((s) => s.loginPassword);
   const registerPassword = useAuthStore((s) => s.registerPassword);
   const sendEmailCode = useAuthStore((s) => s.sendEmailCode);
@@ -91,22 +77,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   const registerEmail = useAuthStore((s) => s.registerEmail);
   const startAlipay = useAuthStore((s) => s.startAlipay);
   const pollAlipay = useAuthStore((s) => s.pollAlipay);
-  const confirmAlipay = useAuthStore((s) => s.confirmAlipay);
   const loginPasskey = useAuthStore((s) => s.loginPasskey);
   const cancelAddAccountFlow = useAuthStore((s) => s.cancelAddAccountFlow);
 
-  const demoAllowed = isDemoUiEnabled(adapterMode);
-  const [activeTab, setActiveTab] = useState<AuthTabId>(demoAllowed ? 'phone' : 'password');
+  const [activeTab, setActiveTab] = useState<AuthTabId>('password');
   const [localError, setLocalError] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   // Top bar state
   const [serverUrlDraft, setServerUrlDraft] = useState<string>(serverUrl);
-  const [showMtprotoConfig, setShowMtprotoConfig] = useState<boolean>(false);
-  const [apiIdInput, setApiIdInput] = useState<string>(String(mtprotoConfig.apiId || 2040));
-  const [apiHashInput, setApiHashInput] = useState<string>(mtprotoConfig.apiHash || '');
-  const [dcIdInput, setDcIdInput] = useState<string>(String(mtprotoConfig.dcId || 2));
-  const [useTestDcInput, setUseTestDcInput] = useState<boolean>(Boolean(mtprotoConfig.useTestDc));
 
   // Phone OTP state
   const [selectedDial, setSelectedDial] = useState<string>('+86');
@@ -116,13 +95,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   // 2FA state
   const [twoFaPassword, setTwoFaPassword] = useState<string>('');
 
-  // Password login/register state
+  // Password login/register state (Split-Key V2)
   const [isRegisterMode, setIsRegisterMode] = useState<boolean>(false);
   const [usernameInput, setUsernameInput] = useState<string>('');
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [firstNameInput, setFirstNameInput] = useState<string>('');
 
-  // Email OTP / Registration state (aligned with desktop AuthWizardView)
+  // Email OTP / Registration state
   const [emailInput, setEmailInput] = useState<string>('');
   const [emailOtpInput, setEmailOtpInput] = useState<string>('');
   const [emailRegisterMode, setEmailRegisterMode] = useState<boolean>(false);
@@ -135,21 +114,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
   }, [serverUrl]);
 
   useEffect(() => {
-    if (adapterMode === 'server' && serverHealth.status === 'unknown') {
+    if (serverHealth.status === 'unknown') {
       void probeServerHealth(serverUrl);
     }
-  }, [adapterMode, serverHealth.status, serverUrl, probeServerHealth]);
+  }, [serverHealth.status, serverUrl, probeServerHealth]);
 
-  // Start & auto-poll QR pairing when QR tab is active
+  // Start & auto-poll QR pairing via POST /api/v1/auth/pair/create + GET /api/v1/auth/pair/status
   useEffect(() => {
     if (activeTab !== 'qr' || requires2fa) return;
     let cancelled = false;
-    void startQrPairing('GPUI Telegram Web').catch(() => undefined);
+    void startQrPairing('Fabushi Web').catch(() => undefined);
 
     const timer = setInterval(() => {
       if (cancelled) return;
       void pollQrPairing().catch(() => undefined);
-    }, 1800);
+    }, 1200);
 
     return () => {
       cancelled = true;
@@ -338,11 +317,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
       if (emailRegisterMode) {
         const cleanUser = emailRegUsername.trim().replace(/^@/, '');
         if (cleanUser.length < 2) {
-          setLocalError(language === 'zh-CN' ? '请设置至少 2 位用户名' : 'Username must be at least 2 characters.');
+          setLocalError(
+            language === 'zh-CN' ? '请设置至少 2 位用户名' : 'Username must be at least 2 characters.',
+          );
           return;
         }
         if (emailRegPassword.length < 6) {
-          setLocalError(language === 'zh-CN' ? '请设置至少 6 位登录密码' : 'Password must be at least 6 characters.');
+          setLocalError(
+            language === 'zh-CN' ? '请设置至少 6 位登录密码' : 'Password must be at least 6 characters.',
+          );
           return;
         }
         await registerEmail({
@@ -378,24 +361,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           ? `服务器地址已保存，但连通性检测失败：${snap.error ?? '无法连接'}`
           : `Server URL saved, probe failed: ${snap.error ?? 'Unreachable'}`,
     );
-  };
-
-  const handleSaveMtproto = (e: React.FormEvent): void => {
-    e.preventDefault();
-    const parsedApiId = Number(apiIdInput) || 2040;
-    const parsedDcId = Number(dcIdInput) || 2;
-    setMtprotoConfig({
-      apiId: parsedApiId,
-      apiHash: apiHashInput.trim(),
-      dcId: parsedDcId,
-      useTestDc: useTestDcInput,
-    });
-    setStatusNotice(
-      language === 'zh-CN'
-        ? `MTProto 参数已保存 (DC ${parsedDcId})`
-        : `MTProto config saved (DC ${parsedDcId})`,
-    );
-    setShowMtprotoConfig(false);
   };
 
   const handlePasskeyAuth = async (): Promise<void> => {
@@ -446,7 +411,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           borderRadius: 'var(--tg-radius-md)',
           backgroundColor: 'var(--tg-bg-surface)',
           border: '1px solid var(--tg-border)',
-          boxShadow: 'var(--tg-shadow-sm)',
         }}
       >
         {/* Theme & Language Quick Switches */}
@@ -485,81 +449,42 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           </button>
         </div>
 
-        {/* Server Endpoint & Live Health Pill (Developer adapter modes shown ONLY in ?dev=1 / sandbox mode) */}
+        {/* Live Server Health Pill & Server Endpoint Selector */}
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
-          {demoAllowed && (
-            <div
-              role="group"
-              aria-label={t('auth.adapter.mode', language)}
-              style={{
-                display: 'inline-flex',
-                padding: '2px',
-                borderRadius: 'var(--tg-radius-pill)',
-                backgroundColor: 'var(--tg-bg-input)',
-                border: '1px solid var(--tg-border)',
-              }}
-            >
-              {ADAPTER_MODES.map((m) => {
-                const active = adapterMode === m.id;
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    data-adapter-mode={m.id}
-                    aria-pressed={active}
-                    onClick={() => void setAdapterMode(m.id)}
-                    style={{
-                      padding: '4px 10px',
-                      fontSize: '11.5px',
-                      fontWeight: 600,
-                      borderRadius: 'var(--tg-radius-pill)',
-                      backgroundColor: active ? 'var(--tg-accent)' : 'transparent',
-                      color: active ? 'var(--tg-on-accent)' : 'var(--tg-text-secondary)',
-                    }}
-                  >
-                    {language === 'zh-CN' ? m.shortZh : m.shortEn}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {adapterMode === 'server' && (
-            <span
-              data-testid="server-health-pill"
-              style={{
-                fontSize: '11.5px',
-                fontWeight: 600,
-                padding: '4px 9px',
-                borderRadius: 'var(--tg-radius-pill)',
-                backgroundColor:
-                  serverHealth.status === 'online'
-                    ? 'var(--tg-success-soft)'
-                    : serverHealth.status === 'offline'
-                      ? 'var(--tg-danger-soft)'
-                      : 'var(--tg-info-soft)',
-                color:
-                  serverHealth.status === 'online'
-                    ? 'var(--tg-success)'
-                    : serverHealth.status === 'offline'
-                      ? 'var(--tg-danger)'
-                      : 'var(--tg-info)',
-              }}
-              title={serverHealth.error || serverHealth.server || ''}
-            >
-              {serverHealth.status === 'online'
+          <span
+            data-testid="server-health-pill"
+            style={{
+              fontSize: '11.5px',
+              fontWeight: 600,
+              padding: '4px 9px',
+              borderRadius: 'var(--tg-radius-pill)',
+              backgroundColor:
+                serverHealth.status === 'online'
+                  ? 'var(--tg-success-soft)'
+                  : serverHealth.status === 'offline'
+                    ? 'var(--tg-danger-soft)'
+                    : 'var(--tg-info-soft)',
+              color:
+                serverHealth.status === 'online'
+                  ? 'var(--tg-success)'
+                  : serverHealth.status === 'offline'
+                    ? 'var(--tg-danger)'
+                    : 'var(--tg-info)',
+            }}
+            title={serverHealth.error || serverHealth.server || ''}
+          >
+            {serverHealth.status === 'online'
+              ? language === 'zh-CN'
+                ? `● 已连接${serverHealth.latencyMs ? ` ${serverHealth.latencyMs}ms` : ''}`
+                : `● Connected${serverHealth.latencyMs ? ` ${serverHealth.latencyMs}ms` : ''}`
+              : serverHealth.status === 'offline'
                 ? language === 'zh-CN'
-                  ? `● 已连接${serverHealth.latencyMs ? ` ${serverHealth.latencyMs}ms` : ''}`
-                  : `● Connected${serverHealth.latencyMs ? ` ${serverHealth.latencyMs}ms` : ''}`
-                : serverHealth.status === 'offline'
-                  ? language === 'zh-CN'
-                    ? '● 无法连接'
-                    : '● Offline'
-                  : language === 'zh-CN'
-                    ? '○ 检测中...'
-                    : '○ Checking...'}
-            </span>
-          )}
+                  ? '● 无法连接'
+                  : '● Offline'
+                : language === 'zh-CN'
+                  ? '○ 检测中...'
+                  : '○ Checking...'}
+          </span>
 
           <form
             onSubmit={(e) => void handleSaveServerUrl(e)}
@@ -587,99 +512,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               {language === 'zh-CN' ? '连接' : 'Connect'}
             </button>
           </form>
-
-          {demoAllowed && (
-            <button
-              id={DOM_IDS.BTN_MTPROTO_CONFIG}
-              type="button"
-              aria-expanded={showMtprotoConfig}
-              onClick={() => setShowMtprotoConfig((v) => !v)}
-              className="tg-btn tg-btn--secondary"
-              style={{ padding: '5px 10px', fontSize: '12px' }}
-            >
-              MTProto {showMtprotoConfig ? '▲' : '⚙'}
-            </button>
-          )}
         </div>
       </header>
-
-      {/* Collapsible Inline MTProto Configuration Form (dev/mtproto mode only) */}
-      {demoAllowed && showMtprotoConfig && (
-        <form
-          onSubmit={handleSaveMtproto}
-          data-testid="mtproto-config-form"
-          className="tg-surface-card"
-          style={{
-            width: '100%',
-            maxWidth: '480px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '10px',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <strong style={{ fontSize: '13.5px' }}>
-              {language === 'zh-CN' ? 'MTProto 直连参数配置' : 'MTProto Direct Transport Config'}
-            </strong>
-            <button
-              type="button"
-              onClick={() => setShowMtprotoConfig(false)}
-              className="tg-btn tg-btn--ghost"
-              style={{ padding: '2px 8px', fontSize: '12px' }}
-            >
-              {t('common.close', language)}
-            </button>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
-              <span>API ID</span>
-              <input
-                type="text"
-                name="api_id"
-                placeholder="API ID (e.g. 2040)"
-                value={apiIdInput}
-                onChange={(e) => setApiIdInput(e.target.value)}
-                className="tg-input"
-              />
-            </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
-              <span>DC ID</span>
-              <input
-                type="text"
-                name="dc_id"
-                placeholder="DC ID (1-5)"
-                value={dcIdInput}
-                onChange={(e) => setDcIdInput(e.target.value)}
-                className="tg-input"
-              />
-            </label>
-          </div>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
-            <span>API Hash</span>
-            <input
-              type="text"
-              name="api_hash"
-              placeholder="API Hash (32-char hex)"
-              value={apiHashInput}
-              onChange={(e) => setApiHashInput(e.target.value)}
-              className="tg-input"
-            />
-          </label>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px' }}>
-              <input
-                type="checkbox"
-                checked={useTestDcInput}
-                onChange={(e) => setUseTestDcInput(e.target.checked)}
-              />
-              <span>{language === 'zh-CN' ? '使用测试数据中心 (Test DC)' : 'Use Test Data Center'}</span>
-            </label>
-            <button type="submit" className="tg-btn tg-btn--primary" style={{ padding: '6px 14px' }}>
-              {t('common.save', language)}
-            </button>
-          </div>
-        </form>
-      )}
 
       {/* Main Centered Onboarding Card */}
       <div
@@ -690,7 +524,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           margin: 'auto 0',
           padding: '28px 26px',
           borderRadius: 'var(--tg-radius-lg)',
-          boxShadow: 'var(--tg-shadow-lg)',
           display: 'flex',
           flexDirection: 'column',
           gap: '16px',
@@ -729,11 +562,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               width: '64px',
               height: '64px',
               borderRadius: '50%',
-              background: 'linear-gradient(135deg, #29B6F6 0%, #3390EC 60%, #1687FF 100%)',
+              background: 'linear-gradient(180deg, #299BFF 0%, #0A84FF 100%)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              boxShadow: '0 8px 22px rgba(51, 144, 236, 0.32)',
             }}
           >
             <svg width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true">
@@ -747,12 +579,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
             {t('auth.title', language)}
           </h1>
           <p style={{ margin: 0, fontSize: '13px', color: 'var(--tg-text-secondary)' }}>
-            {t('auth.subtitle', language)}
+            {t('auth.subtitle', language)} · Fabushi Web v1.6.11
           </p>
         </div>
 
         {/* Quick Server Presets when offline or switching backend */}
-        {adapterMode === 'server' && serverHealth.status === 'offline' && (
+        {serverHealth.status === 'offline' && (
           <div
             role="status"
             style={{
@@ -785,29 +617,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               ))}
             </div>
           </div>
-        )}
-
-        {/* 1-Click Demo Login — STRICTLY hidden in production builds unless ?mode=sandbox / ?dev=1 */}
-        {demoAllowed && (
-          <button
-            id={DOM_IDS.BTN_DEMO_LOGIN}
-            type="button"
-            disabled={isLoading}
-            onClick={() => {
-              setLocalError(null);
-              clearError();
-              void loginDemo();
-            }}
-            className="tg-btn tg-btn--primary"
-            style={{
-              width: '100%',
-              padding: '11px 16px',
-              fontSize: '14.5px',
-              fontWeight: 600,
-            }}
-          >
-            ⚡ {t('auth.demoButton', language)}
-          </button>
         )}
 
         {/* Status / Error Alerts */}
@@ -845,7 +654,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
           </div>
         )}
 
-        {/* Cloud 2FA Password Challenge Gate (triggered from Phone or Password auth) */}
+        {/* Cloud 2FA Password Challenge Gate (triggered from Phone, Email, or Password auth) */}
         {requires2fa ? (
           <form
             onSubmit={(e) => void handleSubmit2fa(e)}
@@ -937,7 +746,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                       fontWeight: selected ? 600 : 500,
                       backgroundColor: selected ? 'var(--tg-bg-surface)' : 'transparent',
                       color: selected ? 'var(--tg-accent)' : 'var(--tg-text-secondary)',
-                      boxShadow: selected ? 'var(--tg-shadow-sm)' : 'none',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
@@ -949,7 +757,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               })}
             </div>
 
-            {/* Tab 1: Username & Password Login / Register */}
+            {/* Tab 1: Username & Password Login / Split-Key V2 Register */}
             {activeTab === 'password' && (
               <div role="tabpanel" aria-labelledby={DOM_IDS.TAB_AUTH_PASSWORD}>
                 <form
@@ -1025,7 +833,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
               </div>
             )}
 
-            {/* Tab 2: Alipay OAuth Real Scannable QR Session (aligned with desktop auth_wizard_tabs_render.rs) */}
+            {/* Tab 2: Alipay OAuth Real Scannable QR Session */}
             {activeTab === 'alipay' && (
               <div
                 role="tabpanel"
@@ -1097,29 +905,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                     ↻ {language === 'zh-CN' ? '刷新二维码' : 'Refresh'}
                   </button>
                 </div>
-
-                {demoAllowed && (
-                  <button
-                    id={DOM_IDS.BTN_SIMULATE_QR_SCAN}
-                    type="button"
-                    disabled={isLoading}
-                    onClick={() => {
-                      setLocalError(null);
-                      clearError();
-                      void confirmAlipay(alipaySession?.session_id).catch((err) =>
-                        setLocalError(err instanceof Error ? err.message : String(err)),
-                      );
-                    }}
-                    className="tg-btn tg-btn--secondary"
-                    style={{ width: '100%', padding: '9px 14px' }}
-                  >
-                    ✓ {t('auth.alipay.confirm', language)}
-                  </button>
-                )}
               </div>
             )}
 
-            {/* Tab 3: Email OTP Sign-in & Full Desktop Email Registration */}
+            {/* Tab 3: Email OTP Sign-in & Split-Key V2 Email Registration */}
             {activeTab === 'email' && (
               <div role="tabpanel" aria-labelledby={DOM_IDS.TAB_AUTH_EMAIL}>
                 {!isEmailCodeStep ? (
@@ -1171,7 +960,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                           useAuthStore.setState({
                             emailCodeHash: null,
                             pendingEmail: null,
-                            devCodeHint: null,
                             error: null,
                           });
                         }}
@@ -1181,22 +969,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                         {t('common.back', language)}
                       </button>
                     </div>
-
-                    {devCodeHint && (
-                      <div
-                        data-testid="dev-email-otp-hint"
-                        style={{
-                          padding: '6px 10px',
-                          borderRadius: 'var(--tg-radius-sm)',
-                          backgroundColor: 'var(--tg-accent-soft)',
-                          color: 'var(--tg-accent)',
-                          fontSize: '12.5px',
-                          fontWeight: 600,
-                        }}
-                      >
-                        Email Verification Code: {devCodeHint}
-                      </div>
-                    )}
 
                     <input
                       id={DOM_IDS.AUTH_CODE_INPUT}
@@ -1333,7 +1105,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                           useAuthStore.setState({
                             phoneCodeHash: null,
                             pendingPhone: null,
-                            devCodeHint: null,
                             error: null,
                           });
                         }}
@@ -1343,22 +1114,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                         {t('common.back', language)}
                       </button>
                     </div>
-
-                    {devCodeHint && (
-                      <div
-                        data-testid="dev-otp-hint"
-                        style={{
-                          padding: '6px 10px',
-                          borderRadius: 'var(--tg-radius-sm)',
-                          backgroundColor: 'var(--tg-accent-soft)',
-                          color: 'var(--tg-accent)',
-                          fontSize: '12.5px',
-                          fontWeight: 600,
-                        }}
-                      >
-                        Verification Code: {devCodeHint}
-                      </div>
-                    )}
 
                     <input
                       id={DOM_IDS.AUTH_CODE_INPUT}
@@ -1403,7 +1158,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                     id={DOM_IDS.QR_LOGIN_SVG}
                     size={208}
                     value={qrSession.qr_url}
-                    accentColor="#3390EC"
+                    accentColor="#0A84FF"
                   />
                 ) : (
                   <div
@@ -1426,37 +1181,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
                 )}
                 <div style={{ fontSize: '13px', fontWeight: 600 }}>{t('auth.qr.title', language)}</div>
                 <p style={{ margin: 0, fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
-                  {language === 'zh-CN'
-                    ? '打开已登录的 GPUI Telegram 桌面端或移动端 → 设置 → 设备 → 扫描二维码确认登录。'
-                    : 'Open GPUI Telegram on an already signed-in device -> Settings -> Devices -> Scan QR.'}
+                  {t('auth.qr.instructions', language)}
                 </p>
                 <button
                   type="button"
                   disabled={isLoading}
-                  onClick={() => void startQrPairing('GPUI Telegram Web').catch(() => undefined)}
+                  onClick={() => void startQrPairing('Fabushi Web').catch(() => undefined)}
                   className="tg-btn tg-btn--secondary"
                   style={{ width: '100%', padding: '9px 14px' }}
                 >
                   ↻ {language === 'zh-CN' ? '刷新配对二维码' : 'Refresh QR Code'}
                 </button>
-                {demoAllowed && (
-                  <button
-                    id={DOM_IDS.BTN_SIMULATE_QR_SCAN}
-                    type="button"
-                    disabled={isLoading}
-                    onClick={() => {
-                      setLocalError(null);
-                      clearError();
-                      void simulateQrAccept(qrSession?.pair_id).catch((err) =>
-                        setLocalError(err instanceof Error ? err.message : String(err)),
-                      );
-                    }}
-                    className="tg-btn tg-btn--secondary"
-                    style={{ width: '100%', padding: '9px 14px' }}
-                  >
-                    📱 {t('auth.qr.simulateScan', language)}
-                  </button>
-                )}
               </div>
             )}
 

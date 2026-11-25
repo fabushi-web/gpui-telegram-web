@@ -1,23 +1,29 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   DOM_IDS,
+  isSafeEntityUrl,
   peerAvatarColorIndex,
+  type BotRegistryEntry,
   type ChannelStatisticsDto,
   type ChatMemberDto,
   type MessageItem,
 } from '@gpui-telegram/protocol';
 import { getClientAdapter } from '../../adapters';
+import { formatChatTimestamp, formatDurationClock, t } from '../../i18n';
 import { triggerFileDownload } from '../../services/chatExport';
 import { ensureSecretChatKeyMaterial } from '../../services/e2eeClient';
-import { formatChatTimestamp, formatDurationClock, t } from '../../i18n';
+import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore, type RightInspectorTab } from '../../store/useUiStore';
+import { GrokBotAvatar } from '../common/GrokBotAvatar';
 
 export interface RightColumnProps {
   className?: string;
 }
+
+type InspectorPeerCategory = 'bot' | 'group' | 'human';
 
 interface ScopedMediaEntry {
   key: string;
@@ -93,30 +99,12 @@ function formatTtlBadge(seconds?: number): string {
 
 function getInitials(title: string): string {
   const cleaned = title.replace(/^🔒\s*/, '').trim();
-  if (!cleaned) return 'TG';
+  if (!cleaned) return 'FB';
   const parts = cleaned.split(/\s+/).filter(Boolean);
   if (parts.length >= 2) {
-    return `${parts[0][0] ?? ''}${parts[1][0] ?? ''}`.toUpperCase();
+    return `${parts[0]![0] ?? ''}${parts[1]![0] ?? ''}`.toUpperCase();
   }
   return cleaned.slice(0, 2).toUpperCase();
-}
-
-function makeSyntheticPosterDataUrl(label: string, isVideo: boolean): string {
-  const safeText = label.slice(0, 18).replace(/[<>&"']/g, '');
-  const accent = isVideo ? '#00C972' : '#3390EC';
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
-    <defs>
-      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#17212B"/>
-        <stop offset="100%" stop-color="#2B5278"/>
-      </linearGradient>
-    </defs>
-    <rect width="240" height="240" fill="url(#g)"/>
-    <circle cx="120" cy="104" r="34" fill="${accent}" fill-opacity="0.22" stroke="${accent}" stroke-width="2"/>
-    <text x="120" y="111" text-anchor="middle" fill="#F5F5F5" font-family="sans-serif" font-size="16" font-weight="600">${isVideo ? 'VIDEO' : 'PHOTO'}</text>
-    <text x="120" y="176" text-anchor="middle" fill="#8BB8E8" font-family="sans-serif" font-size="13">${safeText || 'Media'}</text>
-  </svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
 function extractUrlsFromMessage(msg: MessageItem): string[] {
@@ -150,6 +138,8 @@ function extractUrlsFromMessage(msg: MessageItem): string[] {
 
 export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const language = useSettingsStore((s) => s.language);
+  const isZh = language === 'zh-CN';
+
   const isRightOpen = useUiStore((s) => s.isRightOpen);
   const rightTab = useUiStore((s) => s.rightTab);
   const toggleRightSidebar = useUiStore((s) => s.toggleRightSidebar);
@@ -158,9 +148,12 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const openInstantView = useUiStore((s) => s.openInstantView);
   const playVoiceOrAudio = useUiStore((s) => s.playVoiceOrAudio);
   const audioPlayerState = useUiStore((s) => s.audioPlayerState);
+  const setMiniAppModalOpen = useUiStore((s) => s.setMiniAppModalOpen);
   const pushToast = useUiStore((s) => s.pushToast);
 
   const currentUser = useAuthStore((s) => s.currentUser);
+  const bots = useAiWorkspaceStore((s) => s.bots);
+  const launchMiniApp = useAiWorkspaceStore((s) => s.launchMiniApp);
 
   const activeChatId = useChatStore((s) => s.activeChatId);
   const chatsById = useChatStore((s) => s.chatsById);
@@ -171,6 +164,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const membersByChat = useChatStore((s) => s.membersByChat);
   const invitesByChat = useChatStore((s) => s.invitesByChat);
   const statsByChat = useChatStore((s) => s.statsByChat);
+  const botActivityByChat = useChatStore((s) => s.botActivityByChat);
 
   const bootstrapChats = useChatStore((s) => s.bootstrapChats);
   const updateChatSettings = useChatStore((s) => s.updateChatSettings);
@@ -187,47 +181,96 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const loadContacts = useChatStore((s) => s.loadContacts);
   const loadPrivacyAndBlocked = useChatStore((s) => s.loadPrivacyAndBlocked);
   const toggleBlockUser = useChatStore((s) => s.toggleBlockUser);
+  const exportChatHistory = useChatStore((s) => s.exportChatHistory);
+  const sendText = useChatStore((s) => s.sendText);
 
-  const isZh = language === 'zh-CN';
   const chat = activeChatId !== null ? chatsById[activeChatId] ?? null : null;
 
+  // Strict 3-way inspector separation: Bot vs Group/Channel vs Human 1:1
+  const peerCategory: InspectorPeerCategory = useMemo(() => {
+    if (!chat) return 'human';
+    if (chat.isBot || chat.kind === 'bot') return 'bot';
+    if (chat.isGroup || chat.isSupergroup || chat.isChannel) return 'group';
+    return 'human';
+  }, [chat]);
+
+  const botMeta: BotRegistryEntry | null = useMemo(() => {
+    if (!chat || peerCategory !== 'bot') return null;
+    return (
+      bots.find(
+        (b) =>
+          (chat.peerUserId !== undefined && b.bot_user_id === chat.peerUserId) ||
+          (chat.username &&
+            b.username.toLowerCase() === chat.username.replace(/^@/, '').toLowerCase()),
+      ) ?? null
+    );
+  }, [bots, chat, peerCategory]);
+
+  // Synchronous per-chat state reset guard (prevents stale cross-chat inspector leaks)
+  const [boundChatId, setBoundChatId] = useState<number | null>(activeChatId);
   const [isEditingChat, setIsEditingChat] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   const [editAbout, setEditAbout] = useState('');
   const [editSlowMode, setEditSlowMode] = useState(0);
   const [editError, setEditError] = useState<string | null>(null);
-
   const [showTtlPicker, setShowTtlPicker] = useState(false);
   const [showFingerprintHex, setShowFingerprintHex] = useState(false);
   const [secretFingerprint, setSecretFingerprint] = useState<{
+    chatId: number;
     emojis: [string, string, string, string];
     hex: string;
   } | null>(null);
-
   const [showAddMemberPicker, setShowAddMemberPicker] = useState(false);
   const [inviteJoinInput, setInviteJoinInput] = useState('');
   const [inviteAlert, setInviteAlert] = useState<string | null>(null);
   const [brokenImgKeys, setBrokenImgKeys] = useState<Record<string, boolean>>({});
 
-  const effectiveTab: Exclude<RightInspectorTab, 'info' | 'admin'> = useMemo(() => {
-    if (rightTab === 'info' || rightTab === 'admin') return 'members';
-    return rightTab;
-  }, [rightTab]);
+  // Clear stale peer facts immediately on activeChatId switch
+  if (boundChatId !== activeChatId) {
+    setBoundChatId(activeChatId);
+    setIsEditingChat(false);
+    setEditTitle(chat?.title ?? '');
+    setEditAbout(chat?.about ?? '');
+    setEditSlowMode(chat?.slowModeSeconds ?? 0);
+    setEditError(null);
+    setShowTtlPicker(false);
+    setShowFingerprintHex(false);
+    setSecretFingerprint(null);
+    setShowAddMemberPicker(false);
+    setInviteJoinInput('');
+    setInviteAlert(null);
+    setBrokenImgKeys({});
+  }
 
-  // Resolve direct peer profile when inspecting a 1:1 private or secret chat
+  // Scope valid tabs strictly by peerCategory
+  const effectiveTab: Exclude<RightInspectorTab, 'info' | 'admin'> = useMemo(() => {
+    if (peerCategory === 'group') {
+      if (rightTab === 'info' || rightTab === 'admin') return 'members';
+      return rightTab;
+    }
+    // Humans & Bots do NOT show Members or Channel Statistics tabs
+    if (
+      rightTab === 'info' ||
+      rightTab === 'admin' ||
+      rightTab === 'members' ||
+      rightTab === 'statistics'
+    ) {
+      return 'media';
+    }
+    return rightTab;
+  }, [peerCategory, rightTab]);
+
+  // Resolve direct peer profile strictly for human 1:1 chats
   const directPeer = useMemo(() => {
-    if (!chat) return null;
+    if (!chat || peerCategory !== 'human' || chat.isSavedMessages) return null;
     if (chat.peerUserId && peersById[chat.peerUserId]) {
       return peersById[chat.peerUserId];
-    }
-    if (chat.isGroup || chat.isSupergroup || chat.isChannel || chat.isSavedMessages) {
-      return null;
     }
     const cleanTitle = chat.title.replace(/^🔒\s*/, '').trim().toLowerCase();
     const allPeers = [...contacts, ...Object.values(peersById)];
     return (
       allPeers.find((u) => {
-        if (u.userId === currentUser?.userId) return false;
+        if (u.userId === currentUser?.userId || u.isBot) return false;
         const fullName = `${u.firstName} ${u.lastName ?? ''}`.trim().toLowerCase();
         return (
           fullName === cleanTitle ||
@@ -235,9 +278,12 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
         );
       }) ?? null
     );
-  }, [chat, peersById, contacts, currentUser?.userId]);
+  }, [chat, peerCategory, peersById, contacts, currentUser?.userId]);
 
-  const effectivePeerUserId = chat?.peerUserId ?? directPeer?.userId ?? null;
+  const effectivePeerUserId =
+    peerCategory === 'bot'
+      ? (botMeta?.bot_user_id ?? chat?.peerUserId ?? null)
+      : (chat?.peerUserId ?? directPeer?.userId ?? null);
 
   const isUserBlocked = useMemo(() => {
     if (!effectivePeerUserId) return false;
@@ -246,14 +292,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
 
   useEffect(() => {
     if (!isRightOpen || !chat) return;
-    setIsEditingChat(false);
-    setEditTitle(chat.title);
-    setEditAbout(chat.about ?? '');
-    setEditSlowMode(chat.slowModeSeconds ?? 0);
-    setEditError(null);
-    setInviteAlert(null);
-
-    if (chat.isGroup || chat.isSupergroup || chat.isChannel) {
+    if (peerCategory === 'group') {
       void loadChatAdminData(chat.chatId);
     }
     void loadContacts();
@@ -261,33 +300,33 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   }, [
     isRightOpen,
     chat?.chatId,
-    chat?.isGroup,
-    chat?.isSupergroup,
-    chat?.isChannel,
+    peerCategory,
     loadChatAdminData,
     loadContacts,
     loadPrivacyAndBlocked,
   ]);
 
   useEffect(() => {
-    if (!isRightOpen || !chat || effectiveTab !== 'statistics') return;
+    if (!isRightOpen || !chat || peerCategory !== 'group' || effectiveTab !== 'statistics') {
+      return;
+    }
     void loadChannelStatistics(chat.chatId);
-  }, [isRightOpen, chat?.chatId, effectiveTab, loadChannelStatistics]);
+  }, [isRightOpen, chat?.chatId, peerCategory, effectiveTab, loadChannelStatistics]);
 
   useEffect(() => {
-    if (!isRightOpen || !chat?.isSecret) return;
+    if (!isRightOpen || !chat?.isSecret || !currentUser?.userId) return;
     let cancelled = false;
-    setSecretFingerprint(null);
+    const targetChatId = chat.chatId;
 
-    if (!currentUser?.userId) return;
     void ensureSecretChatKeyMaterial({
       localUserId: currentUser.userId,
-      chatId: chat.chatId,
-      peerUserId: effectivePeerUserId ?? chat.chatId,
+      chatId: targetChatId,
+      peerUserId: effectivePeerUserId ?? targetChatId,
     })
       .then((mat) => {
         if (!cancelled) {
           setSecretFingerprint({
+            chatId: targetChatId,
             emojis: mat.safetyEmojis,
             hex: mat.hexFingerprint,
           });
@@ -300,7 +339,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
     };
   }, [isRightOpen, chat?.chatId, chat?.isSecret, currentUser?.userId, effectivePeerUserId]);
 
-  // Strictly scoped messages ONLY for activeChatId — zero cross-chat leakage!
+  // Strictly scoped messages ONLY for activeChatId
   const scopedMessages = useMemo(() => {
     if (activeChatId === null) return [];
     const list = messagesByChat[activeChatId] ?? [];
@@ -476,59 +515,51 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   }, [activeChatId, scopedMessages, isZh]);
 
   const memberList = useMemo<ChatMemberDto[]>(() => {
-    if (!chat) return [];
+    if (!chat || peerCategory !== 'group') return [];
     const loaded = membersByChat[chat.chatId];
     if (loaded && loaded.length > 0) {
       return loaded;
     }
-    const synthetic: ChatMemberDto[] = [];
     if (currentUser) {
-      synthetic.push({
-        user_id: currentUser.userId,
-        username: currentUser.username,
-        first_name: currentUser.firstName,
-        last_name: currentUser.lastName,
-        role: chat.creatorId === currentUser.userId ? 'owner' : 'member',
-        admin_rights: chat.creatorId === currentUser.userId ? 0xff : 0,
-        banned_rights: 0,
-        joined_at_ms: Date.now(),
-      });
+      return [
+        {
+          user_id: currentUser.userId,
+          username: currentUser.username,
+          first_name: currentUser.firstName,
+          last_name: currentUser.lastName,
+          role: chat.creatorId === currentUser.userId ? 'owner' : 'member',
+          admin_rights: chat.creatorId === currentUser.userId ? 0xff : 0,
+          banned_rights: 0,
+          joined_at_ms: Date.now(),
+        },
+      ];
     }
-    if (directPeer && directPeer.userId !== currentUser?.userId) {
-      synthetic.push({
-        user_id: directPeer.userId,
-        username: directPeer.username,
-        first_name: directPeer.firstName,
-        last_name: directPeer.lastName,
-        role: 'member',
-        admin_rights: 0,
-        banned_rights: 0,
-        joined_at_ms: Date.now(),
-      });
-    }
-    return synthetic;
-  }, [chat, membersByChat, currentUser, directPeer]);
+    return [];
+  }, [chat, peerCategory, membersByChat, currentUser]);
 
   const myMemberRole = useMemo(() => {
-    if (!chat || !currentUser) return 'member';
+    if (!chat || !currentUser || peerCategory !== 'group') return 'member';
     const me = memberList.find((m) => m.user_id === currentUser.userId);
     if (me) return me.role;
     if (chat.creatorId === currentUser.userId) return 'owner';
     return 'member';
-  }, [chat, currentUser, memberList]);
+  }, [chat, currentUser, peerCategory, memberList]);
 
   const canManageChat = Boolean(
     chat &&
-      (chat.isGroup || chat.isSupergroup || chat.isChannel) &&
-      (myMemberRole === 'owner' || myMemberRole === 'admin' || chat.creatorId === currentUser?.userId),
+      peerCategory === 'group' &&
+      (myMemberRole === 'owner' ||
+        myMemberRole === 'admin' ||
+        chat.creatorId === currentUser?.userId),
   );
 
   const activeInvites = useMemo(() => {
-    if (!chat) return [];
+    if (!chat || peerCategory !== 'group') return [];
     return (invitesByChat[chat.chatId] ?? []).filter((inv) => !inv.is_revoked);
-  }, [chat, invitesByChat]);
+  }, [chat, peerCategory, invitesByChat]);
 
   const availableAddableUsers = useMemo(() => {
+    if (peerCategory !== 'group') return [];
     const existingIds = new Set(memberList.map((m) => m.user_id));
     const map = new Map<number, { userId: number; name: string; username?: string }>();
     for (const u of [...contacts, ...Object.values(peersById)]) {
@@ -539,13 +570,22 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
         username: u.username,
       });
     }
+    for (const b of bots) {
+      if (!existingIds.has(b.bot_user_id)) {
+        map.set(b.bot_user_id, {
+          userId: b.bot_user_id,
+          name: `${b.display_name || b.username} (Bot)`,
+          username: b.username,
+        });
+      }
+    }
     return Array.from(map.values());
-  }, [contacts, peersById, memberList, currentUser?.userId]);
+  }, [peerCategory, contacts, peersById, bots, memberList, currentUser?.userId]);
 
   const effectiveStats = useMemo<ChannelStatisticsDto | null>(() => {
-    if (!chat) return null;
+    if (!chat || peerCategory !== 'group') return null;
     return statsByChat[chat.chatId] ?? null;
-  }, [chat, statsByChat]);
+  }, [chat, peerCategory, statsByChat]);
 
   if (!isRightOpen) {
     return null;
@@ -648,7 +688,6 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
 
   const renderStatisticsCharts = (stats: ChannelStatisticsDto) => {
     const series = stats.daily_series ?? [];
-
     const svgW = 316;
     const svgH = 148;
     const padL = 28;
@@ -657,7 +696,6 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
     const padB = 26;
     const plotW = svgW - padL - padR;
     const plotH = svgH - padT - padB;
-
     const maxMembers = Math.max(1, ...series.map((p) => p.members));
     const maxViews = Math.max(1, ...series.map((p) => p.views));
 
@@ -723,7 +761,6 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
           </div>
         </div>
 
-        {/* Multi-Series SVG Growth & Views Chart (Zero-Purple Palette) */}
         <div className="tg-surface-card" style={{ padding: '12px' }}>
           <div
             style={{
@@ -749,12 +786,11 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
           >
             <defs>
               <linearGradient id="tgStatsAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#3390EC" stopOpacity="0.34" />
-                <stop offset="100%" stopColor="#3390EC" stopOpacity="0.02" />
+                <stop offset="0%" stopColor="#0A84FF" stopOpacity="0.34" />
+                <stop offset="100%" stopColor="#0A84FF" stopOpacity="0.02" />
               </linearGradient>
             </defs>
 
-            {/* Horizontal gridlines */}
             {[0, 0.5, 1].map((ratio, idx) => {
               const gy = padT + plotH * ratio;
               return (
@@ -764,14 +800,13 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   y1={gy}
                   x2={svgW - padR}
                   y2={gy}
-                  stroke="#242F3D"
+                  stroke="var(--tg-border)"
                   strokeDasharray="3 3"
                   strokeWidth="1"
                 />
               );
             })}
 
-            {/* Views bar series */}
             {series.map((pt, idx) => {
               const xCenter = padL + (idx / Math.max(1, series.length - 1)) * plotW;
               const barH = Math.max(4, (pt.views / maxViews) * (plotH * 0.72));
@@ -789,11 +824,10 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               );
             })}
 
-            {/* Growth area + line series */}
             <polygon points={areaPoints} fill="url(#tgStatsAreaGrad)" />
             <polyline
               fill="none"
-              stroke="#3390EC"
+              stroke="#0A84FF"
               strokeWidth="2.5"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -805,13 +839,13 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               const y = padT + plotH - (pt.members / maxMembers) * plotH;
               return (
                 <g key={`pt-${idx}`}>
-                  <circle cx={x} cy={y} r="3.5" fill="#00C972" stroke="#17212B" strokeWidth="1.5" />
+                  <circle cx={x} cy={y} r="3.5" fill="#00BA69" stroke="var(--tg-bg-surface)" strokeWidth="1.5" />
                   <text
                     x={x}
                     y={svgH - 7}
                     textAnchor="middle"
                     fontSize="9.5"
-                    fill="#7F91A4"
+                    fill="var(--tg-text-secondary)"
                   >
                     {pt.day}
                   </text>
@@ -819,57 +853,38 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               );
             })}
           </svg>
-
-          <div
-            style={{
-              display: 'flex',
-              gap: '14px',
-              marginTop: '6px',
-              fontSize: '11px',
-              color: 'var(--tg-text-secondary)',
-            }}
-          >
-            <span>● <strong style={{ color: '#3390EC' }}>{isZh ? '订阅增长' : 'Growth'}</strong></span>
-            <span>■ <strong style={{ color: '#3FC1B0' }}>{isZh ? '浏览量' : 'Views'}</strong></span>
-            <span>● <strong style={{ color: '#00C972' }}>{isZh ? '互动反应' : 'Reactions'}: {stats.total_reactions}</strong></span>
-          </div>
-        </div>
-
-        {/* Boosts & Notification Progress */}
-        <div className="tg-surface-card" style={{ padding: '12px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' }}>
-            <span>{isZh ? '助力等级进度 (Boost Level)' : 'Boost Level Progress'}</span>
-            <span style={{ color: '#00C972', fontWeight: 600 }}>
-              {stats.boosts_count} / 10 Boosts
-            </span>
-          </div>
-          <div
-            style={{
-              height: '8px',
-              borderRadius: '999px',
-              background: 'var(--tg-bg-input)',
-              overflow: 'hidden',
-            }}
-          >
-            <div
-              style={{
-                width: `${Math.min(100, Math.max(12, stats.boosts_count * 10))}%`,
-                height: '100%',
-                background: 'linear-gradient(90deg, #3390EC 0%, #00C972 100%)',
-              }}
-            />
-          </div>
         </div>
       </div>
     );
   };
+
+  const activeSecretFingerprint =
+    secretFingerprint && chat && secretFingerprint.chatId === chat.chatId
+      ? secretFingerprint
+      : null;
+
+  const inspectorHeading =
+    peerCategory === 'bot'
+      ? isZh
+        ? '机器人信息 · Bot Info'
+        : 'Bot Info'
+      : peerCategory === 'group'
+        ? chat?.isChannel
+          ? isZh
+            ? '频道详情 · Channel Info'
+            : 'Channel Info'
+          : isZh
+            ? '群组详情 · Group Info'
+            : 'Group Info'
+        : t('inspector.title', language);
 
   return (
     <aside
       id={DOM_IDS.RIGHT_COLUMN}
       className={`tg-right-column ${className ?? ''}`.trim()}
       data-open="true"
-      aria-label={t('inspector.title', language)}
+      data-peer-category={peerCategory}
+      aria-label={inspectorHeading}
     >
       {/* Inspector Top Header */}
       <div
@@ -880,7 +895,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
           gap: '8px',
           minHeight: '56px',
           padding: '8px 14px',
-          borderBottom: '1px solid var(--tg-border)',
+          borderBottom: '1px solid var(--tg-hairline-border)',
           flexShrink: 0,
         }}
       >
@@ -894,9 +909,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
           >
             ✕
           </button>
-          <span style={{ fontSize: '15px', fontWeight: 600 }}>
-            {t('inspector.title', language)}
-          </span>
+          <span style={{ fontSize: '15px', fontWeight: 600 }}>{inspectorHeading}</span>
         </div>
 
         {canManageChat && (
@@ -942,45 +955,81 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
             id={DOM_IDS.RIGHT_PROFILE_INFO}
             style={{
               padding: '16px 16px 12px',
-              borderBottom: '1px solid var(--tg-border)',
+              borderBottom: '1px solid var(--tg-hairline-border)',
               display: 'flex',
               flexDirection: 'column',
               gap: '12px',
             }}
           >
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: '8px' }}>
-              <div
-                className="tg-avatar tg-avatar--lg"
-                data-color-index={peerAvatarColorIndex(chat.peerUserId ?? chat.chatId)}
-              >
-                {chat.isSavedMessages ? '🔖' : getInitials(chat.title)}
-                {directPeer?.status === 'online' && <span className="tg-online-dot" />}
-              </div>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                textAlign: 'center',
+                gap: '8px',
+              }}
+            >
+              {peerCategory === 'bot' ? (
+                <GrokBotAvatar
+                  sourceId={
+                    botMeta?.agent_id ||
+                    botMeta?.username ||
+                    chat.username ||
+                    String(chat.peerUserId ?? chat.chatId)
+                  }
+                  shape={botMeta?.avatar_shape}
+                  color={botMeta?.avatar_color}
+                  sizePx={72}
+                  state={botActivityByChat[chat.chatId]?.state}
+                  initials={getInitials(chat.title)}
+                  title={chat.title}
+                />
+              ) : (
+                <div
+                  data-avatar="true"
+                  className="tg-avatar tg-avatar--lg"
+                  data-color-index={peerAvatarColorIndex(chat.peerUserId ?? chat.chatId)}
+                >
+                  {chat.isSavedMessages ? '🔖' : getInitials(chat.title)}
+                  {directPeer?.status === 'online' && <span className="tg-online-dot" />}
+                </div>
+              )}
 
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    flexWrap: 'wrap',
+                  }}
+                >
                   <h3 style={{ margin: 0, fontSize: '17px', fontWeight: 700, color: 'var(--tg-text-primary)' }}>
                     {chat.title}
                   </h3>
-                  {chat.isVerified && (
+                  {(chat.isVerified || botMeta?.is_official) && (
                     <span className="tg-badge" title="Verified" style={{ minWidth: '18px', height: '18px', padding: '0 5px' }}>
                       ✓
                     </span>
                   )}
-                  {chat.isSecret && (
-                    <span className="tg-badge tg-badge--secret">
-                      🔒 E2EE
-                    </span>
-                  )}
+                  {chat.isSecret && <span className="tg-badge tg-badge--secret">🔒 E2EE</span>}
                 </div>
 
                 <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', marginTop: '3px' }}>
-                  {chat.isChannel
-                    ? t('chat.subscribersCount', language, { count: chat.memberCount || memberList.length })
-                    : chat.isGroup || chat.isSupergroup
-                      ? t('chat.membersCount', language, { count: chat.memberCount || memberList.length })
-                      : chat.isBot
-                        ? t('chat.bot', language)
+                  {peerCategory === 'bot'
+                    ? botMeta?.coding_agent
+                      ? `AI Coding Agent · ${botMeta.coding_agent.provider_kind}`
+                      : t('chat.bot', language)
+                    : chat.isChannel
+                      ? t('chat.subscribersCount', language, {
+                          count: chat.memberCount || memberList.length,
+                        })
+                      : peerCategory === 'group'
+                        ? t('chat.membersCount', language, {
+                            count: chat.memberCount || memberList.length,
+                          })
                         : directPeer?.status === 'online'
                           ? t('chat.online', language)
                           : t('chat.lastSeenRecently', language)}
@@ -988,8 +1037,8 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               </div>
             </div>
 
-            {/* Inline Edit Group/Channel Form */}
-            {isEditingChat && canManageChat && (
+            {/* Inline Edit Group/Channel Form (STRICTLY group/channel only) */}
+            {peerCategory === 'group' && isEditingChat && canManageChat && (
               <form
                 onSubmit={handleSaveChatEdits}
                 className="tg-surface-card"
@@ -1041,11 +1090,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   </select>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                  <button
-                    type="button"
-                    className="tg-btn tg-btn--secondary"
-                    onClick={() => setIsEditingChat(false)}
-                  >
+                  <button type="button" className="tg-btn tg-btn--secondary" onClick={() => setIsEditingChat(false)}>
                     {t('common.cancel', language)}
                   </button>
                   <button type="submit" className="tg-btn tg-btn--primary">
@@ -1057,15 +1102,15 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
 
             {/* Metadata Details (@username, phone, bio/about) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '13px' }}>
-              {(chat.username || directPeer?.username) && (
+              {(botMeta?.username || chat.username || directPeer?.username) && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
                   <span style={{ color: 'var(--tg-text-secondary)' }}>Username</span>
                   <span style={{ color: 'var(--tg-accent)', fontWeight: 500 }}>
-                    @{chat.username || directPeer?.username}
+                    @{botMeta?.username || chat.username || directPeer?.username}
                   </span>
                 </div>
               )}
-              {directPeer?.phone && (
+              {peerCategory === 'human' && directPeer?.phone && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
                   <span style={{ color: 'var(--tg-text-secondary)' }}>
                     {isZh ? '手机号码' : 'Phone'}
@@ -1073,7 +1118,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   <span>{directPeer.phone}</span>
                 </div>
               )}
-              {(chat.about || directPeer?.bio) && (
+              {(botMeta?.about || botMeta?.description || chat.about || directPeer?.bio) && (
                 <div
                   style={{
                     padding: '8px 10px',
@@ -1084,18 +1129,112 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                     lineHeight: 1.45,
                   }}
                 >
-                  {chat.about || directPeer?.bio}
+                  {botMeta?.about || botMeta?.description || chat.about || directPeer?.bio}
                 </div>
               )}
             </div>
 
-            {/* Secret Chat 4-Emoji + Hex Safety Fingerprint */}
-            {chat.isSecret && (
+            {/* BOT-ONLY INSPECTOR SECTIONS (Commands, Mini App, Coding Agent Config, Privacy Policy) */}
+            {peerCategory === 'bot' && (
+              <div
+                data-testid="bot-inspector-panel"
+                style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
+              >
+                {botMeta?.has_main_app && botMeta.username && botMeta.main_app_short_name && (
+                  <button
+                    type="button"
+                    data-testid="bot-launch-main-app"
+                    className="tg-btn tg-btn--primary"
+                    style={{ width: '100%' }}
+                    onClick={() => {
+                      setMiniAppModalOpen(true);
+                      void launchMiniApp(
+                        botMeta.username,
+                        botMeta.main_app_short_name!,
+                        chat.chatId,
+                      ).catch((err) => {
+                        pushToast(
+                          err instanceof Error ? err.message : 'Failed to launch Mini App',
+                          'error',
+                        );
+                      });
+                    }}
+                  >
+                    🧩 {botMeta.menu_button_text || (isZh ? '打开小程序 · Open App' : 'Open Mini App')}
+                  </button>
+                )}
+
+                {botMeta?.coding_agent && (
+                  <div
+                    className="tg-surface-card"
+                    style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}
+                  >
+                    <strong style={{ color: 'var(--tg-accent)' }}>
+                      ⚡ Coding Agent ({botMeta.coding_agent.provider_kind})
+                    </strong>
+                    <div style={{ color: 'var(--tg-text-secondary)' }}>
+                      Workspace: <code>{botMeta.coding_agent.workspace_path || '.'}</code>
+                    </div>
+                    <div style={{ color: 'var(--tg-text-secondary)' }}>
+                      Permission: <strong>{botMeta.coding_agent.permission_mode}</strong>
+                      {botMeta.coding_agent.use_worktree ? ' · Git Worktree' : ''}
+                    </div>
+                  </div>
+                )}
+
+                {botMeta && botMeta.commands.length > 0 && (
+                  <div
+                    className="tg-surface-card"
+                    style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px' }}
+                  >
+                    <strong style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
+                      / {isZh ? '可用指令 (Bot Commands)' : 'Bot Commands'}
+                    </strong>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {botMeta.commands.slice(0, 12).map((cmd) => {
+                        const slash = cmd.command.startsWith('/') ? cmd.command : `/${cmd.command}`;
+                        return (
+                          <button
+                            key={slash}
+                            type="button"
+                            onClick={() => void sendText(chat.chatId, slash)}
+                            className="tg-context-menu-item"
+                            style={{ padding: '5px 8px', justifyContent: 'space-between', fontSize: '12px' }}
+                          >
+                            <code style={{ color: 'var(--tg-accent)', fontWeight: 600 }}>{slash}</code>
+                            <span
+                              className="tg-truncate"
+                              style={{ color: 'var(--tg-text-secondary)', maxWidth: '165px' }}
+                            >
+                              {cmd.description}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {botMeta?.privacy_policy_url && isSafeEntityUrl(botMeta.privacy_policy_url) && (
+                  <a
+                    href={botMeta.privacy_policy_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ fontSize: '12px', color: 'var(--tg-accent)', textAlign: 'center' }}
+                  >
+                    🔒 {isZh ? '隐私政策 (Privacy Policy)' : 'Privacy Policy'} ↗
+                  </a>
+                )}
+              </div>
+            )}
+
+            {/* HUMAN SECRET CHAT: 4-Emoji + Hex Safety Fingerprint */}
+            {peerCategory === 'human' && chat.isSecret && (
               <div
                 className="tg-surface-card"
                 style={{
                   padding: '10px 12px',
-                  borderColor: 'rgba(0, 201, 114, 0.35)',
+                  borderColor: 'rgba(0, 186, 105, 0.35)',
                   background: 'var(--tg-secret-soft)',
                   display: 'flex',
                   flexDirection: 'column',
@@ -1116,7 +1255,6 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   </button>
                 </div>
 
-                {/* Non-button text node container for E2EE 4-emoji & hex safety verification */}
                 <div
                   data-testid="secret-key-fingerprint"
                   style={{
@@ -1130,18 +1268,18 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   }}
                 >
                   <span style={{ fontSize: '20px', letterSpacing: '4px' }}>
-                    {secretFingerprint ? secretFingerprint.emojis.join(' ') : '…'}
+                    {activeSecretFingerprint ? activeSecretFingerprint.emojis.join(' ') : '…'}
                   </span>
                   <code style={{ fontSize: '11px', color: 'var(--tg-text-secondary)' }}>
-                    {secretFingerprint
-                      ? secretFingerprint.hex.slice(0, 19)
+                    {activeSecretFingerprint
+                      ? activeSecretFingerprint.hex.slice(0, 19)
                       : isZh
                         ? '正在计算密钥指纹…'
                         : 'Computing…'}
                   </code>
                 </div>
 
-                {showFingerprintHex && secretFingerprint && (
+                {showFingerprintHex && activeSecretFingerprint && (
                   <div
                     style={{
                       fontFamily: 'var(--tg-font-mono)',
@@ -1150,7 +1288,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                       wordBreak: 'break-all',
                     }}
                   >
-                    ECDH-P256 SHA-256: {secretFingerprint.hex}
+                    ECDH-P256 SHA-256: {activeSecretFingerprint.hex}
                   </div>
                 )}
               </div>
@@ -1162,7 +1300,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '6px 0',
+                padding: '4px 0',
               }}
             >
               <span style={{ fontSize: '13.5px' }}>
@@ -1180,14 +1318,16 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               </button>
             </div>
 
-            {/* Self-Destruct / Auto-Delete TTL Timer */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+            {/* Self-Destruct / Auto-Delete TTL Timer (Human & Group — Trap #15 role="menu"/"menuitem") */}
+            {peerCategory !== 'bot' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <button
                   type="button"
                   data-testid="btn-chat-ttl"
                   data-ttl={String(chat.ttlSeconds ?? 0)}
                   data-self-destruct={chat.ttlSeconds && chat.ttlSeconds > 0 ? 'true' : 'false'}
+                  aria-haspopup="menu"
+                  aria-expanded={showTtlPicker}
                   className="tg-btn tg-btn--secondary"
                   style={{ width: '100%', justifyContent: 'space-between', padding: '7px 12px', fontSize: '13px' }}
                   onClick={() => setShowTtlPicker((v) => !v)}
@@ -1197,44 +1337,48 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                     {formatTtlBadge(chat.ttlSeconds)}
                   </strong>
                 </button>
+
+                {chat.ttlSeconds && chat.ttlSeconds > 0 ? (
+                  <div
+                    data-ttl={String(chat.ttlSeconds)}
+                    data-self-destruct="true"
+                    style={{ fontSize: '11.5px', color: 'var(--tg-secret)' }}
+                  >
+                    ⏱{' '}
+                    {isZh
+                      ? `自动销毁已开启: ${formatTtlBadge(chat.ttlSeconds)}`
+                      : `Auto-delete active: ${formatTtlBadge(chat.ttlSeconds)}`}
+                  </div>
+                ) : null}
+
+                {showTtlPicker && (
+                  <div
+                    role="menu"
+                    aria-label="Self-Destruct Timer Options"
+                    style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}
+                  >
+                    {TTL_PRESETS.map((preset) => {
+                      const active = (chat.ttlSeconds ?? 0) === preset.seconds;
+                      return (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          role="menuitem"
+                          className={`tg-btn ${active ? 'tg-btn--primary' : 'tg-btn--secondary'}`}
+                          style={{ padding: '4px 10px', fontSize: '12px', flex: '1 1 auto' }}
+                          onClick={() => void handleSelectTtl(preset.seconds)}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
+            )}
 
-              {chat.ttlSeconds && chat.ttlSeconds > 0 ? (
-                <div
-                  data-ttl={String(chat.ttlSeconds)}
-                  data-self-destruct="true"
-                  style={{ fontSize: '11.5px', color: 'var(--tg-secret)' }}
-                >
-                  ⏱ {isZh ? `自动销毁已开启: ${formatTtlBadge(chat.ttlSeconds)}` : `Auto-delete active: ${formatTtlBadge(chat.ttlSeconds)}`}
-                </div>
-              ) : null}
-
-              {showTtlPicker && (
-                <div
-                  role="group"
-                  aria-label="Self-Destruct Timer Options"
-                  style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}
-                >
-                  {TTL_PRESETS.map((preset) => {
-                    const active = (chat.ttlSeconds ?? 0) === preset.seconds;
-                    return (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        className={`tg-btn ${active ? 'tg-btn--primary' : 'tg-btn--secondary'}`}
-                        style={{ padding: '4px 10px', fontSize: '12px', flex: '1 1 auto' }}
-                        onClick={() => void handleSelectTtl(preset.seconds)}
-                      >
-                        {preset.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Direct User Actions: Start Secret Chat & Block/Unblock */}
-            {!chat.isGroup && !chat.isSupergroup && !chat.isChannel && !chat.isSavedMessages && (
+            {/* Direct Human Actions: Start Secret Chat & Block/Unblock */}
+            {peerCategory === 'human' && !chat.isSavedMessages && (
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 {!chat.isSecret && (
                   <button
@@ -1264,8 +1408,49 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               </div>
             )}
 
-            {/* Invite Links Manager for Groups / Supergroups / Channels */}
-            {(chat.isGroup || chat.isSupergroup || chat.isChannel) && (
+            {/* Bot Stop / Block Action */}
+            {peerCategory === 'bot' && effectivePeerUserId !== null && (
+              <button
+                type="button"
+                data-testid="btn-toggle-block-user"
+                className={`tg-btn ${isUserBlocked ? 'tg-btn--secondary' : 'tg-btn--danger-soft'}`}
+                style={{ width: '100%', fontSize: '12.5px' }}
+                onClick={() => void toggleBlockUser(effectivePeerUserId, !isUserBlocked)}
+              >
+                {isUserBlocked
+                  ? isZh
+                    ? '重新启用机器人 (Unblock Bot)'
+                    : 'Unblock Bot'
+                  : isZh
+                    ? '停用并屏蔽机器人 (Block Bot)'
+                    : 'Stop & Block Bot'}
+              </button>
+            )}
+
+            {/* Chat History Export Actions (Trap #14: canonical visible #btn-export-chat-json & html) */}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                id={DOM_IDS.BTN_EXPORT_CHAT_JSON}
+                type="button"
+                className="tg-btn tg-btn--secondary"
+                style={{ flex: '1 1 0', fontSize: '12px', padding: '6px 8px' }}
+                onClick={() => void exportChatHistory(chat.chatId, 'json')}
+              >
+                ⬇ Export JSON
+              </button>
+              <button
+                id={DOM_IDS.BTN_EXPORT_CHAT_HTML}
+                type="button"
+                className="tg-btn tg-btn--secondary"
+                style={{ flex: '1 1 0', fontSize: '12px', padding: '6px 8px' }}
+                onClick={() => void exportChatHistory(chat.chatId, 'html')}
+              >
+                ⬇ Export HTML
+              </button>
+            </div>
+
+            {/* Invite Links Manager (STRICTLY Group / Supergroup / Channel only) */}
+            {peerCategory === 'group' && (
               <div
                 className="tg-surface-card"
                 style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '8px' }}
@@ -1374,7 +1559,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
             )}
           </section>
 
-          {/* 6 Shared Content & Inspector Tabs (#right-tabs) */}
+          {/* Shared Content & Inspector Tabs (#right-tabs) — scoped strictly by peerCategory */}
           <div
             id={DOM_IDS.RIGHT_TABS}
             role="tablist"
@@ -1383,22 +1568,25 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               display: 'flex',
               alignItems: 'center',
               overflowX: 'auto',
-              borderBottom: '1px solid var(--tg-border)',
-              padding: '0 6px',
+              borderBottom: '1px solid var(--tg-hairline-border)',
+              padding: '4px 6px',
+              gap: '4px',
               flexShrink: 0,
               scrollbarWidth: 'none',
             }}
           >
-            <button
-              id={DOM_IDS.RIGHT_TAB_MEMBERS}
-              type="button"
-              role="tab"
-              aria-selected={effectiveTab === 'members'}
-              className={`tg-folder-tab ${effectiveTab === 'members' ? 'is-active' : ''}`}
-              onClick={() => setRightTab('members')}
-            >
-              {t('inspector.members', language)}
-            </button>
+            {peerCategory === 'group' && (
+              <button
+                id={DOM_IDS.RIGHT_TAB_MEMBERS}
+                type="button"
+                role="tab"
+                aria-selected={effectiveTab === 'members'}
+                className={`tg-folder-tab ${effectiveTab === 'members' ? 'is-active' : ''}`}
+                onClick={() => setRightTab('members')}
+              >
+                {t('inspector.members', language)}
+              </button>
+            )}
             <button
               id={DOM_IDS.RIGHT_TAB_MEDIA}
               type="button"
@@ -1443,71 +1631,71 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               {t('inspector.voice', language)}
               {voiceItems.length > 0 ? ` (${voiceItems.length})` : ''}
             </button>
-            <button
-              id={DOM_IDS.RIGHT_TAB_STATS}
-              type="button"
-              role="tab"
-              aria-selected={effectiveTab === 'statistics'}
-              className={`tg-folder-tab ${effectiveTab === 'statistics' ? 'is-active' : ''}`}
-              onClick={() => setRightTab('statistics')}
-            >
-              {t('inspector.statistics', language)}
-            </button>
+            {peerCategory === 'group' && (
+              <button
+                id={DOM_IDS.RIGHT_TAB_STATS}
+                type="button"
+                role="tab"
+                aria-selected={effectiveTab === 'statistics'}
+                className={`tg-folder-tab ${effectiveTab === 'statistics' ? 'is-active' : ''}`}
+                onClick={() => setRightTab('statistics')}
+              >
+                {t('inspector.statistics', language)}
+              </button>
+            )}
           </div>
 
           {/* Active Tab Panel */}
           <div role="tabpanel" style={{ flex: '1 1 auto' }}>
-            {/* 1. Members & Live Admin Actions */}
-            {effectiveTab === 'members' && (
+            {/* 1. Members & Live Admin Actions (Group/Channel ONLY) */}
+            {peerCategory === 'group' && effectiveTab === 'members' && (
               <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {(chat.isGroup || chat.isSupergroup || chat.isChannel) && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <button
-                      type="button"
-                      className="tg-btn tg-btn--secondary"
-                      style={{ width: '100%', fontSize: '13px' }}
-                      onClick={() => setShowAddMemberPicker((v) => !v)}
-                    >
-                      + {isZh ? '添加成员 (Add Member)' : 'Add Member'}
-                    </button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <button
+                    type="button"
+                    className="tg-btn tg-btn--secondary"
+                    style={{ width: '100%', fontSize: '13px' }}
+                    onClick={() => setShowAddMemberPicker((v) => !v)}
+                  >
+                    + {isZh ? '添加成员 (Add Member)' : 'Add Member'}
+                  </button>
 
-                    {showAddMemberPicker && (
-                      <div className="tg-surface-card" style={{ padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        {availableAddableUsers.length === 0 ? (
-                          <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', padding: '4px' }}>
-                            {isZh ? '所有联系人均已在群聊中' : 'All known contacts are already members'}
-                          </div>
-                        ) : (
-                          availableAddableUsers.map((u) => (
-                            <div
-                              key={u.userId}
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                padding: '5px 6px',
-                                fontSize: '12.5px',
+                  {showAddMemberPicker && (
+                    <div className="tg-surface-card" style={{ padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {availableAddableUsers.length === 0 ? (
+                        <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', padding: '4px' }}>
+                          {isZh ? '所有联系人均已在群聊中' : 'All known contacts are already members'}
+                        </div>
+                      ) : (
+                        availableAddableUsers.map((u) => (
+                          <div
+                            key={u.userId}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '5px 6px',
+                              fontSize: '12.5px',
+                            }}
+                          >
+                            <span>{u.name}</span>
+                            <button
+                              type="button"
+                              className="tg-btn tg-btn--primary"
+                              style={{ padding: '3px 9px', fontSize: '11.5px' }}
+                              onClick={() => {
+                                void addChatMembers(chat.chatId, [u.userId]);
+                                setShowAddMemberPicker(false);
                               }}
                             >
-                              <span>{u.name}</span>
-                              <button
-                                type="button"
-                                className="tg-btn tg-btn--primary"
-                                style={{ padding: '3px 9px', fontSize: '11.5px' }}
-                                onClick={() => {
-                                  void addChatMembers(chat.chatId, [u.userId]);
-                                  setShowAddMemberPicker(false);
-                                }}
-                              >
-                                {isZh ? '添加' : 'Add'}
-                              </button>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+                              {isZh ? '添加' : 'Add'}
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 <ul
                   role="list"
@@ -1528,6 +1716,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                     const isOwner = m.role === 'owner';
                     const isAdmin = m.role === 'admin' || isOwner;
                     const isSelf = m.user_id === currentUser?.userId;
+                    const memberBot = bots.find((b) => b.bot_user_id === m.user_id);
 
                     return (
                       <li
@@ -1548,14 +1737,33 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                       >
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                            <div
-                              className="tg-avatar tg-avatar--sm"
-                              data-color-index={peerAvatarColorIndex(m.user_id)}
-                            >
-                              {getInitials(fullName)}
-                            </div>
+                            {memberBot ? (
+                              <GrokBotAvatar
+                                sourceId={memberBot.agent_id || memberBot.username}
+                                shape={memberBot.avatar_shape}
+                                color={memberBot.avatar_color}
+                                sizePx={36}
+                                initials={getInitials(fullName)}
+                              />
+                            ) : (
+                              <div
+                                data-avatar="true"
+                                className="tg-avatar tg-avatar--sm"
+                                data-color-index={peerAvatarColorIndex(m.user_id)}
+                              >
+                                {getInitials(fullName)}
+                              </div>
+                            )}
                             <div style={{ minWidth: 0 }}>
-                              <div style={{ fontSize: '13.5px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              <div
+                                style={{
+                                  fontSize: '13.5px',
+                                  fontWeight: 600,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
                                 {fullName}
                               </div>
                               {m.username && (
@@ -1566,7 +1774,6 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                             </div>
                           </div>
 
-                          {/* Non-button role badge so E2E role badge checks read genuine state */}
                           <span
                             data-role-badge={m.role}
                             className={`tg-badge ${isAdmin ? '' : 'tg-badge--muted'}`}
@@ -1586,40 +1793,37 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                           </span>
                         </div>
 
-                        {(chat.isGroup || chat.isSupergroup || chat.isChannel) &&
-                          canManageChat &&
-                          !isOwner &&
-                          !isSelf && (
-                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                              {m.role !== 'admin' ? (
-                                <button
-                                  type="button"
-                                  className="tg-btn tg-btn--secondary"
-                                  style={{ padding: '3px 8px', fontSize: '11.5px' }}
-                                  onClick={() => void updateMemberRole(chat.chatId, m.user_id, 'admin')}
-                                >
-                                  {isZh ? '设为管理员' : 'Promote to Admin'}
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="tg-btn tg-btn--secondary"
-                                  style={{ padding: '3px 8px', fontSize: '11.5px' }}
-                                  onClick={() => void updateMemberRole(chat.chatId, m.user_id, 'member')}
-                                >
-                                  {isZh ? '取消管理员' : 'Demote'}
-                                </button>
-                              )}
+                        {canManageChat && !isOwner && !isSelf && (
+                          <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                            {m.role !== 'admin' ? (
                               <button
                                 type="button"
-                                className="tg-btn tg-btn--danger-soft"
+                                className="tg-btn tg-btn--secondary"
                                 style={{ padding: '3px 8px', fontSize: '11.5px' }}
-                                onClick={() => void removeMember(chat.chatId, m.user_id)}
+                                onClick={() => void updateMemberRole(chat.chatId, m.user_id, 'admin')}
                               >
-                                {isZh ? '移出群聊' : 'Remove'}
+                                {isZh ? '设为管理员' : 'Promote to Admin'}
                               </button>
-                            </div>
-                          )}
+                            ) : (
+                              <button
+                                type="button"
+                                className="tg-btn tg-btn--secondary"
+                                style={{ padding: '3px 8px', fontSize: '11.5px' }}
+                                onClick={() => void updateMemberRole(chat.chatId, m.user_id, 'member')}
+                              >
+                                {isZh ? '取消管理员' : 'Demote'}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="tg-btn tg-btn--danger-soft"
+                              style={{ padding: '3px 8px', fontSize: '11.5px' }}
+                              onClick={() => void removeMember(chat.chatId, m.user_id)}
+                            >
+                              {isZh ? '移出群聊' : 'Remove'}
+                            </button>
+                          </div>
+                        )}
                       </li>
                     );
                   })}
@@ -1627,7 +1831,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               </div>
             )}
 
-            {/* 2. Shared Media (Photos / Videos / Albums strictly from activeChatId) */}
+            {/* 2. Shared Media (Honest broken-image placeholder, ZERO synthetic SVG posters!) */}
             {effectiveTab === 'media' && (
               <div style={{ padding: '12px' }}>
                 {mediaItems.length === 0 ? (
@@ -1651,9 +1855,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                     }}
                   >
                     {mediaItems.map((item) => {
-                      const imgSrc = brokenImgKeys[item.key]
-                        ? makeSyntheticPosterDataUrl(item.caption || item.fileId, item.isVideo)
-                        : item.mediaUrl;
+                      const isBroken = Boolean(brokenImgKeys[item.key]);
                       return (
                         <button
                           key={item.key}
@@ -1664,7 +1866,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                             openLightbox({
                               chatId: chat.chatId,
                               messageId: item.message.id,
-                              mediaUrl: imgSrc,
+                              mediaUrl: item.mediaUrl,
                               mimeType: item.mimeType,
                               caption: item.caption,
                             })
@@ -1675,19 +1877,35 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                             borderRadius: '8px',
                             overflow: 'hidden',
                             background: 'var(--tg-bg-elevated)',
-                            border: '1px solid var(--tg-border-subtle)',
+                            border: '1px solid var(--tg-hairline-border)',
                             padding: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
                           }}
                         >
-                          <img
-                            src={imgSrc}
-                            alt={item.caption || 'Shared media'}
-                            onError={() =>
-                              setBrokenImgKeys((prev) => ({ ...prev, [item.key]: true }))
-                            }
-                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                          />
-                          {item.isVideo && (
+                          {isBroken ? (
+                            <span
+                              style={{
+                                fontSize: '11px',
+                                color: 'var(--tg-text-secondary)',
+                                padding: '6px',
+                                textAlign: 'center',
+                              }}
+                            >
+                              {item.isVideo ? '🎬 Video' : '🖼 Unavailable'}
+                            </span>
+                          ) : (
+                            <img
+                              src={item.mediaUrl}
+                              alt={item.caption || 'Shared media'}
+                              onError={() =>
+                                setBrokenImgKeys((prev) => ({ ...prev, [item.key]: true }))
+                              }
+                              style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                            />
+                          )}
+                          {item.isVideo && !isBroken && (
                             <span
                               style={{
                                 position: 'absolute',
@@ -1711,7 +1929,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               </div>
             )}
 
-            {/* 3. Shared Documents / Files */}
+            {/* 3. Shared Documents / Files (Honest HTTP check — ZERO synthetic fallback blobs!) */}
             {effectiveTab === 'files' && (
               <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {fileItems.length === 0 ? (
@@ -1761,20 +1979,26 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                         style={{ padding: '5px 10px', fontSize: '12px', flexShrink: 0 }}
                         onClick={async () => {
                           try {
-                            const resp = await fetch(item.downloadUrl);
-                            if (resp.ok) {
-                              const blob = await resp.blob();
-                              triggerFileDownload(blob, item.fileName, item.mimeType);
-                              return;
+                            const token = useAuthStore.getState().token;
+                            const headers: Record<string, string> = {};
+                            if (token) {
+                              headers.Authorization = `Bearer ${token}`;
                             }
-                          } catch {
-                            // Fallback synthetic blob download
+                            const resp = await fetch(item.downloadUrl, { headers });
+                            if (!resp.ok) {
+                              throw new Error(`HTTP ${resp.status}`);
+                            }
+                            const blob = await resp.blob();
+                            triggerFileDownload(blob, item.fileName, item.mimeType);
+                          } catch (err) {
+                            const detail = err instanceof Error ? err.message : 'Download failed';
+                            pushToast(
+                              isZh
+                                ? `文件下载失败 (${detail})`
+                                : `File download failed (${detail})`,
+                              'error',
+                            );
                           }
-                          triggerFileDownload(
-                            `Shared document: ${item.fileName}`,
-                            item.fileName,
-                            item.mimeType,
-                          );
                         }}
                       >
                         ⬇ {t('media.download', language)}
@@ -1801,61 +2025,78 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                     {isZh ? '当前会话暂无共享链接' : 'No shared web links in this chat yet.'}
                   </div>
                 ) : (
-                  linkItems.map((item) => (
-                    <div
-                      key={item.key}
-                      className="tg-surface-card"
-                      style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}
-                    >
-                      <a
-                        href={item.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          fontSize: '13px',
-                          fontWeight: 600,
-                          color: 'var(--tg-accent)',
-                          wordBreak: 'break-all',
-                        }}
+                  linkItems.map((item) => {
+                    const ivBlocks = item.message.web_page?.instant_view_blocks ?? [];
+                    const hasRealIv = Boolean(
+                      item.message.web_page?.instant_view_available && ivBlocks.length > 0,
+                    );
+                    return (
+                      <div
+                        key={item.key}
+                        className="tg-surface-card"
+                        style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}
                       >
-                        🔗 {item.title}
-                      </a>
-                      <div style={{ fontSize: '11.5px', color: 'var(--tg-text-secondary)' }}>
-                        {item.domain}
-                      </div>
-                      {item.description && (
-                        <div
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
                           style={{
-                            fontSize: '12px',
-                            color: 'var(--tg-text-primary)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
+                            fontSize: '13px',
+                            fontWeight: 600,
+                            color: 'var(--tg-accent)',
+                            wordBreak: 'break-all',
                           }}
                         >
-                          {item.description}
+                          🔗 {item.title}
+                        </a>
+                        <div style={{ fontSize: '11.5px', color: 'var(--tg-text-secondary)' }}>
+                          {item.domain}
                         </div>
-                      )}
-                      {item.message.web_page?.instant_view_available && (
-                        <button
-                          type="button"
-                          className="tg-btn tg-btn--ghost"
-                          style={{ alignSelf: 'flex-start', padding: '3px 8px', fontSize: '11.5px' }}
-                          onClick={() =>
-                            openInstantView({
-                              url: item.url,
-                              title: item.title,
-                              siteName: item.domain,
-                              contentHtml: `<p>${item.description ?? item.url}</p>`,
-                              readingTimeMinutes: 2,
-                            })
-                          }
-                        >
-                          ⚡ {t('message.instantView', language)}
-                        </button>
-                      )}
-                    </div>
-                  ))
+                        {item.description && (
+                          <div
+                            style={{
+                              fontSize: '12px',
+                              color: 'var(--tg-text-primary)',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {item.description}
+                          </div>
+                        )}
+                        {hasRealIv && (
+                          <button
+                            type="button"
+                            className="tg-btn tg-btn--ghost"
+                            style={{ alignSelf: 'flex-start', padding: '3px 8px', fontSize: '11.5px' }}
+                            onClick={() => {
+                              const html = ivBlocks
+                                .map((b) =>
+                                  b.kind === 'heading'
+                                    ? `<h2>${b.text}</h2>`
+                                    : b.kind === 'quote'
+                                      ? `<blockquote>${b.text}</blockquote>`
+                                      : b.kind === 'code'
+                                        ? `<pre>${b.text}</pre>`
+                                        : `<p>${b.text}</p>`,
+                                )
+                                .join('\n\n');
+                              openInstantView({
+                                url: item.url,
+                                title: item.title,
+                                siteName: item.domain,
+                                contentHtml: html,
+                                readingTimeMinutes: Math.max(1, Math.ceil(html.split(/\s+/).length / 180)),
+                              });
+                            }}
+                          >
+                            ⚡ {t('message.instantView', language)}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             )}
@@ -1931,8 +2172,9 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
               </div>
             )}
 
-            {/* 6. Channel & Group Statistics (#right-tab-stats) */}
-            {effectiveTab === 'statistics' &&
+            {/* 6. Channel & Group Statistics (#right-tab-stats — Group/Channel ONLY) */}
+            {peerCategory === 'group' &&
+              effectiveTab === 'statistics' &&
               (effectiveStats ? (
                 renderStatisticsCharts(effectiveStats)
               ) : (

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { DOM_IDS } from '@gpui-telegram/protocol';
-import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
+import { ApiRequestError, useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useUiStore } from '../../store/useUiStore';
 
@@ -25,13 +25,15 @@ export function WalletStarsModal({
 
   const wallet = useAiWorkspaceStore((s) => s.wallet);
   const loadWallet = useAiWorkspaceStore((s) => s.loadWallet);
-  const topUpStars = useAiWorkspaceStore((s) => s.topUpStars);
+  const redeemStars = useAiWorkspaceStore((s) => s.redeemStars);
   const sendStarGift = useAiWorkspaceStore((s) => s.sendStarGift);
 
   const contacts = useChatStore((s) => s.contacts);
   const activeChatId = useChatStore((s) => s.activeChatId);
 
-  const [customAmount, setCustomAmount] = useState('250');
+  const [redeemMode, setRedeemMode] = useState<'redeem_code' | 'order_id'>('redeem_code');
+  const [redeemValue, setRedeemValue] = useState('');
+  const [redeemError, setRedeemError] = useState<string | null>(null);
   const [recipientUserId, setRecipientUserId] = useState<number>(0);
   const [selectedGiftId, setSelectedGiftId] = useState(GIFT_PRESETS[0].id);
   const [giftMessage, setGiftMessage] = useState('');
@@ -51,7 +53,8 @@ export function WalletStarsModal({
       const uid = u.userId ?? u.user_id;
       if (uid && !seen.has(uid)) {
         seen.add(uid);
-        const fullName = [u.firstName, u.lastName].filter(Boolean).join(' ') || u.username || `User #${uid}`;
+        const fullName =
+          [u.firstName, u.lastName].filter(Boolean).join(' ') || u.username || `User #${uid}`;
         list.push({
           id: uid,
           label: `${fullName}${u.username ? ` (@${u.username})` : ''}`,
@@ -62,61 +65,84 @@ export function WalletStarsModal({
   }, [contacts]);
 
   useEffect(() => {
-    if (recipientOptions.length === 0) {
-      if (recipientUserId !== 0) setRecipientUserId(0);
-      return;
-    }
-    if (!recipientOptions.some((opt) => opt.id === recipientUserId)) {
+    if (!recipientUserId && recipientOptions.length > 0) {
       setRecipientUserId(recipientOptions[0].id);
     }
-  }, [recipientOptions, recipientUserId]);
+  }, [recipientUserId, recipientOptions]);
+
+  if (!visible) return null;
 
   const handleClose = () => {
-    closeModal();
-    onClose?.();
+    if (onClose) onClose();
+    else closeModal();
   };
 
-  const handleQuickTopUp = async (amount: number) => {
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    setBusyAction(`topup_${amount}`);
+  const starsBalance = Number(wallet?.stars_balance ?? wallet?.balance ?? 0);
+  const tonDisplay =
+    typeof wallet?.ton_balance === 'number'
+      ? String(wallet.ton_balance)
+      : typeof wallet?.ton_balance === 'string' && wallet.ton_balance.trim()
+        ? wallet.ton_balance
+        : String(Number(wallet?.ton_nano ?? 0) / 1e9);
+
+  const selectedPreset =
+    GIFT_PRESETS.find((g) => g.id === selectedGiftId) ?? GIFT_PRESETS[0];
+  const insufficientForGift = starsBalance < selectedPreset.stars;
+
+  const handleRedeemSubmit = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    setRedeemError(null);
+    const trimmed = redeemValue.trim();
+    if (!trimmed) {
+      setRedeemError(
+        redeemMode === 'redeem_code'
+          ? 'Please enter an admin-issued Stars redeem code · 请输入兑换码'
+          : 'Please enter a verified paid order ID · 请输入已支付订单号',
+      );
+      return;
+    }
+    setBusyAction('redeem');
     try {
-      await topUpStars(amount);
-      pushToast(`Topped up +${amount} ★ Stars · 已成功充值 +${amount} 星币`, 'success');
+      await redeemStars(
+        redeemMode === 'redeem_code' ? { redeem_code: trimmed } : { order_id: trimmed },
+      );
+      setRedeemValue('');
+      pushToast('Stars credited via verified payment/redeem · 星币已核销入账', 'success');
     } catch (err) {
-      pushToast(err instanceof Error ? err.message : String(err), 'error');
+      const msg =
+        err instanceof ApiRequestError
+          ? `${err.status} ${err.errorCode}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      setRedeemError(msg);
+      pushToast(msg, 'error');
     } finally {
       setBusyAction(null);
     }
   };
 
-  const handleCustomTopUp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const amount = Math.floor(Number(customAmount));
-    if (!Number.isFinite(amount) || amount <= 0) {
-      pushToast('Enter a positive Stars amount · 请输入有效充值数量', 'warning');
-      return;
-    }
-    await handleQuickTopUp(amount);
-  };
-
-  const handleSendGift = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSendGift = async (ev: React.FormEvent) => {
+    ev.preventDefault();
     if (!recipientUserId) {
-      pushToast('Please select a contact recipient first · 请先添加并选择赠送对象', 'warning');
+      pushToast('Select a recipient first · 请先选择接收人', 'warning');
       return;
     }
-    const preset = GIFT_PRESETS.find((g) => g.id === selectedGiftId) || GIFT_PRESETS[0];
+    if (insufficientForGift) {
+      pushToast('Insufficient Stars balance · 星币余额不足', 'warning');
+      return;
+    }
     setBusyAction('gift');
     try {
       await sendStarGift({
         toUserId: recipientUserId,
         chatId: activeChatId ?? undefined,
-        amountStars: preset.stars,
-        giftId: preset.id,
+        amountStars: selectedPreset.stars,
+        giftId: selectedPreset.id,
         message: giftMessage.trim() || undefined,
       });
       setGiftMessage('');
-      pushToast(`Sent ${preset.stars} ★ Star Gift · 星币礼物已送出`, 'success');
+      pushToast(`Sent ${selectedPreset.label} successfully`, 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -124,178 +150,117 @@ export function WalletStarsModal({
     }
   };
 
-  if (!visible) return null;
-
-  const starsBalance = wallet?.stars_balance ?? wallet?.balance ?? 0;
-  const tonBalance = wallet?.ton_balance || '0.0000';
-  const transactions = wallet?.transactions ?? [];
-
   return (
     <div
-      id={DOM_IDS.WALLET_STARS_MODAL}
-      className="tg-modal-overlay"
+      className="tg-modal-backdrop"
       role="dialog"
       aria-modal="true"
-      aria-label="Telegram Stars & TON Wallet 星币与 TON 钱包"
+      aria-label="Stars & TON Wallet"
       onClick={(e) => {
-        if (e.target === e.currentTarget) {
-          handleClose();
-        }
+        if (e.target === e.currentTarget) handleClose();
       }}
     >
       <div
+        id={DOM_IDS.WALLET_STARS_MODAL}
         className="tg-modal-card"
-        style={{ width: 'min(600px, 95vw)', maxHeight: '90dvh' }}
+        style={{ width: 'min(560px, 94vw)', maxHeight: '88vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}
       >
-        {/* Header */}
-        <div className="tg-modal-header">
-          <div>
-            <div style={{ fontSize: '16px', fontWeight: 700 }}>
-              ★ Telegram Stars &amp; TON Wallet · 星币与链上钱包
-            </div>
-            <div style={{ fontSize: '12px', fontWeight: 400, color: 'var(--tg-text-secondary)' }}>
-              Instant Stars Top-Up · Peer Star Gifts · Mini App Invoice Payments
-            </div>
-          </div>
-          <button
-            type="button"
-            className="tg-icon-btn"
-            aria-label="Close Wallet 关闭钱包"
-            onClick={handleClose}
-          >
-            ×
+        <div className="tg-ai-row tg-ai-row--between">
+          <h3 className="tg-ai-workspace__title">⭐ Stars & TON Wallet · 星币与钱包</h3>
+          <button type="button" className="tg-btn tg-btn--ghost" onClick={handleClose}>
+            ✕ Close
           </button>
         </div>
 
-        {/* Body (Zero-purple Gold/Amber & Ocean Cyan palette!) */}
-        <div className="tg-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {/* Balance Summary Cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-            <div
-              style={{
-                padding: '14px 16px',
-                borderRadius: '12px',
-                backgroundColor: 'var(--tg-bg-elevated)',
-                border: '1px solid rgba(229, 160, 48, 0.38)',
-              }}
-            >
-              <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', fontWeight: 500 }}>
-                Telegram Stars · 星币余额
-              </div>
-              <div
-                style={{
-                  fontSize: '26px',
-                  fontWeight: 700,
-                  color: '#E5A030',
-                  marginTop: '4px',
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  gap: '6px',
-                }}
-              >
-                <span aria-hidden="true">★</span>
-                <span data-stars-balance={starsBalance} data-testid="stars-balance">
-                  {starsBalance}
-                </span>
-                <span style={{ fontSize: '13px', color: 'var(--tg-text-secondary)', fontWeight: 500 }}>
-                  Stars
-                </span>
-              </div>
-            </div>
+        {/* Truthful Server Balances (Starts at 0 Stars / 0 TON) */}
+        <div className="tg-wallet-balance-hero">
+          <div className="tg-wallet-metric-card" data-stars-balance={String(starsBalance)}>
+            <span className="tg-ai-workspace__subtitle">Telegram Stars · 星币余额</span>
+            <span className="tg-wallet-metric-value">★ {starsBalance}</span>
+          </div>
+          <div className="tg-wallet-metric-card" data-ton-balance={tonDisplay}>
+            <span className="tg-ai-workspace__subtitle">TON Balance · TON 余额</span>
+            <span className="tg-wallet-metric-value">{tonDisplay} TON</span>
+          </div>
+        </div>
 
-            <div
-              style={{
-                padding: '14px 16px',
-                borderRadius: '12px',
-                backgroundColor: 'var(--tg-bg-elevated)',
-                border: '1px solid rgba(41, 182, 246, 0.38)',
-              }}
-            >
-              <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', fontWeight: 500 }}>
-                TON Space · Toncoin 余额
-              </div>
-              <div
-                style={{
-                  fontSize: '26px',
-                  fontWeight: 700,
-                  color: '#29B6F6',
-                  marginTop: '4px',
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  gap: '6px',
-                }}
-              >
-                <span aria-hidden="true">💎</span>
-                <span data-ton-balance={tonBalance}>{tonBalance}</span>
-                <span style={{ fontSize: '13px', color: 'var(--tg-text-secondary)', fontWeight: 500 }}>
-                  TON
-                </span>
-              </div>
-            </div>
+        {/* Verified Payment / Redeem Credit Form (Zero Unverified Self-Minting) */}
+        <section className="tg-ai-card tg-ai-card--elevated">
+          <div className="tg-ai-card__header">
+            <h4 className="tg-ai-card__title">🎟️ Verified Credit · 核销充值码或已支付订单</h4>
+            <span className="tg-ai-badge tg-ai-badge--info">Server Payment-Gated (402)</span>
           </div>
 
-          {/* Quick Top-Up Buttons + Custom Amount */}
-          <div className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
-              ⚡ Top Up Stars · 快速充值星币
-            </div>
+          <div className="tg-ai-row">
+            <button
+              type="button"
+              className={`tg-btn ${redeemMode === 'redeem_code' ? 'tg-btn--primary' : 'tg-btn--ghost'}`}
+              onClick={() => {
+                setRedeemMode('redeem_code');
+                setRedeemError(null);
+              }}
+            >
+              Redeem Code · 兑换码
+            </button>
+            <button
+              type="button"
+              className={`tg-btn ${redeemMode === 'order_id' ? 'tg-btn--primary' : 'tg-btn--ghost'}`}
+              onClick={() => {
+                setRedeemMode('order_id');
+                setRedeemError(null);
+              }}
+            >
+              Paid Order ID · 支付订单号
+            </button>
+          </div>
 
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              {[100, 500, 1000].map((amt) => (
-                <button
-                  key={amt}
-                  type="button"
-                  className="tg-btn tg-btn--primary"
-                  disabled={busyAction !== null}
-                  onClick={() => void handleQuickTopUp(amt)}
-                >
-                  +{amt} ★ Top Up · 充值
-                </button>
-              ))}
-            </div>
-
-            <form onSubmit={(e) => void handleCustomTopUp(e)} style={{ display: 'flex', gap: '8px' }}>
+          <form onSubmit={(e) => void handleRedeemSubmit(e)} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <label className="tg-ai-field">
+              <span>
+                {redeemMode === 'redeem_code'
+                  ? 'Redeem Code · 管理员签发兑换码'
+                  : 'Verified Paid Order ID · 已支付订单号'}
+              </span>
               <input
-                type="number"
-                min={1}
-                step={1}
-                className="tg-input"
-                aria-label="Custom Stars Top Up Amount 自定义充值数量"
-                placeholder="Custom Stars amount"
-                value={customAmount}
-                onChange={(e) => setCustomAmount(e.target.value)}
+                type="text"
+                value={redeemValue}
+                onChange={(e) => setRedeemValue(e.target.value)}
+                placeholder={
+                  redeemMode === 'redeem_code' ? 'STARS-XXXX-XXXX' : 'order_paid_...'
+                }
               />
-              <button
-                type="submit"
-                className="tg-btn tg-btn--secondary"
-                disabled={busyAction !== null}
-                style={{ flexShrink: 0 }}
-              >
-                Top Up · 自定义充值
-              </button>
-            </form>
-          </div>
+            </label>
 
-          {/* Send Star Gift Form */}
-          <form
-            onSubmit={(e) => void handleSendGift(e)}
-            className="tg-surface-card"
-            style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
-          >
-            <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
-              🎁 Send Star Gift · 赠送好友星币礼物
-            </div>
+            {redeemError && (
+              <div role="alert" className="tg-secret-leak-alert">
+                {redeemError}
+              </div>
+            )}
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+            <button
+              type="submit"
+              className="tg-btn tg-btn--primary"
+              disabled={busyAction !== null}
+            >
+              {busyAction === 'redeem'
+                ? 'Verifying…'
+                : 'Redeem / Verify Order · 核销充值码或订单'}
+            </button>
+          </form>
+        </section>
+
+        {/* Send Star Gift */}
+        <section className="tg-ai-card tg-ai-card--elevated">
+          <h4 className="tg-ai-card__title">🎁 Send Star Gift · 赠送星币礼物</h4>
+          <form onSubmit={(e) => void handleSendGift(e)} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <label className="tg-ai-field">
+              <span>Recipient · 接收人</span>
               <select
-                className="tg-select"
-                aria-label="Gift Recipient 选择赠送对象"
                 value={recipientUserId}
-                disabled={recipientOptions.length === 0}
                 onChange={(e) => setRecipientUserId(Number(e.target.value))}
               >
                 {recipientOptions.length === 0 ? (
-                  <option value={0}>暂无联系人 · Add a contact first</option>
+                  <option value={0}>No contacts available · 暂无联系人</option>
                 ) : (
                   recipientOptions.map((opt) => (
                     <option key={opt.id} value={opt.id}>
@@ -304,102 +269,72 @@ export function WalletStarsModal({
                   ))
                 )}
               </select>
+            </label>
 
+            <label className="tg-ai-field">
+              <span>Gift Preset · 礼物款式</span>
               <select
-                className="tg-select"
-                aria-label="Star Gift Preset 选择礼物档位"
                 value={selectedGiftId}
                 onChange={(e) => setSelectedGiftId(e.target.value)}
               >
-                {GIFT_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.label}
+                {GIFT_PRESETS.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.label}
                   </option>
                 ))}
               </select>
-            </div>
+            </label>
 
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <label className="tg-ai-field">
+              <span>Note (Optional) · 附言</span>
               <input
                 type="text"
-                className="tg-input"
-                aria-label="Gift Message 祝福语"
-                placeholder="Attach a gift message · 附言祝福..."
                 value={giftMessage}
                 onChange={(e) => setGiftMessage(e.target.value)}
+                placeholder="Thank you!"
               />
-              <button
-                type="submit"
-                className="tg-btn tg-btn--primary"
-                disabled={busyAction !== null || !recipientUserId}
-                style={{ flexShrink: 0 }}
-              >
-                Send Gift · 赠送礼物
-              </button>
-            </div>
-          </form>
+            </label>
 
-          {/* Transaction Ledger */}
-          <div className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
-              📜 Transaction Ledger · 交易流水账单 ({transactions.length})
-            </div>
-
-            {transactions.length === 0 ? (
-              <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)' }}>
-                No transactions yet · 暂无流水记录
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '190px', overflowY: 'auto' }}>
-                {transactions.map((tx) => {
-                  const isPositive = tx.amount_stars >= 0 && tx.kind !== 'gift_sent' && tx.kind !== 'invoice_payment';
-                  const signedAmount =
-                    tx.kind === 'gift_sent' || tx.kind === 'invoice_payment'
-                      ? -Math.abs(tx.amount_stars)
-                      : Math.abs(tx.amount_stars);
-                  return (
-                    <div
-                      key={tx.tx_id}
-                      data-tx-kind={tx.kind}
-                      style={{
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        backgroundColor: 'var(--tg-bg-elevated)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: '10px',
-                        fontSize: '12.5px',
-                      }}
-                    >
-                      <div>
-                        <div style={{ fontWeight: 600 }}>{tx.description || tx.kind}</div>
-                        <div style={{ fontSize: '11px', color: 'var(--tg-text-secondary)' }}>
-                          <code>{tx.kind}</code> · {new Date(tx.created_at_ms).toLocaleString()}
-                        </div>
-                      </div>
-                      <div
-                        style={{
-                          fontWeight: 700,
-                          color: isPositive ? 'var(--tg-success)' : '#E5A030',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {signedAmount > 0 ? `+${signedAmount}` : signedAmount} ★
-                      </div>
-                    </div>
-                  );
-                })}
+            {insufficientForGift && (
+              <div className="tg-ai-workspace__subtitle" style={{ color: 'var(--tg-warning)' }}>
+                Insufficient Stars balance ({starsBalance} / {selectedPreset.stars} ★ required) · 星币余额不足，请先核销有效充值码或订单。
               </div>
             )}
-          </div>
-        </div>
 
-        <div className="tg-modal-footer">
-          <button type="button" className="tg-btn tg-btn--secondary" onClick={handleClose}>
-            Close · 关闭
-          </button>
-        </div>
+            <button
+              type="submit"
+              className="tg-btn tg-btn--secondary"
+              disabled={busyAction !== null || insufficientForGift || !recipientUserId}
+            >
+              {busyAction === 'gift' ? 'Sending…' : `Send Gift (${selectedPreset.stars} ★)`}
+            </button>
+          </form>
+        </section>
+
+        {/* Transaction History */}
+        <section className="tg-ai-card tg-ai-card--elevated">
+          <h4 className="tg-ai-card__title">
+            📜 Ledger Transactions · 账单记录 ({wallet?.transactions?.length ?? 0})
+          </h4>
+          {(wallet?.transactions ?? []).length === 0 ? (
+            <div className="tg-ai-empty">No wallet transactions yet · 暂无交易记录</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {(wallet?.transactions ?? []).map((tx) => (
+                <div
+                  key={tx.tx_id}
+                  className="tg-ai-row tg-ai-row--between"
+                  style={{ fontSize: 12, padding: '6px 0', borderBottom: '1px solid var(--tg-border-subtle)' }}
+                >
+                  <span>{tx.description}</span>
+                  <strong>
+                    {tx.amount_stars >= 0 ? `+${tx.amount_stars}` : tx.amount_stars} ★
+                  </strong>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );

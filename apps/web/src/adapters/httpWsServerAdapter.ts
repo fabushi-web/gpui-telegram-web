@@ -1,4 +1,5 @@
 import {
+  DEFAULT_ARGON2_KDF_PARAMS,
   createTextContent,
   detectPtsGap,
   enrichMessageItem,
@@ -8,12 +9,19 @@ import {
   mapStoryDtoToDomain,
   mapUserDtoToDomain,
   type AdapterMode,
+  type ArchiveLocalBotReplyRequest,
+  type ArchiveLocalBotReplyResponse,
+  type AssistStartRequest,
+  type AssistStartResponse,
+  type AuthCustodyUpdateResponse,
   type AuthResponse,
+  type AutomationAppDetail,
   type BotRegistryEntry,
   type BrowserAuditLogEntry,
   type BrowserCommandRequest,
   type BrowserCommandResult,
   type BrowserControlClientPort,
+  type BrowserControlMode,
   type BrowserControlRevokeResponse,
   type BrowserRegisterPayload,
   type BrowserSnapshotDto,
@@ -21,17 +29,30 @@ import {
   type BrowserTargetDescriptor,
   type CallSessionState,
   type CallSignalPayload,
+  type ChangePasswordRequest,
   type ChannelStatisticsDto,
   type ChatDetailDto,
   type ChatFolder,
   type ChatFolderDto,
   type ChatMemberDto,
   type ChatSummary,
+  type CodingAgentsProbeRequest,
+  type CodingAgentsProbeResponse,
+  type CodingHostEvent,
   type ComputerNodeDto,
   type ComputerRunPolicy,
   type ConnectionState,
   type DesktopPairingTicketDto,
+  type DeviceSyncActionResponse,
+  type DeviceSyncApproveRequest,
+  type DeviceSyncRequestDto,
+  type DeviceSyncRequestResponse,
+  type DeviceSyncStatusResponse,
   type DraftState,
+  type FabushiBotCreateRequest,
+  type FabushiBotCreateResponse,
+  type FabushiBotPatchRequest,
+  type FabushiBotSummaryDto,
   type ForumTopic,
   type ForumTopicDto,
   type GifResultDto,
@@ -46,8 +67,13 @@ import {
   type HermesStreamEvent,
   type HermesStudioSnapshot,
   type HermesStudioTab,
+  type InstallAutomationAppResponse,
   type InviteLinkDto,
   type InvoiceCard,
+  type KdfParamsResponse,
+  type ListAutomationAppsQuery,
+  type ListAutomationAppsResponse,
+  type ListInstalledAutomationAppsResponse,
   type MagpieConfigSnapshot,
   type MagpieMaskingConfig,
   type MagpieMaskingPreviewResult,
@@ -55,6 +81,7 @@ import {
   type MagpieProviderView,
   type MagpieRoutingGroup,
   type MagpieUsageLedgerSummary,
+  type McpAuditListResponse,
   type McpJsonRpcRequest,
   type McpJsonRpcResponse,
   type McpPendingApprovalDto,
@@ -65,14 +92,23 @@ import {
   type MessageItem,
   type MiniAppEntry,
   type MiniAppLaunchContext,
+  type MiniAppTakeoverState,
+  type MiniAppWebMcpResponse,
+  type OAuthGrantsResponse,
   type PendingComputerCommandDto,
+  type PendingDeviceSyncListResponse,
   type PollData,
+  type PublishAutomationAppRequest,
   type PublishPreKeysRequest,
   type PublishPreKeysResponse,
   type PtsUpdate,
   type QrPairSessionDto,
   type ReactionCount,
   type ReactionDetail,
+  type RecordAutomationRunRequest,
+  type RecordAutomationRunResponse,
+  type RemoteAssistConfigDto,
+  type RemoteSessionsResponse,
   type SearchHitDto,
   type SearchTabCategory,
   type SendMessagePortInput,
@@ -87,19 +123,28 @@ import {
   type TalkSessionDto,
   type TaskItemDto,
   type TelegramClientPort,
+  type TurnCredentialsDto,
   type TwoFactorStatusDto,
   type TypingAction,
+  type UninstallAutomationAppResponse,
   type UnsubscribeFn,
   type UpdateEvent,
+  type UpgradeSplitKeyRequest,
+  type UpsertUserVaultItemRequest,
+  type UpsertUserVaultItemResponse,
   type UserPreKeyBundlesResponse,
   type UserPrivacySettingsDto,
   type UserProfile,
   type UserProfileDto,
+  type UserVaultEnvelopeResponse,
+  type UserVaultKeyEnvelopeDto,
+  type UserVaultSyncPullResponse,
   type WalletStateDto,
   type WsClientFrame,
   type WsServerFrame,
 } from '@gpui-telegram/protocol';
 import { browserControlAgent } from '../services/browserControlAgent';
+import { deriveSplitKeyV2, generateRandomSaltB64 } from '../services/splitKeyCrypto';
 import { broadcastSync } from './broadcastSync';
 import { indexedDbCache } from './indexedDbCache';
 
@@ -145,6 +190,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   private token: string | null = null;
   private accountId = 'default';
   private currentUserId = 1;
+  private accountEpoch = 0;
   private connectionState: ConnectionState = 'disconnected';
   private ws: WebSocket | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -157,6 +203,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
   private connListeners = new Set<(state: ConnectionState) => void>();
   private updateListeners = new Set<(event: UpdateEvent, ptsUpdate?: PtsUpdate) => void>();
+  private authInvalidatedListeners = new Set<(reason: string) => void>();
 
   constructor(initialBaseUrl = '') {
     this.baseUrl = this.normalizeBaseUrl(initialBaseUrl);
@@ -192,8 +239,11 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     if (opts.token !== undefined) {
       this.token = opts.token;
     }
-    if (opts.accountId !== undefined) {
+    if (opts.accountId !== undefined && opts.accountId !== this.accountId) {
+      this.accountEpoch += 1;
       this.accountId = opts.accountId;
+      this.chatPtsMap.clear();
+      this.discoveredPeers.clear();
     }
     if (opts.userId !== undefined) {
       const n = Number(opts.userId);
@@ -413,6 +463,54 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     }
   }
 
+  public sendMiniAppWebMcpResult(resp: MiniAppWebMcpResponse): void {
+    this.sendWsFrame({ type: 'MiniAppWebMcpResult', payload: resp });
+  }
+
+  public sendMiniAppTakeoverState(state: MiniAppTakeoverState): void {
+    this.sendWsFrame({ type: 'MiniAppTakeoverState', payload: state });
+  }
+
+  public sendCodingHostEvent(ev: CodingHostEvent): void {
+    this.sendWsFrame({ type: 'CodingHostEvent', payload: ev });
+  }
+
+  public onAuthInvalidated(listener: (reason: string) => void): UnsubscribeFn {
+    this.authInvalidatedListeners.add(listener);
+    return () => {
+      this.authInvalidatedListeners.delete(listener);
+    };
+  }
+
+  private emitAuthInvalidated(reason: string): void {
+    this.manualDisconnect = true;
+    this.token = null;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.ws) {
+      try {
+        this.ws.close(1000, reason);
+      } catch {
+        // Ignore
+      }
+      this.ws = null;
+    }
+    this.setConnectionState('disconnected');
+    for (const fn of this.authInvalidatedListeners) {
+      try {
+        fn(reason);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
   // ==========================================================================
   // Lifecycle & Real-Time WebSocket + PTS Sync + Offline Outbox Flush
   // ==========================================================================
@@ -439,6 +537,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       return;
     }
 
+    const epoch = this.accountEpoch;
     this.setConnectionState(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
 
     browserControlAgent.setWsReplySender((result) => {
@@ -464,12 +563,22 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
         socket.onopen = () => {
           clearTimeout(openTimeout);
+          if (epoch !== this.accountEpoch || this.ws !== socket) {
+            try {
+              socket.close(1000, 'Stale account epoch');
+            } catch {
+              // Ignore
+            }
+            finish();
+            return;
+          }
           const wasReconnect = this.reconnectAttempts > 0;
           this.reconnectAttempts = 0;
           this.setConnectionState('connected');
 
           if (this.pingTimer) clearInterval(this.pingTimer);
           this.pingTimer = setInterval(() => {
+            if (epoch !== this.accountEpoch) return;
             const now = Date.now();
             this.sendWsFrame({ type: 'Ping', payload: { nonce: now, client_ts: now } });
           }, 25_000);
@@ -488,10 +597,11 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         };
 
         socket.onmessage = (ev: MessageEvent) => {
+          if (epoch !== this.accountEpoch) return;
           if (typeof ev.data !== 'string') return;
           try {
             const frame = JSON.parse(ev.data) as WsServerFrame;
-            void this.handleServerWsFrame(frame);
+            void this.handleServerWsFrame(frame, epoch);
           } catch {
             // Ignore malformed frame
           }
@@ -502,45 +612,60 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
           finish();
         };
 
-        socket.onclose = () => {
+        socket.onclose = (closeEv: CloseEvent) => {
           clearTimeout(openTimeout);
           if (this.pingTimer) {
             clearInterval(this.pingTimer);
             this.pingTimer = null;
           }
-          this.ws = null;
+          if (this.ws === socket) {
+            this.ws = null;
+          }
+          if (epoch !== this.accountEpoch) {
+            finish();
+            return;
+          }
+          if (closeEv.code === 4001) {
+            this.emitAuthInvalidated(closeEv.reason || 'session_revoked');
+            finish();
+            return;
+          }
           if (!this.manualDisconnect && this.token) {
-            this.scheduleReconnect();
+            this.scheduleReconnect(epoch);
           } else {
             this.setConnectionState('disconnected');
           }
           finish();
         };
       } catch {
-        this.scheduleReconnect();
+        this.scheduleReconnect(epoch);
         finish();
       }
     });
   }
 
-  private scheduleReconnect(): void {
-    if (this.manualDisconnect || !this.token) return;
+  private scheduleReconnect(epoch = this.accountEpoch): void {
+    if (this.manualDisconnect || !this.token || epoch !== this.accountEpoch) return;
     this.setConnectionState('reconnecting');
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     const delayMs = Math.min(8_000, 350 * Math.pow(1.8, this.reconnectAttempts));
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      if (epoch !== this.accountEpoch || this.manualDisconnect || !this.token) return;
       void this.connect(this.token ?? undefined);
     }, delayMs);
   }
 
   private async reconcilePtsAfterReconnect(): Promise<void> {
+    const epoch = this.accountEpoch;
     if (this.chatPtsMap.size === 0) return;
     this.setConnectionState('updating');
     try {
       for (const [chatId, localPts] of this.chatPtsMap.entries()) {
+        if (epoch !== this.accountEpoch) return;
         const diff = await this.getDifference({ chat_id: chatId, from_pts: localPts });
+        if (epoch !== this.accountEpoch) return;
         this.chatPtsMap.set(chatId, diff.current_pts);
         for (const msg of diff.new_messages ?? []) {
           this.emitUpdate({ type: 'NewMessage', data: enrichMessageItem(msg) });
@@ -555,16 +680,27 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     } catch {
       // Ignore transient sync error
     } finally {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (epoch === this.accountEpoch && this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.setConnectionState('connected');
       }
     }
   }
 
-  private async handleServerWsFrame(frame: WsServerFrame): Promise<void> {
+  private async handleServerWsFrame(frame: WsServerFrame, epoch: number): Promise<void> {
+    if (epoch !== this.accountEpoch) return;
     switch (frame.type) {
       case 'AuthOk': {
         this.currentUserId = frame.payload.user_id;
+        break;
+      }
+      case 'AuthError': {
+        this.emitAuthInvalidated(frame.payload.reason || 'auth_error');
+        break;
+      }
+      case 'Error': {
+        if (frame.payload.code === 401) {
+          this.emitAuthInvalidated(frame.payload.message || 'unauthorized');
+        }
         break;
       }
       case 'BrowserRegistered': {
@@ -596,6 +732,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
             this.setConnectionState('updating');
             try {
               const diff = await this.getDifference({ chat_id: chatId, from_pts: localPts });
+              if (epoch !== this.accountEpoch) return;
               this.chatPtsMap.set(chatId, diff.current_pts);
               for (const m of diff.new_messages ?? []) {
                 this.emitUpdate({ type: 'NewMessage', data: enrichMessageItem(m) }, ptsUpd);
@@ -606,7 +743,9 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
             } catch {
               // Ignore
             } finally {
-              this.setConnectionState('connected');
+              if (epoch === this.accountEpoch) {
+                this.setConnectionState('connected');
+              }
             }
             return;
           }
@@ -627,17 +766,21 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
   public async flushOutbox(): Promise<void> {
     if (this.flushingOutbox || !this.token) return;
+    const epoch = this.accountEpoch;
+    const targetAccountId = this.accountId;
 
     this.flushingOutbox = true;
     try {
-      const pending = await indexedDbCache.listOutbox(this.accountId);
+      const pending = await indexedDbCache.listOutbox(targetAccountId);
       for (const item of pending) {
+        if (epoch !== this.accountEpoch || !this.token) break;
         try {
           const res = await this.sendMessageOverHttp({
             ...item.req,
             clientNonce: item.clientNonce,
           });
-          await indexedDbCache.removeOutbox(this.accountId, item.clientNonce);
+          await indexedDbCache.removeOutbox(targetAccountId, item.clientNonce);
+          if (epoch !== this.accountEpoch) break;
           const enriched = enrichMessageItem({
             ...res.message,
             client_nonce: item.clientNonce,
@@ -646,13 +789,19 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
           this.emitUpdate({ type: 'NewMessage', data: enriched });
           broadcastSync.publish({
             kind: 'message_upsert',
-            accountId: this.accountId,
+            accountId: targetAccountId,
             chatId: item.chatId,
             message: enriched,
             pts: res.pts,
           });
-        } catch {
-          // Stop flushing on network error; retry on next online/reconnect
+        } catch (err) {
+          const status = (err as { status?: number } | null)?.status;
+          if (typeof status === 'number' && status >= 400 && status < 500) {
+            // Permanent client/RBAC rejection: drop from outbox rather than retrying indefinitely
+            await indexedDbCache.removeOutbox(targetAccountId, item.clientNonce);
+            continue;
+          }
+          // Stop flushing on transient network/5xx error; retry on next online/reconnect
           break;
         }
       }
@@ -716,12 +865,18 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   // ==========================================================================
 
   private applyAuthSuccess(res: AuthResponse): AuthResponse {
+    const nextAccountId = res.user_id ? String(res.user_id) : this.accountId;
+    if (nextAccountId !== this.accountId) {
+      this.accountEpoch += 1;
+      this.chatPtsMap.clear();
+      this.discoveredPeers.clear();
+    }
     if (res.token) {
       this.token = res.token;
     }
     if (res.user_id) {
       this.currentUserId = res.user_id;
-      this.accountId = String(res.user_id);
+      this.accountId = nextAccountId;
     }
     if (res.user) {
       this.recordUsers([res.user]);
@@ -729,9 +884,15 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     return res;
   }
 
-  public async loginDemo(slot = 0): Promise<AuthResponse> {
-    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/demo', { slot });
-    return this.applyAuthSuccess(res);
+  public async loginDemo(_slot = 0): Promise<AuthResponse> {
+    throw new Error('Demo login has been removed in Fabushi Web v1.6.11');
+  }
+
+  public async getKdfParams(usernameOrEmail: string): Promise<KdfParamsResponse> {
+    return this.requestJson<KdfParamsResponse>(
+      'GET',
+      `/api/v1/auth/kdf-params?username_or_email=${encodeURIComponent(usernameOrEmail)}`,
+    );
   }
 
   public async sendPhoneCode(
@@ -788,10 +949,10 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     });
   }
 
-  public async initQrPairing(deviceName = 'Telegram Web'): Promise<QrPairSessionDto> {
+  public async initQrPairing(deviceName = 'Fabushi Web'): Promise<QrPairSessionDto> {
     const res = await this.requestJson<QrPairSessionDto & { pair_token?: string }>(
       'POST',
-      '/api/v1/auth/pair/init',
+      '/api/v1/auth/pair/create',
       { device_name: deviceName },
     );
     return {
@@ -808,7 +969,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         username?: string;
         session_id?: string;
       }
-    >('GET', `/api/v1/auth/pair/poll/${encodeURIComponent(pairId)}`);
+    >('GET', `/api/v1/auth/pair/status?pair_token=${encodeURIComponent(pairId)}`);
     if (res.session?.token) {
       this.applyAuthSuccess(res.session);
     } else if (res.token && (res.user || res.user_id)) {
@@ -837,11 +998,40 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     password: string,
     twoFaPassword?: string,
   ): Promise<AuthResponse> {
-    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/login', {
-      username,
-      password,
-      two_fa_password: twoFaPassword,
-    });
+    let kdf: KdfParamsResponse | null = null;
+    try {
+      kdf = await this.getKdfParams(username);
+    } catch {
+      kdf = null;
+    }
+
+    let body: Record<string, unknown>;
+    if (kdf && kdf.auth_version === 2 && kdf.auth_salt_b64) {
+      const derived = await deriveSplitKeyV2(
+        password,
+        kdf.auth_salt_b64,
+        kdf.kdf_params ?? DEFAULT_ARGON2_KDF_PARAMS,
+      );
+      body = {
+        username,
+        password: '',
+        auth_verifier_b64: derived.authVerifierB64,
+        two_fa_password: twoFaPassword,
+      };
+    } else {
+      body = {
+        username,
+        password,
+        two_fa_password: twoFaPassword,
+      };
+    }
+
+    const res = await this.requestJson<
+      AuthResponse & { requires_2fa?: boolean; challenge_token?: string; hint?: string }
+    >('POST', '/api/v1/auth/login', body);
+    if (res.requires_2fa) {
+      throw new TwoFactorChallengeError(res.challenge_token ?? '', res.hint);
+    }
     return this.applyAuthSuccess(res);
   }
 
@@ -851,8 +1041,38 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     first_name: string;
     last_name?: string;
   }): Promise<AuthResponse> {
-    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/register', req);
+    const authSaltB64 = generateRandomSaltB64(16);
+    const derived = await deriveSplitKeyV2(
+      req.password,
+      authSaltB64,
+      DEFAULT_ARGON2_KDF_PARAMS,
+    );
+    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/register', {
+      username: req.username,
+      first_name: req.first_name,
+      last_name: req.last_name,
+      auth_version: 2,
+      auth_salt_b64: authSaltB64,
+      auth_verifier_b64: derived.authVerifierB64,
+      kdf_params: derived.kdfParams,
+    });
     return this.applyAuthSuccess(res);
+  }
+
+  public async upgradeSplitKey(req: UpgradeSplitKeyRequest): Promise<AuthCustodyUpdateResponse> {
+    return this.requestJson<AuthCustodyUpdateResponse>(
+      'POST',
+      '/api/v1/auth/upgrade-split-key',
+      req,
+    );
+  }
+
+  public async changePassword(req: ChangePasswordRequest): Promise<AuthCustodyUpdateResponse> {
+    return this.requestJson<AuthCustodyUpdateResponse>(
+      'POST',
+      '/api/v1/auth/change-password',
+      req,
+    );
   }
 
   public async sendEmailCode(
@@ -866,7 +1086,12 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     code: string;
     email_code_hash?: string;
   }): Promise<AuthResponse> {
-    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/email/verify', req);
+    const res = await this.requestJson<
+      AuthResponse & { requires_2fa?: boolean; challenge_token?: string; hint?: string }
+    >('POST', '/api/v1/auth/email/verify', req);
+    if (res.requires_2fa) {
+      throw new TwoFactorChallengeError(res.challenge_token ?? '', res.hint);
+    }
     return this.applyAuthSuccess(res);
   }
 
@@ -879,7 +1104,24 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     last_name?: string;
     email_code_hash?: string;
   }): Promise<AuthResponse> {
-    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/email/register', req);
+    const authSaltB64 = generateRandomSaltB64(16);
+    const derived = await deriveSplitKeyV2(
+      req.password,
+      authSaltB64,
+      DEFAULT_ARGON2_KDF_PARAMS,
+    );
+    const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/email/register', {
+      email: req.email,
+      code: req.code,
+      email_code_hash: req.email_code_hash,
+      username: req.username,
+      first_name: req.first_name,
+      last_name: req.last_name,
+      auth_version: 2,
+      auth_salt_b64: authSaltB64,
+      auth_verifier_b64: derived.authVerifierB64,
+      kdf_params: derived.kdfParams,
+    });
     return this.applyAuthSuccess(res);
   }
 
@@ -937,36 +1179,72 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     return { status: res.status, auth: authPayload };
   }
 
-  public async confirmAlipayAuth(sessionId: string): Promise<AuthResponse> {
-    const res = await this.requestJson<AuthResponse & { auth?: AuthResponse }>(
-      'POST',
-      '/api/v1/auth/alipay/confirm',
-      { session_id: sessionId },
-    );
-    const unwrapped = res.auth ?? res;
-    return this.applyAuthSuccess(unwrapped);
+  public async confirmAlipayAuth(_sessionId: string): Promise<AuthResponse> {
+    throw new Error('Direct Alipay confirmation is forbidden; use verified OAuth callback');
   }
 
-  public async getPasskeyChallenge(
-    username?: string,
-  ): Promise<{ challenge_id: string; challenge: string; rp_id: string }> {
-    return this.requestJson('POST', '/api/v1/auth/passkey/challenge', { username });
+  public async getPasskeyRegisterOptions(): Promise<{
+    challenge_id: string;
+    challenge: string;
+    rp: { id: string; name: string };
+    rp_id: string;
+    user: { id: string; name: string; displayName: string };
+    pubKeyCredParams: Array<{ type: 'public-key'; alg: number }>;
+    excludeCredentials?: Array<{ type: 'public-key'; id: string }>;
+    timeout?: number;
+  }> {
+    return this.requestJson('POST', '/api/v1/auth/passkey/register/options', {});
+  }
+
+  public async getPasskeyChallenge(username?: string): Promise<{
+    challenge_id: string;
+    challenge: string;
+    rp_id: string;
+    allowCredentials?: Array<{ type: 'public-key'; id: string }>;
+    timeout?: number;
+  }> {
+    return this.requestJson('POST', '/api/v1/auth/passkey/login/options', { username });
   }
 
   public async registerPasskey(req: {
+    challenge_id?: string;
     cred_id?: string;
     label: string;
     public_key_b64?: string;
-  }): Promise<{ cred_id: string; label: string }> {
-    return this.requestJson('POST', '/api/v1/auth/passkey/register', req);
+    attestationObject?: string;
+    clientDataJSON?: string;
+  }): Promise<{ cred_id: string; label: string; created_at_ms?: number; last_used_ms?: number }> {
+    return this.requestJson('POST', '/api/v1/auth/passkey/register/verify', req);
   }
 
   public async verifyPasskey(req: {
     challenge_id: string;
     credential_id: string;
+    clientDataJSON?: string;
+    authenticatorData?: string;
+    signature?: string;
+    device_name?: string;
   }): Promise<AuthResponse> {
     const res = await this.requestJson<AuthResponse>('POST', '/api/v1/auth/passkey/verify', req);
     return this.applyAuthSuccess(res);
+  }
+
+  public async listPasskeys(): Promise<
+    Array<{ cred_id: string; label: string; created_at_ms: number; last_used_ms?: number | null }>
+  > {
+    const res = await this.requestJson<{
+      passkeys?: Array<{
+        cred_id: string;
+        label: string;
+        created_at_ms: number;
+        last_used_ms?: number | null;
+      }>;
+    }>('GET', '/api/v1/account/passkeys');
+    return res.passkeys ?? [];
+  }
+
+  public async deletePasskey(credId: string): Promise<void> {
+    await this.requestJson('DELETE', `/api/v1/account/passkeys/${encodeURIComponent(credId)}`);
   }
 
   public async listSessions(): Promise<SessionDto[]> {
@@ -989,12 +1267,24 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     return Number(res.revoked_count ?? res.count ?? 0);
   }
 
+  public async deleteAccount(): Promise<void> {
+    await this.requestJson('DELETE', '/api/v1/account');
+    this.accountEpoch += 1;
+    this.chatPtsMap.clear();
+    this.discoveredPeers.clear();
+    await this.disconnect();
+    this.token = null;
+  }
+
   public async logout(): Promise<void> {
     try {
       await this.requestJson('POST', '/api/v1/auth/logout', {});
     } catch {
       // Ignore if token already expired
     }
+    this.accountEpoch += 1;
+    this.chatPtsMap.clear();
+    this.discoveredPeers.clear();
     await this.disconnect();
     this.token = null;
   }
@@ -1059,10 +1349,17 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     isForum?: boolean;
     peerUserId?: number;
     memberIds?: number[];
+    memberUsernames?: string[];
+    clientNonce?: string;
   }): Promise<ChatSummary> {
+    const clientNonce =
+      req.clientNonce ??
+      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `chat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`);
     const res = await this.requestJson<ChatDetailDto & { chat?: ChatDetailDto }>(
       'POST',
-      '/api/v1/chats',
+      '/api/v1/chats/create',
       {
         title: req.title,
         chat_type: req.chatType,
@@ -1071,6 +1368,8 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         is_forum: req.isForum,
         peer_user_id: req.peerUserId,
         member_ids: req.memberIds,
+        member_usernames: req.memberUsernames,
+        client_nonce: clientNonce,
       },
     );
     return mapChatDtoToDomain(res.chat ?? res);
@@ -1563,6 +1862,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       schedule_at_ms: req.scheduleAtMs,
       ttl_seconds: req.ttlSeconds,
       send_as_peer_id: req.sendAsPeerId,
+      skip_server_bot_reply: req.skipServerBotReply,
     });
 
     const baseMsg: MessageItem = res.message ?? {
@@ -1624,8 +1924,13 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         pts: sent.pts,
       });
       return sent;
-    } catch {
-      // Queue in durable IndexedDB outbox when offline or fetch fails
+    } catch (err) {
+      const status = (err as { status?: number } | null)?.status;
+      if (typeof status === 'number' && status >= 400 && status < 500) {
+        // Never queue HTTP 4xx rejections (e.g. 403 read-only channel, 400 validation) into offline outbox
+        throw err;
+      }
+      // Queue in durable IndexedDB outbox only when offline, network fails, or 5xx/timeout occurs
     }
 
     const nowIso = new Date().toISOString();
@@ -1675,6 +1980,17 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       message: optimisticMessage,
       pts: this.chatPtsMap.get(req.chatId) ?? 0,
     };
+  }
+
+  public async archiveLocalBotReply(
+    chatId: number,
+    req: ArchiveLocalBotReplyRequest,
+  ): Promise<ArchiveLocalBotReplyResponse> {
+    return this.requestJson<ArchiveLocalBotReplyResponse>(
+      'POST',
+      `/api/v1/chats/${chatId}/messages/archive-local-bot-reply`,
+      req,
+    );
   }
 
   public async editMessage(
@@ -2315,6 +2631,53 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     };
   }
 
+  public async listInstalledMiniApps(): Promise<MiniAppEntry[]> {
+    const res = await this.requestJson<{ apps?: MiniAppEntry[]; miniapps?: MiniAppEntry[] }>(
+      'GET',
+      '/api/v1/miniapps/installed',
+    );
+    return res.apps ?? res.miniapps ?? [];
+  }
+
+  public async listRecentMiniApps(): Promise<MiniAppEntry[]> {
+    const res = await this.requestJson<{ apps?: MiniAppEntry[]; miniapps?: MiniAppEntry[] }>(
+      'GET',
+      '/api/v1/miniapps/recent',
+    );
+    return res.apps ?? res.miniapps ?? [];
+  }
+
+  public async installMiniApp(botUsername: string, shortName: string): Promise<{ ok: boolean }> {
+    const cleanBot = botUsername.replace(/^@/, '');
+    return this.requestJson<{ ok: boolean }>(
+      'POST',
+      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/install`,
+      {},
+    );
+  }
+
+  public async uninstallMiniApp(botUsername: string, shortName: string): Promise<{ ok: boolean }> {
+    const cleanBot = botUsername.replace(/^@/, '');
+    return this.requestJson<{ ok: boolean }>(
+      'DELETE',
+      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/install`,
+    );
+  }
+
+  public async sendMiniAppData(
+    botUsername: string,
+    shortName: string,
+    data: string,
+    chatId?: number,
+  ): Promise<Record<string, unknown>> {
+    const cleanBot = botUsername.replace(/^@/, '');
+    return this.requestJson<Record<string, unknown>>(
+      'POST',
+      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/send-data`,
+      { data, chat_id: chatId },
+    );
+  }
+
   public async getMiniAppCloudStorage(
     botUsername: string,
     shortName: string,
@@ -2322,11 +2685,15 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   ): Promise<Record<string, string>> {
     const cleanBot = botUsername.replace(/^@/, '');
     const qs = keys && keys.length > 0 ? `?keys=${encodeURIComponent(keys.join(','))}` : '';
-    const res = await this.requestJson<{ items?: Record<string, string>; storage?: Record<string, string> }>(
+    const res = await this.requestJson<{
+      entries?: Record<string, string>;
+      items?: Record<string, string>;
+      storage?: Record<string, string>;
+    }>(
       'GET',
-      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/cloud-storage${qs}`,
+      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/storage${qs}`,
     );
-    return res.items ?? res.storage ?? {};
+    return res.entries ?? res.items ?? res.storage ?? {};
   }
 
   public async setMiniAppCloudStorage(
@@ -2338,7 +2705,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     const cleanBot = botUsername.replace(/^@/, '');
     await this.requestJson(
       'PUT',
-      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/cloud-storage`,
+      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/storage`,
       { key, value },
     );
     await indexedDbCache.setCloudStorageItem(this.accountId, cleanBot, shortName, key, value);
@@ -2353,7 +2720,8 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     const qs = `?keys=${encodeURIComponent(keys.join(','))}`;
     await this.requestJson(
       'DELETE',
-      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/cloud-storage${qs}`,
+      `/api/v1/miniapps/${encodeURIComponent(cleanBot)}/${encodeURIComponent(shortName)}/storage${qs}`,
+      { keys },
     );
     await indexedDbCache.deleteCloudStorageItems(this.accountId, cleanBot, shortName, keys);
   }
@@ -2383,7 +2751,31 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     });
 
     if (!res.ok) {
-      throw new Error(`Hermes stream failed (${res.status})`);
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await res.json()) as Record<string, unknown>;
+      } catch {
+        // Non-JSON error body
+      }
+      const errMsg =
+        (typeof body.message === 'string' && body.message) ||
+        (typeof body.error === 'string' && body.error) ||
+        `Hermes stream failed (${res.status})`;
+      const err = new Error(errMsg) as Error & {
+        status?: number;
+        code?: string;
+        needsProviderSelection?: boolean;
+        action?: string;
+        payload?: Record<string, unknown>;
+      };
+      err.status = res.status;
+      if (typeof body.error === 'string') err.code = body.error;
+      if (typeof body.needs_provider_selection === 'boolean') {
+        err.needsProviderSelection = body.needs_provider_selection;
+      }
+      if (typeof body.action === 'string') err.action = body.action;
+      err.payload = body;
+      throw err;
     }
 
     const contentType = res.headers.get('content-type') ?? '';
@@ -2950,10 +3342,15 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     });
   }
 
-  public async topUpStars(amount: number): Promise<WalletStateDto> {
+  public async topUpStars(
+    amount: number,
+    opts?: { orderId?: string; redeemCode?: string },
+  ): Promise<WalletStateDto> {
     return this.requestJson<WalletStateDto>('POST', '/api/v1/wallet/topup', {
       amount,
       amount_stars: amount,
+      order_id: opts?.orderId,
+      redeem_code: opts?.redeemCode,
     });
   }
 
@@ -3091,5 +3488,376 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
   public async invokeMcpRpc(req: McpJsonRpcRequest): Promise<McpJsonRpcResponse> {
     return this.requestJson<McpJsonRpcResponse>('POST', '/api/v1/mcp/rpc', req);
+  }
+
+  // ==========================================================================
+  // v1.6.11 Split-Key V2 Vault, X25519 Device Sync, Fabushi Bots, Automation Apps,
+  // Coding Agents, UU-Parity Remote Assist, TURN, Official OAuth MCP & Multi-Agent
+  // ==========================================================================
+
+  public async getUserVaultEnvelope(): Promise<UserVaultEnvelopeResponse> {
+    return this.requestJson<UserVaultEnvelopeResponse>('GET', '/api/v1/user-vault/envelope');
+  }
+
+  public async putUserVaultEnvelope(
+    envelope: UserVaultKeyEnvelopeDto,
+  ): Promise<UserVaultEnvelopeResponse> {
+    return this.requestJson<UserVaultEnvelopeResponse>(
+      'PUT',
+      '/api/v1/user-vault/envelope',
+      envelope,
+    );
+  }
+
+  public async listUserVaultItems(sinceRevision = 0): Promise<UserVaultSyncPullResponse> {
+    return this.requestJson<UserVaultSyncPullResponse>(
+      'GET',
+      `/api/v1/user-vault/items?since_revision=${encodeURIComponent(String(sinceRevision))}`,
+    );
+  }
+
+  public async upsertUserVaultItem(
+    category: string,
+    itemKey: string,
+    req: UpsertUserVaultItemRequest,
+  ): Promise<UpsertUserVaultItemResponse> {
+    return this.requestJson<UpsertUserVaultItemResponse>(
+      'PUT',
+      `/api/v1/user-vault/items/${encodeURIComponent(category)}/${encodeURIComponent(itemKey)}`,
+      req,
+    );
+  }
+
+  public async deleteUserVaultItem(
+    category: string,
+    itemKey: string,
+    expectedRevision?: number,
+  ): Promise<UpsertUserVaultItemResponse> {
+    const qs =
+      expectedRevision !== undefined
+        ? `?expected_revision=${encodeURIComponent(String(expectedRevision))}`
+        : '';
+    return this.requestJson<UpsertUserVaultItemResponse>(
+      'DELETE',
+      `/api/v1/user-vault/items/${encodeURIComponent(category)}/${encodeURIComponent(itemKey)}${qs}`,
+    );
+  }
+
+  public async requestDeviceSync(req: DeviceSyncRequestDto): Promise<DeviceSyncRequestResponse> {
+    return this.requestJson<DeviceSyncRequestResponse>(
+      'POST',
+      '/api/v1/user-vault/device-sync/request',
+      req,
+    );
+  }
+
+  public async listPendingDeviceSyncs(): Promise<PendingDeviceSyncListResponse> {
+    return this.requestJson<PendingDeviceSyncListResponse>(
+      'GET',
+      '/api/v1/user-vault/device-sync/pending',
+    );
+  }
+
+  public async approveDeviceSync(
+    requestId: string,
+    req: DeviceSyncApproveRequest,
+  ): Promise<DeviceSyncActionResponse> {
+    return this.requestJson<DeviceSyncActionResponse>(
+      'POST',
+      `/api/v1/user-vault/device-sync/${encodeURIComponent(requestId)}/approve`,
+      req,
+    );
+  }
+
+  public async denyDeviceSync(requestId: string): Promise<DeviceSyncActionResponse> {
+    return this.requestJson<DeviceSyncActionResponse>(
+      'POST',
+      `/api/v1/user-vault/device-sync/${encodeURIComponent(requestId)}/deny`,
+      {},
+    );
+  }
+
+  public async getDeviceSyncStatus(requestId: string): Promise<DeviceSyncStatusResponse> {
+    return this.requestJson<DeviceSyncStatusResponse>(
+      'GET',
+      `/api/v1/user-vault/device-sync/${encodeURIComponent(requestId)}/status`,
+    );
+  }
+
+  // Fabushi Bots CRUD & Bot Permissions
+  public async listFabushiBots(): Promise<FabushiBotSummaryDto[]> {
+    const res = await this.requestJson<{ bots?: FabushiBotSummaryDto[] } | FabushiBotSummaryDto[]>(
+      'GET',
+      '/api/v1/fabushi-bots',
+    );
+    return Array.isArray(res) ? res : (res.bots ?? []);
+  }
+
+  public async createFabushiBot(req: FabushiBotCreateRequest): Promise<FabushiBotCreateResponse> {
+    return this.requestJson<FabushiBotCreateResponse>('POST', '/api/v1/fabushi-bots', req);
+  }
+
+  public async getFabushiBot(botId: number | string): Promise<FabushiBotSummaryDto> {
+    const res = await this.requestJson<FabushiBotSummaryDto & { bot?: FabushiBotSummaryDto }>(
+      'GET',
+      `/api/v1/fabushi-bots/${encodeURIComponent(String(botId))}`,
+    );
+    return res.bot ?? res;
+  }
+
+  public async patchFabushiBot(
+    botId: number | string,
+    req: FabushiBotPatchRequest,
+  ): Promise<FabushiBotSummaryDto> {
+    const res = await this.requestJson<FabushiBotSummaryDto & { bot?: FabushiBotSummaryDto }>(
+      'PATCH',
+      `/api/v1/fabushi-bots/${encodeURIComponent(String(botId))}`,
+      req,
+    );
+    return res.bot ?? res;
+  }
+
+  public async deleteFabushiBot(botId: number | string): Promise<void> {
+    await this.requestJson('DELETE', `/api/v1/fabushi-bots/${encodeURIComponent(String(botId))}`);
+  }
+
+  public async blockBot(botId: number | string, blocked = true): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>(
+      'POST',
+      `/api/v1/bots/${encodeURIComponent(String(botId))}/block`,
+      { blocked },
+    );
+  }
+
+  public async allowBotSendMessage(botId: number | string): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>(
+      'POST',
+      `/api/v1/bots/${encodeURIComponent(String(botId))}/allow-send-message`,
+      {},
+    );
+  }
+
+  public async acceptBotAppTos(botId: number | string): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>(
+      'POST',
+      `/api/v1/bots/${encodeURIComponent(String(botId))}/accept-app-tos`,
+      {},
+    );
+  }
+
+  // Automation Script App Store & Browser Scripts / Control Mode
+  public async listAutomationApps(
+    query?: ListAutomationAppsQuery,
+  ): Promise<ListAutomationAppsResponse> {
+    const qs = new URLSearchParams();
+    if (query?.q) qs.set('q', query.q);
+    if (query?.category) qs.set('category', query.category);
+    if (query?.domain) qs.set('domain', query.domain);
+    if (query?.limit !== undefined) qs.set('limit', String(query.limit));
+    if (query?.offset !== undefined) qs.set('offset', String(query.offset));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.requestJson<ListAutomationAppsResponse>('GET', `/api/v1/automation-apps${suffix}`);
+  }
+
+  public async listInstalledAutomationApps(): Promise<ListInstalledAutomationAppsResponse> {
+    return this.requestJson<ListInstalledAutomationAppsResponse>(
+      'GET',
+      '/api/v1/automation-apps/installed',
+    );
+  }
+
+  public async listMyAutomationApps(): Promise<ListAutomationAppsResponse> {
+    return this.requestJson<ListAutomationAppsResponse>('GET', '/api/v1/automation-apps/mine');
+  }
+
+  public async getAutomationApp(appId: string): Promise<AutomationAppDetail> {
+    return this.requestJson<AutomationAppDetail>(
+      'GET',
+      `/api/v1/automation-apps/${encodeURIComponent(appId)}`,
+    );
+  }
+
+  public async publishAutomationApp(
+    req: PublishAutomationAppRequest,
+  ): Promise<AutomationAppDetail> {
+    return this.requestJson<AutomationAppDetail>('POST', '/api/v1/automation-apps', req);
+  }
+
+  public async installAutomationApp(appId: string): Promise<InstallAutomationAppResponse> {
+    return this.requestJson<InstallAutomationAppResponse>(
+      'POST',
+      `/api/v1/automation-apps/${encodeURIComponent(appId)}/install`,
+      {},
+    );
+  }
+
+  public async uninstallAutomationApp(appId: string): Promise<UninstallAutomationAppResponse> {
+    return this.requestJson<UninstallAutomationAppResponse>(
+      'DELETE',
+      `/api/v1/automation-apps/${encodeURIComponent(appId)}/install`,
+    );
+  }
+
+  public async recordAutomationRun(
+    appId: string,
+    req: RecordAutomationRunRequest,
+  ): Promise<RecordAutomationRunResponse> {
+    return this.requestJson<RecordAutomationRunResponse>(
+      'POST',
+      `/api/v1/automation-apps/${encodeURIComponent(appId)}/runs`,
+      req,
+    );
+  }
+
+  public async distillBrowserScript(
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>(
+      'POST',
+      '/api/v1/browser/scripts/distill',
+      payload,
+    );
+  }
+
+  public async replayBrowserScript(
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>(
+      'POST',
+      '/api/v1/browser/scripts/replay',
+      payload,
+    );
+  }
+
+  public async getBrowserControlMode(): Promise<BrowserControlMode> {
+    return this.requestJson<BrowserControlMode>('GET', '/api/v1/browser/control-mode');
+  }
+
+  public async setBrowserControlMode(mode: BrowserControlMode): Promise<BrowserControlMode> {
+    return this.requestJson<BrowserControlMode>('POST', '/api/v1/browser/control-mode', mode);
+  }
+
+  // Coding Agent Bots
+  public async probeCodingAgents(
+    req?: CodingAgentsProbeRequest,
+  ): Promise<CodingAgentsProbeResponse> {
+    return this.requestJson<CodingAgentsProbeResponse>(
+      'POST',
+      '/api/v1/coding-agents/probe',
+      req ?? {},
+    );
+  }
+
+  public async listCodingHosts(): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>('GET', '/api/v1/coding-agents/hosts');
+  }
+
+  public async listLocalCodingBinaries(): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>(
+      'GET',
+      '/api/v1/coding-agents/local-binaries',
+    );
+  }
+
+  // UU-Parity Remote Assist & TURN Credentials
+  public async getRemoteAssistInfo(): Promise<RemoteAssistConfigDto> {
+    return this.requestJson<RemoteAssistConfigDto>('GET', '/api/v1/remote/assist/info');
+  }
+
+  public async resetRemoteAssistCode(): Promise<RemoteAssistConfigDto> {
+    return this.requestJson<RemoteAssistConfigDto>('POST', '/api/v1/remote/assist/reset-code', {});
+  }
+
+  public async setRemoteAssistCode(accessCode: string): Promise<RemoteAssistConfigDto> {
+    return this.requestJson<RemoteAssistConfigDto>('POST', '/api/v1/remote/assist/set-code', {
+      access_code: accessCode,
+    });
+  }
+
+  public async allowRemoteAssist(allow: boolean): Promise<RemoteAssistConfigDto> {
+    return this.requestJson<RemoteAssistConfigDto>('POST', '/api/v1/remote/assist/allow', {
+      allow_remote: allow,
+      enabled: allow,
+    });
+  }
+
+  public async startRemoteAssist(req: AssistStartRequest): Promise<AssistStartResponse> {
+    return this.requestJson<AssistStartResponse>('POST', '/api/v1/remote/assist/start', req);
+  }
+
+  public async listRemoteSessions(): Promise<RemoteSessionsResponse> {
+    return this.requestJson<RemoteSessionsResponse>('GET', '/api/v1/remote/sessions');
+  }
+
+  public async disconnectRemoteSession(sessionId: string): Promise<{ ok: boolean }> {
+    return this.requestJson<{ ok: boolean }>('POST', '/api/v1/remote/sessions/disconnect', {
+      session_id: sessionId,
+    });
+  }
+
+  public async disconnectAllRemoteSessions(): Promise<{ ok: boolean; disconnected: number }> {
+    return this.requestJson<{ ok: boolean; disconnected: number }>(
+      'POST',
+      '/api/v1/remote/sessions/disconnect-all',
+      {},
+    );
+  }
+
+  public async sendRemoteWebRtcSignal(
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.requestJson<Record<string, unknown>>(
+      'POST',
+      '/api/v1/remote/webrtc/signal',
+      payload,
+    );
+  }
+
+  public async getTurnCredentials(): Promise<TurnCredentialsDto> {
+    return this.requestJson<TurnCredentialsDto>('GET', '/api/v1/calls/turn-credentials');
+  }
+
+  // Official OAuth 2.1 MCP Grants & Audit
+  public async listOAuthMcpGrants(): Promise<OAuthGrantsResponse> {
+    return this.requestJson<OAuthGrantsResponse>('GET', '/api/v1/mcp/grants');
+  }
+
+  public async revokeOAuthMcpGrant(familyId: string): Promise<{ ok: boolean }> {
+    return this.requestJson<{ ok: boolean }>(
+      'DELETE',
+      `/api/v1/mcp/grants/${encodeURIComponent(familyId)}`,
+    );
+  }
+
+  public async listOAuthMcpAudit(limit = 50): Promise<McpAuditListResponse> {
+    return this.requestJson<McpAuditListResponse>('GET', `/api/v1/mcp/audit?limit=${limit}`);
+  }
+
+  // Multi-Agent Group Workspace & Floor
+  public async getChatWorkspace(chatId: number): Promise<{
+    revision: number;
+    entries: Record<string, unknown>;
+  }> {
+    return this.requestJson('GET', `/api/v1/chats/${chatId}/workspace`);
+  }
+
+  public async putChatWorkspaceKey(
+    chatId: number,
+    key: string,
+    value: unknown,
+  ): Promise<Record<string, unknown>> {
+    return this.requestJson(
+      'PUT',
+      `/api/v1/chats/${chatId}/workspace/${encodeURIComponent(key)}`,
+      { value },
+    );
+  }
+
+  public async getChatFloor(chatId: number): Promise<{
+    current_speaker: string | null;
+    queued_count: number;
+    loop_hops: number;
+  }> {
+    return this.requestJson('GET', `/api/v1/chats/${chatId}/floor`);
   }
 }

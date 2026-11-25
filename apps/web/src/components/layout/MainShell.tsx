@@ -5,6 +5,7 @@ import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore, type MobilePaneId } from '../../store/useUiStore';
 import { ConnectionBanner } from './ConnectionBanner';
 import { NavRail } from './NavRail';
+import { RemoteTakeoverBanner } from './RemoteTakeoverBanner';
 import { TopAudioBar } from './TopAudioBar';
 import { TopCallBar } from './TopCallBar';
 
@@ -49,12 +50,14 @@ export const MainShell: React.FC<MainShellProps> = ({
   const tabletLeftDrawerOpen = useUiStore((s) => s.tabletLeftDrawerOpen);
   const isRightOpen = useUiStore((s) => s.isRightOpen);
   const activeNavDest = useUiStore((s) => s.activeNavDest);
+  const isComposeStageOpen = useUiStore((s) => s.appleComposeStage.isOpen);
 
   const setMobilePane = useUiStore((s) => s.setMobilePane);
   const setTabletLeftDrawerOpen = useUiStore((s) => s.setTabletLeftDrawerOpen);
   const toggleLeftCollapsed = useUiStore((s) => s.toggleLeftCollapsed);
   const toggleRightSidebar = useUiStore((s) => s.toggleRightSidebar);
   const popTopEscapeLayer = useUiStore((s) => s.popTopEscapeLayer);
+  const openAppleComposeStage = useUiStore((s) => s.openAppleComposeStage);
 
   const toggleNightMode = useSettingsStore((s) => s.toggleNightMode);
   const toggleLanguage = useSettingsStore((s) => s.toggleLanguage);
@@ -113,6 +116,13 @@ export const MainShell: React.FC<MainShellProps> = ({
         return;
       }
 
+      // Cmd/Ctrl+N -> Open inline #apple-compose-stage
+      if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'n') {
+        ev.preventDefault();
+        openAppleComposeStage();
+        return;
+      }
+
       // Ctrl+B -> Toggle 64px collapsed sidebar
       if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'b') {
         ev.preventDefault();
@@ -167,6 +177,7 @@ export const MainShell: React.FC<MainShellProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
     popTopEscapeLayer,
+    openAppleComposeStage,
     toggleLeftCollapsed,
     toggleNightMode,
     toggleLanguage,
@@ -177,6 +188,7 @@ export const MainShell: React.FC<MainShellProps> = ({
 
   const isTabletLeftOpen =
     tier === 'tablet' &&
+    !isComposeStageOpen &&
     (tabletLeftDrawerOpen || activeChatId === null || mobilePane === 'left');
 
   const effectiveMobilePane: MobilePaneId =
@@ -185,12 +197,15 @@ export const MainShell: React.FC<MainShellProps> = ({
         ? 'right'
         : activeNavDest !== 'chats'
           ? 'workspace'
-          : activeChatId === null
-            ? 'left'
-            : mobilePane
+          : isComposeStageOpen
+            ? 'middle'
+            : activeChatId === null
+              ? 'left'
+              : mobilePane
       : mobilePane;
 
-  const showLeftDrawerBackdrop = tier === 'tablet' && isTabletLeftOpen && activeChatId !== null;
+  const showLeftDrawerBackdrop =
+    tier === 'tablet' && isTabletLeftOpen && (activeChatId !== null || isComposeStageOpen);
   const showRightDrawerBackdrop =
     (tier === 'desktop-2col' || tier === 'tablet') && isRightOpen;
 
@@ -238,22 +253,16 @@ export const MainShell: React.FC<MainShellProps> = ({
         <div
           className="tg-main-stage"
           style={{
-            position: 'relative',
-            flex: '1 1 auto',
-            minWidth: 0,
-            minHeight: 0,
             width: tier === 'mobile' ? '100vw' : undefined,
             height:
               tier === 'mobile' && effectiveMobilePane === 'workspace'
                 ? 'calc(100dvh - 54px)'
                 : '100%',
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
           }}
         >
           {!hideBuiltInTopBars && (
             <>
+              <RemoteTakeoverBanner />
               <ConnectionBanner />
               <TopCallBar />
               <TopAudioBar />
@@ -265,7 +274,7 @@ export const MainShell: React.FC<MainShellProps> = ({
         </div>
       )}
 
-      {/* When center stage is hidden on mobile, still mount fixed overlays inside workspaceOverlaySlot (e.g. SettingsPanel) */}
+      {/* When center stage is hidden on mobile, still mount fixed overlays inside workspaceOverlaySlot */}
       {hideCenterOnMobile && workspaceOverlaySlot}
 
       {/* Right Column Slide-Over Backdrop on Tier 2 & Tier 3 */}
@@ -278,7 +287,7 @@ export const MainShell: React.FC<MainShellProps> = ({
         />
       )}
 
-      {/* Right Inspector Column (Docked on >=1276px, Slide-Over on 601-1275px, Fullscreen on <=600px) */}
+      {/* Right Inspector Column */}
       {isRightOpen && rightSlot}
 
       {children}

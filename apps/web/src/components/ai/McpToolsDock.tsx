@@ -1,22 +1,22 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  DEFAULT_MCP_PROTOCOL_VERSION,
   DOM_IDS,
+  MCP_OAUTH_SCOPES,
   type McpPendingApprovalDto,
 } from '@gpui-telegram/protocol';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
+import { useAuthStore } from '../../store/useAuthStore';
 import { useUiStore } from '../../store/useUiStore';
 
 export interface McpToolsDockProps {
   onClose?: () => void;
 }
 
-const DEFAULT_ARGS_BY_TOOL: Record<string, string> = {
-  read_file: '{\n  "path": "README.md"\n}',
-  list_directory: '{\n  "path": "."\n}',
-  write_file: '{\n  "path": "notes/mcp-audit.md",\n  "content": "Verified MCP approval gate"\n}',
+const BROWSER_TOOL_ARG_TEMPLATES: Record<string, string> = {
   browser_list_targets: '{}',
   browser_tab_command: '{\n  "action": "snapshot"\n}',
-  browser_headless_open: '{\n  "url": "https://ombhrum.com"\n}',
+  browser_headless_open: '{\n  "url": "https://example.com"\n}',
   browser_headless_action: '{\n  "session_id": "",\n  "action": "snapshot"\n}',
   browser_headless_screenshot: '{\n  "session_id": ""\n}',
   browser_headless_close: '{\n  "session_id": ""\n}',
@@ -27,12 +27,17 @@ export function McpToolsDock({ onClose }: McpToolsDockProps = {}): React.JSX.Ele
   const mcpTools = useAiWorkspaceStore((s) => s.mcpTools);
   const mcpApprovals = useAiWorkspaceStore((s) => s.mcpApprovals);
   const lastMcpOutput = useAiWorkspaceStore((s) => s.lastMcpOutput);
+  const oauthMcpGrants = useAiWorkspaceStore((s) => s.oauthMcpGrants);
+  const oauthMcpAudit = useAiWorkspaceStore((s) => s.oauthMcpAudit);
+
   const loadMcp = useAiWorkspaceStore((s) => s.loadMcp);
   const registerMcpServer = useAiWorkspaceStore((s) => s.registerMcpServer);
   const deleteMcpServer = useAiWorkspaceStore((s) => s.deleteMcpServer);
   const invokeMcpTool = useAiWorkspaceStore((s) => s.invokeMcpTool);
   const decideMcpApproval = useAiWorkspaceStore((s) => s.decideMcpApproval);
+  const revokeOAuthMcpGrant = useAiWorkspaceStore((s) => s.revokeOAuthMcpGrant);
 
+  const serverUrl = useAuthStore((s) => s.serverUrl);
   const setActiveNavDest = useUiStore((s) => s.setActiveNavDest);
   const pushToast = useUiStore((s) => s.pushToast);
 
@@ -45,55 +50,61 @@ export function McpToolsDock({ onClose }: McpToolsDockProps = {}): React.JSX.Ele
   const [argsJson, setArgsJson] = useState('{}');
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [invoking, setInvoking] = useState(false);
-
-  const [toolAutoAllow, setToolAutoAllow] = useState<Record<string, boolean>>({});
-  const [defaultRiskPolicy, setDefaultRiskPolicy] = useState<
-    'manual_high_risk' | 'auto_read_only' | 'strict_all'
-  >('manual_high_risk');
-  const [copiedRpc, setCopiedRpc] = useState(false);
+  const [revokingFamilyId, setRevokingFamilyId] = useState<string | null>(null);
 
   useEffect(() => {
     void loadMcp().catch(() => undefined);
   }, [loadMcp]);
 
   useEffect(() => {
-    if (mcpTools.length > 0 && !mcpTools.some((t) => t.name === selectedToolName)) {
+    if (!selectedToolName && mcpTools.length > 0) {
       const first = mcpTools[0].name;
       setSelectedToolName(first);
-      setArgsJson(DEFAULT_ARGS_BY_TOOL[first] || '{}');
+      setArgsJson(BROWSER_TOOL_ARG_TEMPLATES[first] ?? '{}');
     }
   }, [mcpTools, selectedToolName]);
 
-  const pendingApprovals = useMemo(
-    () => mcpApprovals.filter((a) => a.status === 'pending'),
-    [mcpApprovals],
+  const mcpBaseOrigin = useMemo(() => {
+    const configured = serverUrl?.trim().replace(/\/+$/, '');
+    if (configured) return configured;
+    if (typeof window !== 'undefined') return window.location.origin;
+    return 'http://127.0.0.1:4173';
+  }, [serverUrl]);
+
+  const officialMcpEndpoint = `${mcpBaseOrigin}/mcp`;
+
+  const selectedTool = useMemo(
+    () => mcpTools.find((t) => t.name === selectedToolName) ?? null,
+    [mcpTools, selectedToolName],
   );
 
-  const rpcEndpointUrl = useMemo(() => {
-    if (typeof window === 'undefined') return '/api/v1/mcp/rpc';
-    return `${window.location.origin}/api/v1/mcp/rpc`;
-  }, []);
-
-  const handleSelectTool = (name: string) => {
-    setSelectedToolName(name);
-    setArgsJson(DEFAULT_ARGS_BY_TOOL[name] || '{}');
-    setJsonError(null);
+  const handleCopyEndpoint = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      pushToast(`Copied ${label}`, 'success');
+    } catch {
+      pushToast(text, 'info');
+    }
   };
 
-  const handleAddServer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newServerName.trim() || !newServerEndpoint.trim()) return;
+  const handleAddServer = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    const cleanName = newServerName.trim();
+    const cleanEndpoint = newServerEndpoint.trim();
+    if (!cleanName || !cleanEndpoint) {
+      pushToast('Server name and endpoint are required · 请填写名称与接入地址', 'warning');
+      return;
+    }
     setAddingServer(true);
     try {
-      const created = await registerMcpServer({
-        name: newServerName.trim(),
+      await registerMcpServer({
+        name: cleanName,
         transport: newServerTransport,
-        url: newServerTransport === 'stdio' ? undefined : newServerEndpoint.trim(),
-        command: newServerTransport === 'stdio' ? newServerEndpoint.trim() : undefined,
+        endpoint: cleanEndpoint,
       });
       setNewServerName('');
       setNewServerEndpoint('');
-      pushToast(`已注册 MCP 服务：${created.name || created.server_id}`, 'success');
+      pushToast(`Registered MCP server "${cleanName}"`, 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -101,46 +112,30 @@ export function McpToolsDock({ onClose }: McpToolsDockProps = {}): React.JSX.Ele
     }
   };
 
-  const handleRemoveServer = async (serverId: string) => {
-    try {
-      await deleteMcpServer(serverId);
-      pushToast(`已移除 MCP 服务：${serverId}`, 'info');
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
-
-  const handleInvokeTool = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedToolName) return;
+  const handleInvokeTool = async (ev: React.FormEvent) => {
+    ev.preventDefault();
     setJsonError(null);
+    if (!selectedToolName) return;
     let parsedArgs: Record<string, unknown> = {};
     try {
-      parsedArgs = argsJson.trim() ? (JSON.parse(argsJson) as Record<string, unknown>) : {};
-    } catch (err) {
-      setJsonError(`Invalid JSON arguments: ${err instanceof Error ? err.message : String(err)}`);
+      const parsed: unknown = JSON.parse(argsJson || '{}');
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setJsonError('Arguments must be a JSON object');
+        return;
+      }
+      parsedArgs = parsed as Record<string, unknown>;
+    } catch {
+      setJsonError('Invalid JSON arguments');
       return;
     }
-
-    const toolSpec = mcpTools.find((t) => t.name === selectedToolName);
-    const forceApprove = Boolean(toolSpec && toolAutoAllow[toolSpec.name]);
-
     setInvoking(true);
     try {
-      const res = await invokeMcpTool({
-        toolId: toolSpec?.tool_id,
+      await invokeMcpTool({
+        toolId: selectedTool?.tool_id,
         toolName: selectedToolName,
         arguments: parsedArgs,
-        forceApprove,
       });
-
-      await loadMcp().catch(() => undefined);
-
-      if (res.status === 'approval_required') {
-        pushToast(`Approval required for ${selectedToolName} · 高风险工具等待人工审批`, 'warning');
-      } else {
-        pushToast(`Invoked ${selectedToolName} · 工具调用完成`, 'success');
-      }
+      pushToast(`Invoked ${selectedToolName}`, 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -148,437 +143,376 @@ export function McpToolsDock({ onClose }: McpToolsDockProps = {}): React.JSX.Ele
     }
   };
 
-  const handleApprovalDecision = async (approval: McpPendingApprovalDto, allow: boolean) => {
+  const handleDecideApproval = async (item: McpPendingApprovalDto, allow: boolean) => {
     try {
-      await decideMcpApproval(approval.request_id, allow);
-      pushToast(
-        allow ? 'Approved MCP tool execution · 已批准执行' : 'Rejected MCP tool · 已拒绝执行',
-        allow ? 'success' : 'info',
-      );
+      await decideMcpApproval(item.request_id, allow);
+      pushToast(allow ? `Approved ${item.tool_name}` : `Denied ${item.tool_name}`, 'info');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     }
   };
 
+  const handleRevokeGrant = async (familyId: string) => {
+    setRevokingFamilyId(familyId);
+    try {
+      await revokeOAuthMcpGrant(familyId);
+      pushToast(`Revoked OAuth 2.1 MCP grant ${familyId}`, 'info');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setRevokingFamilyId(null);
+    }
+  };
+
   return (
-    <div id={DOM_IDS.MCP_TOOLS_DOCK}>
-      {/* Header */}
-      <div className="tg-workspace-header">
-        <div>
-          <div style={{ fontSize: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span>🔌 Model Context Protocol (MCP) Tools Dock · MCP 工具坞与权限网关</span>
-            <span
-              style={{
-                fontSize: '11.5px',
-                padding: '2px 8px',
-                borderRadius: '999px',
-                backgroundColor: 'var(--tg-success-soft)',
-                color: 'var(--tg-success)',
-              }}
-            >
-              {mcpServers.length} Servers · {mcpTools.length} Tools
+    <section id={DOM_IDS.MCP_TOOLS_DOCK} className="tg-ai-workspace">
+      <header className="tg-ai-workspace__header">
+        <div className="tg-ai-workspace__title-group">
+          <h2 className="tg-ai-workspace__title">🔌 Official OAuth 2.1 Remote MCP & Tools Dock</h2>
+          <span className="tg-ai-workspace__subtitle">
+            Streamable HTTP + SSE ({DEFAULT_MCP_PROTOCOL_VERSION}), PKCE S256 Grants & Real Tool Audit
+          </span>
+        </div>
+        <div className="tg-ai-workspace__actions">
+          <button type="button" className="tg-btn tg-btn--ghost" onClick={() => void loadMcp()}>
+            ↻ Refresh · 刷新
+          </button>
+          <button
+            type="button"
+            className="tg-btn tg-btn--ghost"
+            onClick={() => (onClose ? onClose() : setActiveNavDest('chats'))}
+          >
+            ← Chats · 返回
+          </button>
+        </div>
+      </header>
+
+      <div className="tg-ai-workspace__body">
+        {/* Official OAuth 2.1 Remote MCP Grants & Audit Panel */}
+        <section id={DOM_IDS.OAUTH_MCP_GRANTS_PANEL} className="tg-ai-card">
+          <div className="tg-ai-card__header">
+            <h3 className="tg-ai-card__title">
+              🛡️ Official OAuth 2.1 Remote MCP Server (/mcp) · 远程授权与审计
+            </h3>
+            <span className="tg-ai-badge tg-ai-badge--info">
+              Protocol {DEFAULT_MCP_PROTOCOL_VERSION} · PKCE S256
             </span>
           </div>
-          <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
-            JSON-RPC 2.0 Host &amp; Human-in-the-Loop High-Risk Permission Gate
-          </div>
-        </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-          <select
-            className="tg-select"
-            aria-label="MCP Default Permission Policy 默认权限策略"
-            value={defaultRiskPolicy}
-            onChange={(e) =>
-              setDefaultRiskPolicy(
-                e.target.value as 'manual_high_risk' | 'auto_read_only' | 'strict_all',
-              )
-            }
-            style={{ width: 'auto', fontSize: '12px', padding: '5px 10px' }}
-          >
-            <option value="manual_high_risk">Gate High-Risk · 高危拦截审批</option>
-            <option value="auto_read_only">Auto Read-Only · 自动放行只读</option>
-            <option value="strict_all">Strict Gate All · 全部强制审批</option>
-          </select>
-
-          <button
-            type="button"
-            className="tg-btn tg-btn--secondary"
-            onClick={() => {
-              setActiveNavDest('chats');
-              onClose?.();
-            }}
-          >
-            ← Chats · 返回聊天
-          </button>
-        </div>
-      </div>
-
-      <div className="tg-workspace-content">
-        {/* Desktop JSON-RPC 2.0 Endpoint Banner */}
-        <section
-          className="tg-surface-card"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '12px',
-            flexWrap: 'wrap',
-          }}
-        >
-          <div>
-            <div style={{ fontSize: '13.5px', fontWeight: 600 }}>
-              📡 Desktop MCP JSON-RPC 2.0 Endpoint · 桌面客户端标准接入端点
-            </div>
-            <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '2px' }}>
-              <code>POST /api/v1/mcp/rpc</code> ({rpcEndpointUrl})
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className="tg-btn tg-btn--secondary"
-            onClick={() => {
-              void navigator.clipboard?.writeText(rpcEndpointUrl);
-              setCopiedRpc(true);
-              setTimeout(() => setCopiedRpc(false), 2000);
-            }}
-          >
-            {copiedRpc ? '✓ Copied · 已复制' : 'Copy POST /api/v1/mcp/rpc'}
-          </button>
-        </section>
-
-        {/* Pending Approvals Queue */}
-        {pendingApprovals.length > 0 && (
-          <section
-            className="tg-surface-card"
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '10px',
-              borderColor: 'var(--tg-warning)',
-            }}
-          >
-            <div style={{ fontSize: '14.5px', fontWeight: 700, color: 'var(--tg-warning)' }}>
-              ⚠️ Pending High-Risk MCP Tool Approvals · 待审批工具请求 ({pendingApprovals.length})
-            </div>
-
-            {pendingApprovals.map((req) => (
-              <div
-                key={req.request_id}
-                data-approval-id={req.request_id}
-                style={{
-                  padding: '12px',
-                  borderRadius: '8px',
-                  backgroundColor: 'var(--tg-warning-soft)',
-                  border: '1px solid var(--tg-warning)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '12px',
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '13.5px' }}>
-                    Tool: <code>{req.tool_name}</code> ({req.server_id}) · Risk:{' '}
-                    <strong>{req.risk_level.toUpperCase()}</strong>
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '4px' }}>
-                    Arguments: <code>{JSON.stringify(req.arguments)}</code>
-                  </div>
+          <div className="tg-ai-card tg-ai-card--elevated">
+            <div className="tg-ai-row tg-ai-row--between">
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--tg-text-secondary)' }}>
+                  Streamable HTTP / SSE Endpoint
                 </div>
-
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    type="button"
-                    className="tg-btn tg-btn--primary"
-                    onClick={() => void handleApprovalDecision(req, true)}
-                  >
-                    Approve · 批准
-                  </button>
-                  <button
-                    type="button"
-                    className="tg-btn tg-btn--danger"
-                    onClick={() => void handleApprovalDecision(req, false)}
-                  >
-                    Reject · 拒绝
-                  </button>
-                </div>
+                <code>{officialMcpEndpoint}</code>
               </div>
-            ))}
-          </section>
-        )}
-
-        {/* Connected MCP Servers + Real Backend Registration Form */}
-        <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
-            🖥️ Connected MCP Servers · 已连接 MCP 服务 ({mcpServers.length})
+              <button
+                type="button"
+                className="tg-btn tg-btn--secondary"
+                onClick={() => void handleCopyEndpoint(officialMcpEndpoint, '/mcp endpoint')}
+              >
+                📋 Copy /mcp URL
+              </button>
+            </div>
+            <div className="tg-ai-workspace__subtitle">
+              Discovery: <code>/.well-known/oauth-protected-resource</code> ·{' '}
+              <code>/.well-known/oauth-authorization-server</code> · <code>/oauth/register</code>
+            </div>
+            <div className="tg-ai-row">
+              {MCP_OAUTH_SCOPES.map((scope) => (
+                <span key={scope} className="tg-scope-pill">
+                  {scope}
+                </span>
+              ))}
+            </div>
           </div>
 
-          {mcpServers.length === 0 ? (
-            <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)' }}>
-              当前尚未配置外部 MCP 服务器。请在下方添加 HTTP/SSE 或 STDIO MCP 服务。
+          {/* Active OAuth 2.1 Grants */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div className="tg-ai-row tg-ai-row--between">
+              <strong style={{ fontSize: 13 }}>
+                Authorized OAuth 2.1 Clients & Grants · 已授权客户端 ({oauthMcpGrants.length})
+              </strong>
             </div>
-          ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' }}>
-              {mcpServers.map((srv) => (
-                <div
-                  key={srv.server_id}
-                  style={{
-                    padding: '12px',
-                    borderRadius: '8px',
-                    backgroundColor: 'var(--tg-bg-elevated)',
-                    border: '1px solid var(--tg-border)',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
-                    <strong style={{ fontSize: '13.5px' }}>{srv.server_id}</strong>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ fontSize: '11px', color: 'var(--tg-success)' }}>● {srv.status}</span>
+
+            {oauthMcpGrants.length === 0 ? (
+              <div className="tg-ai-empty">
+                No active OAuth 2.1 MCP grants yet. Connect Claude Desktop, Cursor, or Antigravity via PKCE S256 to authorize. · 暂无活跃的 OAuth 2.1 MCP 授权。
+              </div>
+            ) : (
+              <div className="tg-ai-grid">
+                {oauthMcpGrants.map((grant) => (
+                  <div key={grant.family_id} className="tg-ai-card tg-ai-card--elevated">
+                    <div className="tg-ai-row tg-ai-row--between">
+                      <strong>{grant.client_name || grant.client_id}</strong>
+                      <span className="tg-ai-badge tg-ai-badge--success">Active Grant</span>
+                    </div>
+                    <div className="tg-ai-workspace__subtitle">
+                      Family: <code>{grant.family_id}</code> · Client: <code>{grant.client_id}</code>
+                    </div>
+                    <div className="tg-ai-workspace__subtitle">
+                      Expires: {new Date(grant.expires_at_ms).toLocaleString()}
+                      {grant.allowed_node_ids.length > 0
+                        ? ` · Nodes: ${grant.allowed_node_ids.join(', ')}`
+                        : ''}
+                    </div>
+                    <div className="tg-ai-row">
+                      {grant.scopes.map((sc) => (
+                        <span key={sc} className="tg-scope-pill">
+                          {sc}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="tg-ai-row">
                       <button
                         type="button"
-                        className="tg-btn tg-btn--ghost"
-                        style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--tg-danger)' }}
-                        onClick={() => void handleRemoveServer(srv.server_id)}
+                        className="tg-btn tg-btn--danger"
+                        disabled={revokingFamilyId === grant.family_id}
+                        onClick={() => void handleRevokeGrant(grant.family_id)}
                       >
-                        移除
+                        {revokingFamilyId === grant.family_id ? 'Revoking…' : 'Revoke · 撤销'}
                       </button>
                     </div>
                   </div>
-                  <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '3px' }}>
-                    {srv.name}
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Official MCP Audit Trail */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <strong style={{ fontSize: 13 }}>
+              Official MCP Tool Audit Trail · 工具调用审计日志 ({oauthMcpAudit.length})
+            </strong>
+            {oauthMcpAudit.length === 0 ? (
+              <div className="tg-ai-empty">No MCP audit entries recorded yet · 暂无工具审计记录</div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table className="tg-audit-table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Tool</th>
+                      <th>Client</th>
+                      <th>Status</th>
+                      <th>Duration</th>
+                      <th>Summary</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {oauthMcpAudit.slice(0, 30).map((entry) => (
+                      <tr key={entry.audit_id}>
+                        <td>{new Date(entry.created_at_ms).toLocaleTimeString()}</td>
+                        <td>
+                          <code>{entry.tool_name}</code>
+                        </td>
+                        <td>{entry.client_id}</td>
+                        <td>
+                          <span
+                            className={`tg-ai-badge ${
+                              entry.ok ? 'tg-ai-badge--success' : 'tg-ai-badge--danger'
+                            }`}
+                          >
+                            {entry.ok ? 'OK' : entry.error_code || 'ERR'}
+                          </span>
+                        </td>
+                        <td>{entry.duration_ms}ms</td>
+                        <td>{entry.args_summary}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Registered External MCP Servers */}
+        <section className="tg-ai-card">
+          <div className="tg-ai-card__header">
+            <h3 className="tg-ai-card__title">
+              🖥️ Connected MCP Servers · 已注册 MCP 服务器 ({mcpServers.length})
+            </h3>
+          </div>
+
+          <form onSubmit={(e) => void handleAddServer(e)} className="tg-ai-field-grid">
+            <label className="tg-ai-field">
+              <span>Server Name · 服务器名称</span>
+              <input
+                type="text"
+                value={newServerName}
+                onChange={(e) => setNewServerName(e.target.value)}
+                placeholder="e.g. Local Dev MCP"
+                required
+              />
+            </label>
+            <label className="tg-ai-field">
+              <span>Transport · 传输协议</span>
+              <select
+                value={newServerTransport}
+                onChange={(e) => setNewServerTransport(e.target.value as 'http' | 'sse' | 'stdio')}
+              >
+                <option value="http">HTTP (Streamable)</option>
+                <option value="sse">SSE</option>
+                <option value="stdio">stdio</option>
+              </select>
+            </label>
+            <label className="tg-ai-field">
+              <span>Endpoint URL or Command · 地址或命令</span>
+              <input
+                type="text"
+                value={newServerEndpoint}
+                onChange={(e) => setNewServerEndpoint(e.target.value)}
+                placeholder="https://mcp.example.com/mcp"
+                required
+              />
+            </label>
+            <div className="tg-ai-row" style={{ alignItems: 'flex-end' }}>
+              <button type="submit" className="tg-btn tg-btn--primary" disabled={addingServer}>
+                {addingServer ? 'Adding…' : '+ Register Server · 注册服务器'}
+              </button>
+            </div>
+          </form>
+
+          {mcpServers.length === 0 ? (
+            <div className="tg-ai-empty">
+              No external MCP servers registered yet. · 尚未注册外部 MCP 服务器。
+            </div>
+          ) : (
+            <div className="tg-ai-grid">
+              {mcpServers.map((srv) => (
+                <div key={srv.server_id} className="tg-ai-card tg-ai-card--elevated">
+                  <div className="tg-ai-row tg-ai-row--between">
+                    <strong>{srv.name}</strong>
+                    <span
+                      className={`tg-ai-badge ${
+                        srv.status === 'connected' ? 'tg-ai-badge--success' : ''
+                      }`}
+                    >
+                      {srv.status} · {srv.tools_count} tools
+                    </span>
                   </div>
-                  <div style={{ fontSize: '11.5px', color: 'var(--tg-text-muted)', marginTop: '4px' }}>
-                    <code>{srv.transport}</code> · <code>{srv.endpoint}</code> · {srv.tools_count} tools
+                  <div className="tg-ai-workspace__subtitle">
+                    {srv.transport} · <code>{srv.endpoint}</code>
+                  </div>
+                  <div className="tg-ai-row">
+                    <button
+                      type="button"
+                      className="tg-btn tg-btn--danger"
+                      onClick={() => void deleteMcpServer(srv.server_id)}
+                    >
+                      Remove · 移除
+                    </button>
                   </div>
                 </div>
               ))}
             </div>
           )}
-
-          <form
-            onSubmit={(e) => void handleAddServer(e)}
-            style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', paddingTop: '6px' }}
-          >
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="New MCP Server Name 服务器名称"
-              placeholder="服务器名称（如 git_tools）"
-              value={newServerName}
-              onChange={(e) => setNewServerName(e.target.value)}
-              style={{ flex: '1 1 180px' }}
-            />
-            <select
-              className="tg-select"
-              aria-label="MCP Transport 传输协议"
-              value={newServerTransport}
-              onChange={(e) => setNewServerTransport(e.target.value as 'http' | 'sse' | 'stdio')}
-              style={{ width: 'auto' }}
-            >
-              <option value="http">HTTP JSON-RPC</option>
-              <option value="sse">SSE</option>
-              <option value="stdio">STDIO</option>
-            </select>
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="MCP Endpoint URL 服务端点"
-              placeholder={newServerTransport === 'stdio' ? 'Command (e.g. npx @modelcontextprotocol/server-filesystem)' : 'Endpoint URL (https://...)'}
-              value={newServerEndpoint}
-              onChange={(e) => setNewServerEndpoint(e.target.value)}
-              style={{ flex: '1 1 240px' }}
-            />
-            <button type="submit" className="tg-btn tg-btn--secondary" disabled={addingServer}>
-              {addingServer ? '添加中...' : '+ Add Server · 添加服务'}
-            </button>
-          </form>
         </section>
 
-        {/* Interactive Tool Invoke Runner */}
-        <form
-          onSubmit={(e) => void handleInvokeTool(e)}
-          className="tg-surface-card"
-          style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-            <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
-              🚀 Interactive MCP Tool Invoke Runner · 交互式工具调用器
-            </div>
-
-            <select
-              className="tg-select"
-              aria-label="Select MCP Tool 选择调用工具"
-              value={selectedToolName}
-              onChange={(e) => handleSelectTool(e.target.value)}
-              style={{ width: 'auto', minWidth: '250px' }}
-              disabled={mcpTools.length === 0}
-            >
-              {mcpTools.length === 0 ? (
-                <option value="">暂无可用工具</option>
-              ) : (
-                mcpTools.map((t) => (
-                  <option key={t.name} value={t.name}>
-                    {t.name} ({t.risk_level}{t.requires_approval ? ' · approval gate' : ''})
-                  </option>
-                ))
-              )}
-            </select>
-          </div>
-
-          <textarea
-            rows={4}
-            className="tg-textarea"
-            aria-label="MCP Tool JSON Arguments 工具 JSON 参数"
-            value={argsJson}
-            onChange={(e) => setArgsJson(e.target.value)}
-            style={{ fontFamily: 'monospace', fontSize: '12.5px' }}
-          />
-
-          {jsonError && <div style={{ fontSize: '12px', color: 'var(--tg-danger)' }}>{jsonError}</div>}
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button
-              type="submit"
-              className="tg-btn tg-btn--primary"
-              disabled={invoking || !selectedToolName}
-            >
-              {invoking ? 'Invoking...' : `Invoke ${selectedToolName || 'Tool'} · 调用工具`}
-            </button>
-          </div>
-
-          {lastMcpOutput && (
-            <pre
-              data-testid="mcp-invoke-output"
-              style={{
-                margin: 0,
-                padding: '10px 12px',
-                borderRadius: '8px',
-                backgroundColor: '#0E1621',
-                border: '1px solid var(--tg-border)',
-                color: '#29B6F6',
-                fontSize: '12px',
-                maxHeight: '180px',
-                overflowY: 'auto',
-                whiteSpace: 'pre-wrap',
-              }}
-            >
-              {JSON.stringify(lastMcpOutput, null, 2)}
-            </pre>
-          )}
-        </form>
-
-        {/* Real Tools Catalog */}
-        <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
-            🧰 MCP Tools Catalog &amp; Risk Policy · 工具目录与风险分级 ({mcpTools.length})
-          </div>
-
-          {mcpTools.length === 0 ? (
-            <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)' }}>
-              服务端当前未注册 MCP 工具。添加 MCP 服务器后会自动列出其可用工具。
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {mcpTools.map((tool) => {
-                const isHighRisk = tool.risk_level === 'high' || tool.risk_level === 'critical';
-                const autoAllowed = Boolean(toolAutoAllow[tool.name]);
-                return (
-                  <div
-                    key={tool.name}
-                    data-mcp-tool={tool.name}
-                    style={{
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      backgroundColor: 'var(--tg-bg-elevated)',
-                      border: '1px solid var(--tg-border)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: '12px',
-                      flexWrap: 'wrap',
+        {/* Interactive MCP Tool Runner & High-Risk Approvals */}
+        <div className="tg-ai-grid">
+          <section className="tg-ai-card">
+            <h3 className="tg-ai-card__title">
+              🧪 Interactive MCP Tool Runner · 工具调试 ({mcpTools.length})
+            </h3>
+            {mcpTools.length === 0 ? (
+              <div className="tg-ai-empty">
+                No MCP tools advertised yet. Connect a live MCP server or browser bridge toolset. · 暂无可用 MCP 工具。
+              </div>
+            ) : (
+              <form
+                onSubmit={(e) => void handleInvokeTool(e)}
+                style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+              >
+                <label className="tg-ai-field">
+                  <span>Tool · 选择工具</span>
+                  <select
+                    value={selectedToolName}
+                    onChange={(e) => {
+                      setSelectedToolName(e.target.value);
+                      setArgsJson(BROWSER_TOOL_ARG_TEMPLATES[e.target.value] ?? '{}');
                     }}
                   >
-                    <div style={{ minWidth: 0, flex: '1 1 260px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                        <code style={{ fontWeight: 700, fontSize: '13px' }}>{tool.name}</code>
-                        <span
-                          style={{
-                            fontSize: '11px',
-                            padding: '1px 7px',
-                            borderRadius: '999px',
-                            backgroundColor: isHighRisk
-                              ? 'var(--tg-danger-soft)'
-                              : 'var(--tg-info-soft)',
-                            color: isHighRisk ? 'var(--tg-danger)' : 'var(--tg-info)',
-                            fontWeight: 600,
-                          }}
-                        >
-                          {tool.risk_level}
-                        </span>
-                        {tool.requires_approval && (
-                          <span
-                            style={{
-                              fontSize: '11px',
-                              padding: '1px 7px',
-                              borderRadius: '999px',
-                              backgroundColor: 'var(--tg-warning-soft)',
-                              color: 'var(--tg-warning)',
-                            }}
-                          >
-                            Requires Approval · 需审批
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '3px' }}>
-                        {tool.description}
-                      </div>
+                    {mcpTools.map((tool) => (
+                      <option key={tool.tool_id || tool.name} value={tool.name}>
+                        {tool.name} ({tool.risk_level})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {selectedTool?.description && (
+                  <div className="tg-ai-workspace__subtitle">{selectedTool.description}</div>
+                )}
+
+                <label className="tg-ai-field">
+                  <span>Arguments JSON · 参数</span>
+                  <textarea
+                    rows={4}
+                    value={argsJson}
+                    onChange={(e) => setArgsJson(e.target.value)}
+                  />
+                </label>
+
+                {jsonError && (
+                  <div role="alert" className="tg-secret-leak-alert">
+                    {jsonError}
+                  </div>
+                )}
+
+                <button type="submit" className="tg-btn tg-btn--primary" disabled={invoking}>
+                  {invoking ? 'Invoking…' : '▶ Invoke Tool · 执行调用'}
+                </button>
+              </form>
+            )}
+
+            {lastMcpOutput && (
+              <pre className="tg-ai-code-block">{JSON.stringify(lastMcpOutput, null, 2)}</pre>
+            )}
+          </section>
+
+          <section className="tg-ai-card">
+            <h3 className="tg-ai-card__title">
+              ⚠️ Pending Tool Approvals · 待审批高危调用 ({mcpApprovals.length})
+            </h3>
+            {mcpApprovals.length === 0 ? (
+              <div className="tg-ai-empty">No pending MCP tool approvals · 暂无待审批调用</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {mcpApprovals.map((appr) => (
+                  <div key={appr.request_id} className="tg-ai-card tg-ai-card--elevated">
+                    <div className="tg-ai-row tg-ai-row--between">
+                      <strong>{appr.tool_name}</strong>
+                      <span className="tg-ai-badge tg-ai-badge--warning">{appr.status}</span>
                     </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <label
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          fontSize: '12px',
-                          color: 'var(--tg-text-secondary)',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          role="switch"
-                          aria-checked={autoAllowed || !tool.requires_approval}
-                          aria-label={`Auto-allow ${tool.name}`}
-                          checked={autoAllowed || !tool.requires_approval}
-                          onChange={(e) =>
-                            setToolAutoAllow((prev) => ({
-                              ...prev,
-                              [tool.name]: e.target.checked,
-                            }))
-                          }
-                        />
-                        <span>Auto-Allow</span>
-                      </label>
-
+                    <pre className="tg-ai-code-block">
+                      {JSON.stringify(appr.arguments, null, 2)}
+                    </pre>
+                    <div className="tg-ai-row">
                       <button
                         type="button"
-                        className="tg-btn tg-btn--secondary"
-                        style={{ padding: '4px 10px', fontSize: '12px' }}
-                        onClick={() => handleSelectTool(tool.name)}
+                        className="tg-btn tg-btn--primary"
+                        onClick={() => void handleDecideApproval(appr, true)}
                       >
-                        Load in Runner · 填入
+                        Approve · 允许
+                      </button>
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--danger"
+                        onClick={() => void handleDecideApproval(appr, false)}
+                      >
+                        Deny · 拒绝
                       </button>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }

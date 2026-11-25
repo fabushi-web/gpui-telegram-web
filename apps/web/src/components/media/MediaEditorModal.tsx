@@ -269,12 +269,21 @@ export const MediaEditorModal: React.FC = () => {
         }
       }
 
-      await sendMediaFiles(chatId, [fileToSend], {
-        caption: mediaEditorState.caption.trim() || undefined,
-        hasSpoiler: mediaEditorState.hasSpoiler,
-        topicId: activeTopicId ?? undefined,
-        replyToMsgId: replyTarget?.messageId,
-      });
+      const allFilesToSend: Array<File | Blob> = [
+        fileToSend,
+        ...(mediaEditorState.extraFiles ?? []),
+      ];
+
+      const captionText = mediaEditorState.caption.trim() || undefined;
+      for (let offset = 0; offset < allFilesToSend.length; offset += 10) {
+        const chunk = allFilesToSend.slice(offset, offset + 10);
+        await sendMediaFiles(chatId, chunk, {
+          caption: offset === 0 ? captionText : undefined,
+          hasSpoiler: mediaEditorState.hasSpoiler,
+          topicId: activeTopicId ?? undefined,
+          replyToMsgId: offset === 0 ? replyTarget?.messageId : undefined,
+        });
+      }
 
       if (replyTarget) {
         setReplyTarget(chatId, null);
@@ -305,6 +314,8 @@ export const MediaEditorModal: React.FC = () => {
     return null;
   }
 
+  const totalPhotoCount = 1 + (mediaEditorState.extraFiles?.length ?? 0);
+
   const cropOptions: Array<{ id: CropPreset; label: string }> = [
     { id: 'free', label: 'Original' },
     { id: '1:1', label: 'Crop 1:1' },
@@ -320,16 +331,6 @@ export const MediaEditorModal: React.FC = () => {
           closeMediaEditor();
         }
       }}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 1150,
-        backgroundColor: 'rgba(10, 15, 22, 0.84)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '16px',
-      }}
     >
       <div
         id={DOM_IDS.MODAL_MEDIA_EDITOR}
@@ -341,14 +342,6 @@ export const MediaEditorModal: React.FC = () => {
         style={{
           width: 'min(640px, 95vw)',
           maxHeight: '90dvh',
-          backgroundColor: 'var(--tg-bg-surface, #17212B)',
-          color: 'var(--tg-text-primary, #F5F5F5)',
-          border: '1px solid var(--tg-border, #242F3D)',
-          borderRadius: '14px',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-          boxShadow: '0 20px 48px rgba(0, 0, 0, 0.5)',
         }}
       >
         {/* Header */}
@@ -358,10 +351,14 @@ export const MediaEditorModal: React.FC = () => {
             alignItems: 'center',
             justifyContent: 'space-between',
             padding: '12px 16px',
-            borderBottom: '1px solid var(--tg-border, #242F3D)',
+            borderBottom: '1px solid var(--tg-hairline-border)',
           }}
         >
-          <strong style={{ fontSize: '15px' }}>Send Photo · Media Editor</strong>
+          <strong style={{ fontSize: '15px' }}>
+            {totalPhotoCount > 1
+              ? `Send Album (${totalPhotoCount} photos) · Media Editor`
+              : 'Send Photo · Media Editor'}
+          </strong>
           <button
             type="button"
             aria-label="Close"

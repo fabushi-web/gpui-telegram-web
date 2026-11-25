@@ -3,14 +3,17 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   DATA_TEST_IDS,
   DOM_IDS,
+  type BotRegistryEntry,
   type ChatFolder,
   type ChatSummary,
   type ForumTopic,
 } from '@gpui-telegram/protocol';
 import { formatChatTimestamp, t } from '../../i18n';
+import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore } from '../../store/useUiStore';
+import { GrokBotAvatar } from '../common/GrokBotAvatar';
 import { chatMatchesFolder } from './ChatFolderTabs';
 
 export interface ChatListProps {
@@ -24,7 +27,7 @@ function getChatInitials(title: string): string {
   if (!trimmed) return 'C';
   const words = trimmed.split(/\s+/);
   if (words.length >= 2) {
-    return `${words[0][0]}${words[1][0]}`.toUpperCase();
+    return `${words[0]![0]}${words[1]![0]}`.toUpperCase();
   }
   return trimmed.slice(0, 2).toUpperCase();
 }
@@ -46,12 +49,34 @@ function getMediaPrefixIcon(mediaType?: string): string {
   return '';
 }
 
+function chunkItems<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function resolveBotForChat(
+  chat: ChatSummary,
+  bots: BotRegistryEntry[],
+): BotRegistryEntry | undefined {
+  if (!chat.isBot && chat.kind !== 'bot') return undefined;
+  return bots.find(
+    (b) =>
+      (chat.peerUserId !== undefined && b.bot_user_id === chat.peerUserId) ||
+      (chat.username && b.username.toLowerCase() === chat.username.replace(/^@/, '').toLowerCase()),
+  );
+}
+
 export const ChatList: React.FC<ChatListProps> = ({
   isCollapsed = false,
   onEditCustomFolder,
   className,
 }) => {
   const language = useSettingsStore((s) => s.language);
+  const isZh = language === 'zh-CN';
+
   const chatsById = useChatStore((s) => s.chatsById);
   const orderedChatIds = useChatStore((s) => s.orderedChatIds);
   const activeChatId = useChatStore((s) => s.activeChatId);
@@ -63,6 +88,7 @@ export const ChatList: React.FC<ChatListProps> = ({
   const draftsByChat = useChatStore((s) => s.draftsByChat);
   const peersById = useChatStore((s) => s.peersById);
   const typingByChat = useChatStore((s) => s.typingByChat);
+  const botActivityByChat = useChatStore((s) => s.botActivityByChat);
 
   const selectChat = useChatStore((s) => s.selectChat);
   const setShowArchived = useChatStore((s) => s.setShowArchived);
@@ -72,9 +98,12 @@ export const ChatList: React.FC<ChatListProps> = ({
   const createTopic = useChatStore((s) => s.createTopic);
   const upsertFolder = useChatStore((s) => s.upsertFolder);
 
+  const bots = useAiWorkspaceStore((s) => s.bots);
+
   const setMobilePane = useUiStore((s) => s.setMobilePane);
   const setTabletLeftDrawerOpen = useUiStore((s) => s.setTabletLeftDrawerOpen);
   const setActiveNavDest = useUiStore((s) => s.setActiveNavDest);
+  const closeAppleComposeStage = useUiStore((s) => s.closeAppleComposeStage);
 
   const parentRef = useRef<HTMLDivElement | null>(null);
 
@@ -83,6 +112,9 @@ export const ChatList: React.FC<ChatListProps> = ({
     x: number;
     y: number;
   } | null>(null);
+
+  const [deleteConfirmChat, setDeleteConfirmChat] = useState<ChatSummary | null>(null);
+  const [deletingChat, setDeletingChat] = useState<boolean>(false);
 
   const [topicModalOpen, setTopicModalOpen] = useState<boolean>(false);
   const [newTopicTitle, setNewTopicTitle] = useState<string>('');
@@ -112,6 +144,13 @@ export const ChatList: React.FC<ChatListProps> = ({
     [orderedChatIds, chatsById],
   );
 
+  // Auto-exit archived view when last archived chat is unarchived (Trap #6: A04-T2-02)
+  useEffect(() => {
+    if (showArchived && archivedChats.length === 0) {
+      setShowArchived(false);
+    }
+  }, [showArchived, archivedChats.length, setShowArchived]);
+
   const activeCustomFolder = useMemo(
     () =>
       folders.find(
@@ -135,15 +174,29 @@ export const ChatList: React.FC<ChatListProps> = ({
       chatMatchesFolder(c, activeFolderId, folders),
     );
 
-    // Ensure pinned chats always appear strictly above unpinned chats
     return filtered.sort((a, b) => {
       if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
       return (b.lastMessageDateMs ?? 0) - (a.lastMessageDateMs ?? 0);
     });
   }, [orderedChatIds, chatsById, showArchived, activeFolderId, folders]);
 
+  const showPinnedGrid =
+    !isCollapsed && !showArchived && String(activeFolderId) === 'all';
+
+  const pinnedChats = useMemo(
+    () => (showPinnedGrid ? visibleChats.filter((c) => c.isPinned && !c.isArchived) : []),
+    [showPinnedGrid, visibleChats],
+  );
+
+  const pinnedRows = useMemo(() => chunkItems(pinnedChats, 3), [pinnedChats]);
+
+  const unpinnedChats = useMemo(
+    () => (showPinnedGrid && pinnedChats.length > 0 ? visibleChats.filter((c) => !c.isPinned) : visibleChats),
+    [showPinnedGrid, pinnedChats.length, visibleChats],
+  );
+
   const virtualizer = useVirtualizer({
-    count: visibleChats.length,
+    count: unpinnedChats.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 64,
     overscan: 12,
@@ -158,10 +211,21 @@ export const ChatList: React.FC<ChatListProps> = ({
       : [];
 
   const handleSelectRow = (chat: ChatSummary): void => {
+    closeAppleComposeStage();
     setActiveNavDest('chats');
     void selectChat(chat.chatId);
     setMobilePane('middle');
     setTabletLeftDrawerOpen(false);
+  };
+
+  const openChatContextMenu = (e: React.MouseEvent, chat: ChatSummary): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      chat,
+      x: Math.min(e.clientX, window.innerWidth - 230),
+      y: Math.min(e.clientY, window.innerHeight - 280),
+    });
   };
 
   const handleCreateTopicSubmit = async (e: React.FormEvent): Promise<void> => {
@@ -182,6 +246,58 @@ export const ChatList: React.FC<ChatListProps> = ({
     }
   };
 
+  const handleConfirmDeleteChat = async (): Promise<void> => {
+    if (!deleteConfirmChat) return;
+    setDeletingChat(true);
+    try {
+      await deleteOrLeaveChat(deleteConfirmChat.chatId);
+      setDeleteConfirmChat(null);
+    } finally {
+      setDeletingChat(false);
+    }
+  };
+
+  const renderPeerAvatar = (
+    chat: ChatSummary,
+    displayTitle: string,
+    sizePx: number,
+    isOnline: boolean,
+  ): React.ReactNode => {
+    const isBot = Boolean(chat.isBot || chat.kind === 'bot');
+    if (isBot) {
+      const botMeta = resolveBotForChat(chat, bots);
+      const botActivity = botActivityByChat[chat.chatId];
+      const sourceId =
+        botMeta?.agent_id ||
+        botMeta?.username ||
+        chat.username ||
+        String(chat.peerUserId ?? chat.chatId);
+      return (
+        <GrokBotAvatar
+          sourceId={sourceId}
+          shape={botMeta?.avatar_shape}
+          color={botMeta?.avatar_color}
+          sizePx={sizePx}
+          state={botActivity?.state}
+          initials={getChatInitials(displayTitle)}
+          title={displayTitle}
+        />
+      );
+    }
+
+    return (
+      <div
+        className="tg-avatar"
+        data-avatar="true"
+        data-color-index={String(chat.colorIndex)}
+        style={{ width: `${sizePx}px`, height: `${sizePx}px`, fontSize: sizePx >= 52 ? '18px' : '15px' }}
+      >
+        {chat.isSavedMessages ? '🔖' : getChatInitials(displayTitle)}
+        {isOnline && <span className="tg-online-dot" />}
+      </div>
+    );
+  };
+
   const renderChatRowContent = (chat: ChatSummary): React.ReactNode => {
     const isActive = activeChatId === chat.chatId;
     const displayTitle = chat.isSavedMessages
@@ -193,10 +309,15 @@ export const ChatList: React.FC<ChatListProps> = ({
       !chat.isSavedMessages &&
       !chat.isGroup &&
       !chat.isChannel &&
+      !chat.isBot &&
+      chat.kind !== 'bot' &&
       peerUser?.status === 'online';
 
     const typingUsers = typingByChat[chat.chatId] ?? [];
     const isTyping = typingUsers.length > 0;
+    const botActivity = botActivityByChat[chat.chatId];
+    const hasFreshBotActivity =
+      Boolean(botActivity && botActivity.state && botActivity.state !== 'idle' && Date.now() - botActivity.updatedAtMs < 45_000);
     const draftText = (draftsByChat[chat.chatId]?.text ?? chat.draft?.text ?? '').trim();
     const hasUnread = chat.unreadCount > 0 || Boolean(chat.unreadMark);
     const unreadDisplayCount = chat.unreadCount > 0 ? chat.unreadCount : 1;
@@ -211,18 +332,11 @@ export const ChatList: React.FC<ChatListProps> = ({
           data-active={String(isActive)}
           title={displayTitle}
           onClick={() => handleSelectRow(chat)}
+          onContextMenu={(e) => openChatContextMenu(e, chat)}
           className={`tg-chat-row ${isActive ? 'is-active' : ''}`.trim()}
           style={{ justifyContent: 'center', padding: '6px 4px', position: 'relative' }}
         >
-          <div
-            className="tg-avatar"
-            data-avatar="true"
-            data-color-index={String(chat.colorIndex)}
-            style={{ width: '42px', height: '42px' }}
-          >
-            {chat.isSavedMessages ? '🔖' : getChatInitials(displayTitle)}
-            {isOnline && <span className="tg-online-dot" />}
-          </div>
+          {renderPeerAvatar(chat, displayTitle, 42, isOnline)}
           {hasUnread && (
             <span
               className={`tg-badge ${chat.isMuted ? 'tg-badge--muted' : ''}`.trim()}
@@ -255,26 +369,11 @@ export const ChatList: React.FC<ChatListProps> = ({
         data-pinned={chat.isPinned ? 'true' : undefined}
         data-muted={chat.isMuted ? 'true' : undefined}
         onClick={() => handleSelectRow(chat)}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setContextMenu({
-            chat,
-            x: Math.min(e.clientX, window.innerWidth - 230),
-            y: Math.min(e.clientY, window.innerHeight - 260),
-          });
-        }}
+        onContextMenu={(e) => openChatContextMenu(e, chat)}
         className={`tg-chat-row ${isActive ? 'is-active' : ''}`.trim()}
         style={{ height: '60px' }}
       >
-        <div
-          className="tg-avatar"
-          data-avatar="true"
-          data-color-index={String(chat.colorIndex)}
-        >
-          {chat.isSavedMessages ? '🔖' : getChatInitials(displayTitle)}
-          {isOnline && <span className="tg-online-dot" />}
-        </div>
+        {renderPeerAvatar(chat, displayTitle, 44, isOnline)}
 
         <div className="tg-chat-row-body">
           <div className="tg-chat-row-top">
@@ -294,7 +393,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 <span
                   aria-label="Verified"
                   style={{
-                    color: isActive ? '#FFFFFF' : 'var(--tg-accent)',
+                    color: 'var(--tg-accent)',
                     fontSize: '12px',
                     flexShrink: 0,
                   }}
@@ -332,23 +431,13 @@ export const ChatList: React.FC<ChatListProps> = ({
 
           <div className="tg-chat-row-bottom">
             <span className="tg-chat-row-subtitle">
-              {isTyping ? (
-                <span
-                  data-typing="true"
-                  style={{
-                    color: isActive ? '#FFFFFF' : 'var(--tg-accent)',
-                    fontWeight: 500,
-                  }}
-                >
-                  {t('chat.typing', language)}
-                </span>
-              ) : draftText ? (
+              {draftText ? (
                 <>
                   <span aria-hidden="true">{'\u200B'}</span>
                   <span
                     data-testid="draft-badge"
                     style={{
-                      color: isActive ? '#FFD4D4' : 'var(--tg-danger)',
+                      color: 'var(--tg-danger)',
                       fontWeight: 600,
                     }}
                   >
@@ -356,12 +445,26 @@ export const ChatList: React.FC<ChatListProps> = ({
                   </span>
                   <span>{draftText}</span>
                 </>
+              ) : isTyping ? (
+                <span
+                  data-typing="true"
+                  style={{
+                    color: 'var(--tg-accent)',
+                    fontWeight: 500,
+                  }}
+                >
+                  {t('chat.typing', language)}
+                </span>
+              ) : hasFreshBotActivity && botActivity ? (
+                <span style={{ color: 'var(--tg-accent)', fontWeight: 500 }}>
+                  {botActivity.detail || botActivity.state}
+                </span>
               ) : (
                 <>
                   {chat.lastMessageSenderName && (chat.isGroup || chat.isSupergroup) ? (
                     <span
                       style={{
-                        color: isActive ? '#FFFFFF' : 'var(--tg-text-primary)',
+                        color: 'var(--tg-text-primary)',
                         fontWeight: 500,
                       }}
                     >
@@ -404,7 +507,7 @@ export const ChatList: React.FC<ChatListProps> = ({
 
   return (
     <>
-      {/* New Forum Topic Creator Dialog (placed before #forum-topic-list in DOM order) */}
+      {/* New Forum Topic Creator Dialog */}
       {topicModalOpen && activeChat && (
         <div
           className="tg-modal-overlay"
@@ -449,7 +552,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                   autoFocus
                   value={newTopicTitle}
                   onChange={(e) => setNewTopicTitle(e.target.value)}
-                  placeholder={language === 'zh-CN' ? '输入新话题标题…' : 'Enter topic title…'}
+                  placeholder={isZh ? '输入新话题标题…' : 'Enter topic title…'}
                   aria-label="Topic title"
                   className="tg-input"
                 />
@@ -476,6 +579,67 @@ export const ChatList: React.FC<ChatListProps> = ({
         </div>
       )}
 
+      {/* Delete / Leave Chat Confirmation Modal (Trap #7: A04-T2-05) */}
+      {deleteConfirmChat && (
+        <div
+          className="tg-modal-overlay"
+          onClick={() => setDeleteConfirmChat(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={
+              deleteConfirmChat.isGroup || deleteConfirmChat.isChannel
+                ? t('chatAction.leaveChat', language)
+                : t('chatAction.deleteChat', language)
+            }
+            data-testid="delete-chat-confirm-dialog"
+            className="tg-modal-card"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="tg-modal-header">
+              <span>
+                {deleteConfirmChat.isGroup || deleteConfirmChat.isChannel
+                  ? t('chatAction.leaveChat', language)
+                  : t('chatAction.deleteChat', language)}
+              </span>
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmChat(null)}
+                aria-label={t('common.close', language)}
+                className="tg-icon-btn"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="tg-modal-body" style={{ fontSize: '13.5px', lineHeight: 1.5 }}>
+              {isZh
+                ? `确定要${deleteConfirmChat.isGroup || deleteConfirmChat.isChannel ? '退出' : '删除'}「${deleteConfirmChat.title}」吗？此操作无法撤销。`
+                : `Are you sure you want to ${deleteConfirmChat.isGroup || deleteConfirmChat.isChannel ? 'leave' : 'delete'} "${deleteConfirmChat.title}"? This action cannot be undone.`}
+            </div>
+            <div className="tg-modal-footer">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmChat(null)}
+                className="tg-btn tg-btn--secondary"
+              >
+                {t('common.cancel', language)}
+              </button>
+              <button
+                type="button"
+                disabled={deletingChat}
+                onClick={() => void handleConfirmDeleteChat()}
+                className="tg-btn tg-btn--danger"
+              >
+                {deleteConfirmChat.isGroup || deleteConfirmChat.isChannel
+                  ? t('chatAction.leaveChat', language)
+                  : t('chatAction.deleteChat', language)}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Forum Topic List (#forum-topic-list) when active chat is a Forum Supergroup */}
       {!isCollapsed && activeChat?.isForum && (
         <div
@@ -483,7 +647,7 @@ export const ChatList: React.FC<ChatListProps> = ({
           role="region"
           aria-label={t('topics.title', language)}
           style={{
-            borderBottom: '1px solid var(--tg-border)',
+            borderBottom: '1px solid var(--tg-hairline-border)',
             backgroundColor: 'var(--tg-bg-elevated)',
             padding: '8px 10px',
             display: 'flex',
@@ -510,7 +674,6 @@ export const ChatList: React.FC<ChatListProps> = ({
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            {/* Real Forum Topics rendered FIRST so first [data-topic-id] is Topic #1 (General) */}
             {activeForumTopics.map((topic) => {
               const selected = activeTopicId === topic.topicId;
               return (
@@ -549,7 +712,6 @@ export const ChatList: React.FC<ChatListProps> = ({
               );
             })}
 
-            {/* All Topics Stream Option */}
             <button
               type="button"
               data-topic-id="all"
@@ -571,11 +733,60 @@ export const ChatList: React.FC<ChatListProps> = ({
                 textAlign: 'left',
               }}
             >
-              <span>📋 {language === 'zh-CN' ? '全部话题消息' : 'All Topics'}</span>
+              <span>📋 {isZh ? '全部话题消息' : 'All Topics'}</span>
             </button>
           </div>
         </div>
       )}
+
+      {/* Archived Chats Entry / Back Row — STRICTLY ABOVE #chat-list (Trap #5: A04-T1-01/03) */}
+      {!isCollapsed && showArchived && (
+        <button
+          id={DOM_IDS.ARCHIVED_CHATS_ROW}
+          type="button"
+          onClick={() => setShowArchived(false)}
+        >
+          <span className="tg-avatar tg-avatar--sm" data-avatar="true" data-color-index="5">
+            ←
+          </span>
+          <span className="tg-chat-row-body" style={{ textAlign: 'left' }}>
+            <span className="tg-chat-row-title">
+              {isZh ? '返回全部会话' : 'Back to All Chats'}
+            </span>
+            <span className="tg-chat-row-subtitle">
+              {t('menu.archivedChats', language)} ({archivedChats.length})
+            </span>
+          </span>
+        </button>
+      )}
+
+      {!isCollapsed &&
+        !showArchived &&
+        archivedChats.length > 0 &&
+        String(activeFolderId) === 'all' && (
+          <button
+            id={DOM_IDS.ARCHIVED_CHATS_ROW}
+            type="button"
+            onClick={() => setShowArchived(true)}
+          >
+            <span className="tg-avatar tg-avatar--sm" data-avatar="true" data-color-index="5">
+              📥
+            </span>
+            <span className="tg-chat-row-body" style={{ textAlign: 'left' }}>
+              <span className="tg-chat-row-top">
+                <span className="tg-chat-row-title">
+                  {t('menu.archivedChats', language)}
+                </span>
+                <span className="tg-badge tg-badge--muted">{archivedChats.length}</span>
+              </span>
+              <span className="tg-chat-row-subtitle">
+                {isZh
+                  ? `${archivedChats.length} 个已归档会话`
+                  : `${archivedChats.length} archived ${archivedChats.length === 1 ? 'chat' : 'chats'}`}
+              </span>
+            </span>
+          </button>
+        )}
 
       {/* Virtualized Chat List Container (#chat-list) */}
       <div
@@ -585,65 +796,71 @@ export const ChatList: React.FC<ChatListProps> = ({
         aria-label="Chats"
         className={`tg-chat-list ${className ?? ''}`.trim()}
       >
-        {/* Archived Chats Entry / Back Row (#archived-chats-row) */}
-        {!isCollapsed && showArchived && (
-          <button
-            id={DOM_IDS.ARCHIVED_CHATS_ROW}
-            type="button"
-            onClick={() => setShowArchived(false)}
-            className="tg-chat-row"
-            style={{
-              width: '100%',
-              marginBottom: '4px',
-              backgroundColor: 'var(--tg-bg-elevated)',
-              border: '1px solid var(--tg-border-subtle)',
-            }}
+        {/* Apple Messages 3x3 Pinned Chats Grid (#sidebar-pinned-chats-grid) */}
+        {showPinnedGrid && pinnedChats.length > 0 && (
+          <div
+            id={DOM_IDS.SIDEBAR_PINNED_CHATS_GRID}
+            className="tg-pinned-grid"
+            data-count={String(pinnedChats.length)}
           >
-            <span className="tg-avatar tg-avatar--sm" data-color-index="5">
-              ←
-            </span>
-            <span className="tg-chat-row-body" style={{ textAlign: 'left' }}>
-              <span className="tg-chat-row-title">
-                {language === 'zh-CN' ? '返回全部会话' : 'Back to All Chats'}
-              </span>
-              <span className="tg-chat-row-subtitle">
-                {t('menu.archivedChats', language)} ({archivedChats.length})
-              </span>
-            </span>
-          </button>
-        )}
+            {pinnedRows.map((row, rowIdx) => (
+              <div
+                key={`pin-row-${rowIdx}`}
+                className={
+                  row.length < 3 ? 'tg-pinned-grid-row--centered' : 'tg-pinned-grid-row'
+                }
+              >
+                {row.map((chat) => {
+                  const isActive = activeChatId === chat.chatId;
+                  const displayTitle = chat.isSavedMessages
+                    ? t('chat.savedMessages', language)
+                    : chat.title;
+                  const peerUser =
+                    chat.peerUserId !== undefined ? peersById[chat.peerUserId] : undefined;
+                  const isOnline =
+                    !chat.isSavedMessages &&
+                    !chat.isGroup &&
+                    !chat.isChannel &&
+                    !chat.isBot &&
+                    chat.kind !== 'bot' &&
+                    peerUser?.status === 'online';
+                  const hasUnread = chat.unreadCount > 0 || Boolean(chat.unreadMark);
+                  const unreadDisplayCount = chat.unreadCount > 0 ? chat.unreadCount : 1;
 
-        {!isCollapsed &&
-          !showArchived &&
-          archivedChats.length > 0 &&
-          String(activeFolderId) === 'all' && (
-            <button
-              id={DOM_IDS.ARCHIVED_CHATS_ROW}
-              type="button"
-              onClick={() => setShowArchived(true)}
-              className="tg-chat-row"
-              style={{
-                width: '100%',
-                marginBottom: '4px',
-                backgroundColor: 'var(--tg-bg-elevated)',
-              }}
-            >
-              <span className="tg-avatar" data-color-index="5">
-                📥
-              </span>
-              <span className="tg-chat-row-body" style={{ textAlign: 'left' }}>
-                <span className="tg-chat-row-top">
-                  <span className="tg-chat-row-title">
-                    {t('menu.archivedChats', language)}
-                  </span>
-                  <span className="tg-badge tg-badge--muted">{archivedChats.length}</span>
-                </span>
-                <span className="tg-chat-row-subtitle">
-                  {archivedChats.map((c) => c.title).join(', ')}
-                </span>
-              </span>
-            </button>
-          )}
+                  return (
+                    <div
+                      key={chat.chatId}
+                      role="treeitem"
+                      aria-selected={isActive}
+                      data-testid={DATA_TEST_IDS.CHAT_ROW}
+                      data-chat-id={String(chat.chatId)}
+                      data-pinned="true"
+                      data-active={String(isActive)}
+                      title={displayTitle}
+                      onClick={() => handleSelectRow(chat)}
+                      onContextMenu={(e) => openChatContextMenu(e, chat)}
+                      className={`tg-pinned-tile ${isActive ? 'is-active' : ''}`.trim()}
+                    >
+                      <div className="tg-pinned-tile-avatar-ring">
+                        {renderPeerAvatar(chat, displayTitle, 54, isOnline)}
+                        {hasUnread && (
+                          <span
+                            className={`tg-pinned-tile-badge ${chat.isMuted ? 'tg-badge--muted' : ''}`.trim()}
+                            data-unread="true"
+                            data-unread-count={String(unreadDisplayCount)}
+                          >
+                            {unreadDisplayCount > 99 ? '99+' : unreadDisplayCount}
+                          </span>
+                        )}
+                      </div>
+                      <span className="tg-pinned-tile-label">{displayTitle}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Empty State for Custom Folder with 0 Chats */}
         {!isCollapsed && !showArchived && activeCustomFolder && visibleChats.length === 0 ? (
@@ -663,17 +880,29 @@ export const ChatList: React.FC<ChatListProps> = ({
               📂
             </span>
             <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--tg-text-primary)' }}>
-              {language === 'zh-CN' ? '当前分组暂无会话' : 'No chats in this folder'}
+              {isZh ? '当前分组暂无会话' : 'No chats in this folder'}
             </div>
             <button
               type="button"
               onClick={() => onEditCustomFolder?.(activeCustomFolder)}
               className="tg-btn tg-btn--primary"
             >
-              + {language === 'zh-CN' ? '添加会话' : 'Add Chats'}
+              + {isZh ? '添加会话' : 'Add Chats'}
             </button>
           </div>
-        ) : virtualItems.length > 0 ? (
+        ) : !isCollapsed && visibleChats.length === 0 ? (
+          <div
+            data-testid="empty-chat-list"
+            style={{
+              padding: '36px 16px',
+              textAlign: 'center',
+              color: 'var(--tg-text-secondary)',
+              fontSize: '13px',
+            }}
+          >
+            {isZh ? '暂无会话' : 'No conversations yet'}
+          </div>
+        ) : unpinnedChats.length === 0 ? null : virtualItems.length > 0 ? (
           <div
             style={{
               height: `${virtualizer.getTotalSize()}px`,
@@ -682,7 +911,7 @@ export const ChatList: React.FC<ChatListProps> = ({
             }}
           >
             {virtualItems.map((virtualRow) => {
-              const chat = visibleChats[virtualRow.index];
+              const chat = unpinnedChats[virtualRow.index];
               if (!chat) return null;
               return (
                 <div
@@ -703,9 +932,8 @@ export const ChatList: React.FC<ChatListProps> = ({
             })}
           </div>
         ) : (
-          /* Immediate first-paint fallback before ResizeObserver measures container height */
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            {visibleChats.slice(0, 30).map((chat) => (
+            {unpinnedChats.slice(0, 30).map((chat) => (
               <div key={chat.chatId}>{renderChatRowContent(chat)}</div>
             ))}
           </div>
@@ -792,8 +1020,12 @@ export const ChatList: React.FC<ChatListProps> = ({
             role="menuitem"
             onClick={() => {
               const target = contextMenu.chat;
+              const nextArchived = !target.isArchived;
               setContextMenu(null);
-              void updateChatSettings(target.chatId, { isArchived: !target.isArchived });
+              void updateChatSettings(target.chatId, {
+                isArchived: nextArchived,
+                ...(nextArchived ? { isPinned: false } : {}),
+              });
             }}
             className="tg-context-menu-item"
           >
@@ -830,8 +1062,8 @@ export const ChatList: React.FC<ChatListProps> = ({
                 <span>📁</span>
                 <span>
                   {inFolder
-                    ? `${language === 'zh-CN' ? '移出分组' : 'Remove from'} ${folder.title}`
-                    : `${language === 'zh-CN' ? '加入分组' : 'Add to'} ${folder.title}`}
+                    ? `${isZh ? '移出分组' : 'Remove from'} ${folder.title}`
+                    : `${isZh ? '加入分组' : 'Add to'} ${folder.title}`}
                 </span>
               </button>
             );
@@ -852,7 +1084,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 onClick={() => {
                   const target = contextMenu.chat;
                   setContextMenu(null);
-                  void deleteOrLeaveChat(target.chatId);
+                  setDeleteConfirmChat(target);
                 }}
                 className="tg-context-menu-item is-danger"
               >

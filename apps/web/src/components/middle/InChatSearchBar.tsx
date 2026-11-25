@@ -159,7 +159,7 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
 
   return (
     <div
-      id="inchat-search-bar"
+      id="in-chat-search-bar"
       data-testid="in-chat-search-bar"
       role="search"
       style={{
@@ -168,8 +168,8 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
         alignItems: 'center',
         gap: '8px',
         padding: '6px 14px',
-        backgroundColor: 'var(--tg-bg-elevated, #1E2C3A)',
-        borderBottom: '1px solid var(--tg-border, #242F3D)',
+        backgroundColor: 'var(--tg-bg-elevated)',
+        borderBottom: '1px solid var(--tg-hairline-border)',
         flexShrink: 0,
         zIndex: 6,
       }}
@@ -201,10 +201,10 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
           flex: '1 1 180px',
           minWidth: '140px',
           padding: '5px 10px',
-          borderRadius: '7px',
-          border: '1px solid var(--tg-border, #242F3D)',
-          backgroundColor: 'var(--tg-bg-app, #0E1621)',
-          color: 'var(--tg-text-primary, #F5F5F5)',
+          borderRadius: '8px',
+          border: '1px solid var(--tg-hairline-border)',
+          backgroundColor: 'var(--tg-bg-input)',
+          color: 'var(--tg-text-primary)',
           fontSize: '13px',
         }}
       />
@@ -219,10 +219,10 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
         }}
         style={{
           padding: '5px 8px',
-          borderRadius: '7px',
-          border: '1px solid var(--tg-border, #242F3D)',
-          backgroundColor: 'var(--tg-bg-app, #0E1621)',
-          color: 'var(--tg-text-primary, #F5F5F5)',
+          borderRadius: '8px',
+          border: '1px solid var(--tg-hairline-border)',
+          backgroundColor: 'var(--tg-bg-input)',
+          color: 'var(--tg-text-primary)',
           fontSize: '12px',
         }}
       >
@@ -242,10 +242,10 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
         onChange={(e) => handleDateChange(e.target.value)}
         style={{
           padding: '4px 8px',
-          borderRadius: '7px',
-          border: '1px solid var(--tg-border, #242F3D)',
-          backgroundColor: 'var(--tg-bg-app, #0E1621)',
-          color: 'var(--tg-text-primary, #F5F5F5)',
+          borderRadius: '8px',
+          border: '1px solid var(--tg-hairline-border)',
+          backgroundColor: 'var(--tg-bg-input)',
+          color: 'var(--tg-text-primary)',
           fontSize: '12px',
         }}
       />
@@ -254,15 +254,15 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
         data-testid="in-chat-search-counter"
         style={{
           fontSize: '12px',
-          color: 'var(--tg-text-secondary, #8FA2B7)',
+          color: 'var(--tg-text-secondary)',
           minWidth: '52px',
           textAlign: 'center',
         }}
       >
         {hasCriteria
           ? totalMatches > 0
-            ? `${safeActiveIdx + 1} of ${totalMatches}`
-            : '0 of 0'
+            ? `${safeActiveIdx + 1} / ${totalMatches}`
+            : '0 / 0'
           : ''}
       </span>
 

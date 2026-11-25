@@ -237,7 +237,7 @@ class BrowserControlAgentService {
     const snap = this.captureSnapshot();
     return {
       target_id: this.targetId,
-      title: snap.title || 'GPUI Telegram Web',
+      title: snap.title || 'Fabushi Web v1.6.11',
       url: snap.url || 'http://localhost/',
       viewport: snap.viewport,
       theme: snap.theme,
@@ -520,7 +520,7 @@ class BrowserControlAgentService {
       <rect width="100%" height="100%" fill="${bg}" />
       ${boxesSvg}
       <rect x="12" y="${h - 34}" width="${Math.min(540, w - 24)}" height="24" rx="6" fill="${surface}" stroke="#3390EC" />
-      <text x="20" y="${h - 18}" fill="${fg}" font-family="sans-serif" font-size="11">GPUI Browser Snapshot · Theme=${escapeXml(snap.theme || 'night')} · Refs=${snap.elements.length}</text>
+      <text x="20" y="${h - 18}" fill="${fg}" font-family="sans-serif" font-size="11">Fabushi Browser Snapshot · Theme=${escapeXml(snap.theme || 'night')} · Refs=${snap.elements.length}</text>
     </svg>`;
 
     const wellFormedSvg = rawSvg.replace(

@@ -1,0 +1,866 @@
+/* ==========================================================================
+   Fabushi Web v1.6.11 — AI Workspaces, Mini Apps & System Settings CSS
+   100% Vanilla CSS (Zero Tailwind, Zero Purple-on-Dark, Zero Dark Drop Shadows).
+   Uses Apple Messages macOS & Muse elevation tokens strictly.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Shared Workspace Shell & Surface Cards
+   -------------------------------------------------------------------------- */
+
+.tg-ai-workspace {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--tg-bg-app);
+  color: var(--tg-text-primary);
+}
+
+.tg-ai-workspace__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  background: var(--tg-bg-surface);
+  border-bottom: 1px solid var(--tg-border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.tg-ai-workspace__title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tg-ai-workspace__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--tg-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tg-ai-workspace__subtitle {
+  font-size: 12px;
+  color: var(--tg-text-secondary);
+}
+
+.tg-ai-workspace__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tg-ai-workspace__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.tg-ai-card {
+  background: var(--tg-bg-surface);
+  border: 1px solid var(--tg-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+:root[data-theme="night"] .tg-ai-card,
+:root[data-theme="tinted"] .tg-ai-card {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.tg-ai-card--elevated {
+  background: var(--tg-bg-elevated);
+}
+
+.tg-ai-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.tg-ai-card__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--tg-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tg-ai-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.tg-ai-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tg-ai-row--between {
+  justify-content: space-between;
+}
+
+.tg-ai-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.tg-ai-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--tg-text-secondary);
+}
+
+.tg-ai-field input,
+.tg-ai-field select,
+.tg-ai-field textarea {
+  width: 100%;
+  background: var(--tg-bg-input);
+  color: var(--tg-text-primary);
+  border: 1px solid var(--tg-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.tg-ai-field input:focus,
+.tg-ai-field select:focus,
+.tg-ai-field textarea:focus {
+  outline: none;
+  border-color: var(--tg-accent);
+}
+
+.tg-ai-code-block {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--tg-bg-app);
+  border: 1px solid var(--tg-border);
+  font-family: var(--tg-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--tg-text-primary);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tg-ai-empty {
+  padding: 18px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--tg-border-strong);
+  background: var(--tg-bg-app);
+  color: var(--tg-text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.tg-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-bg-elevated);
+  color: var(--tg-text-secondary);
+}
+
+.tg-ai-badge--accent {
+  background: var(--tg-accent-soft);
+  color: var(--tg-accent);
+  border-color: var(--tg-accent-strong);
+}
+
+.tg-ai-badge--success {
+  background: var(--tg-success-soft);
+  color: var(--tg-success);
+  border-color: rgba(0, 201, 114, 0.32);
+}
+
+.tg-ai-badge--warning {
+  background: var(--tg-warning-soft);
+  color: var(--tg-warning);
+  border-color: rgba(229, 160, 48, 0.34);
+}
+
+.tg-ai-badge--danger {
+  background: var(--tg-danger-soft);
+  color: var(--tg-danger);
+  border-color: rgba(225, 91, 100, 0.34);
+}
+
+.tg-ai-badge--info {
+  background: var(--tg-info-soft);
+  color: var(--tg-info);
+  border-color: rgba(41, 182, 246, 0.34);
+}
+
+/* --------------------------------------------------------------------------
+   Structured PROVIDER_ERROR Card & Thinking Bubble
+   -------------------------------------------------------------------------- */
+
+.tg-provider-error-card,
+.provider-error-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--tg-danger-soft);
+  border: 1px solid var(--tg-danger);
+  color: var(--tg-text-primary);
+}
+
+.tg-provider-error-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--tg-danger);
+}
+
+.tg-provider-error-body {
+  font-size: 13px;
+  color: var(--tg-text-primary);
+  line-height: 1.5;
+}
+
+.tg-thinking-bubble {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--tg-bg-elevated);
+  border: 1px solid var(--tg-border);
+  border-left: 3px solid var(--tg-info);
+  font-size: 12px;
+  color: var(--tg-text-secondary);
+  white-space: pre-wrap;
+}
+
+/* --------------------------------------------------------------------------
+   Magpie LLM Gateway & models.dev Catalog
+   -------------------------------------------------------------------------- */
+
+#magpie-gateway-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--tg-text-primary);
+}
+
+.tg-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.tg-catalog-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--tg-bg-elevated);
+  border: 1px solid var(--tg-border);
+}
+
+.tg-catalog-item__models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tg-catalog-model-btn {
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-bg-surface);
+  color: var(--tg-text-primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tg-catalog-model-btn:hover {
+  border-color: var(--tg-accent);
+  color: var(--tg-accent);
+}
+
+/* --------------------------------------------------------------------------
+   Hermes Studio Tabs
+   -------------------------------------------------------------------------- */
+
+.tg-hermes-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  background: var(--tg-bg-surface);
+  border-bottom: 1px solid var(--tg-border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tg-hermes-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--tg-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tg-hermes-tab:hover {
+  background: var(--tg-bg-hover);
+  color: var(--tg-text-primary);
+}
+
+.tg-hermes-tab--active {
+  background: var(--tg-accent-soft);
+  color: var(--tg-accent);
+  border-color: var(--tg-accent-strong);
+}
+
+/* --------------------------------------------------------------------------
+   Official OAuth 2.1 MCP Grants & Audit Panel
+   -------------------------------------------------------------------------- */
+
+#oauth-mcp-grants-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tg-scope-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-family: var(--tg-font-mono);
+  font-size: 11px;
+  background: var(--tg-accent-soft);
+  color: var(--tg-accent);
+  border: 1px solid var(--tg-accent-strong);
+}
+
+.tg-audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.tg-audit-table th,
+.tg-audit-table td {
+  padding: 7px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--tg-border-subtle);
+}
+
+.tg-audit-table th {
+  color: var(--tg-text-secondary);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   Computer Workbench & UU-Parity Remote Assist
+   -------------------------------------------------------------------------- */
+
+#remote-assist-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tg-assist-id-code {
+  font-family: var(--tg-font-mono);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--tg-accent);
+}
+
+.tg-kill-switch-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--tg-warning-soft);
+  border: 1px solid var(--tg-warning);
+  color: var(--tg-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tg-remote-frame-box {
+  width: 100%;
+  min-height: 240px;
+  border-radius: 10px;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-bg-app);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.tg-remote-frame-box img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* --------------------------------------------------------------------------
+   Built-in Interactive Browser Workspace, 4-Tab Inspector & Automation Store
+   -------------------------------------------------------------------------- */
+
+#browser-workspace {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--tg-bg-app);
+  color: var(--tg-text-primary);
+}
+
+.tg-browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--tg-bg-surface);
+  border-bottom: 1px solid var(--tg-border);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.tg-browser-url-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 320px;
+  min-width: 240px;
+}
+
+.tg-browser-url-form input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--tg-bg-input);
+  color: var(--tg-text-primary);
+  border: 1px solid var(--tg-border);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.tg-browser-url-form input:focus {
+  outline: none;
+  border-color: var(--tg-accent);
+}
+
+.tg-browser-control-mode-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--tg-bg-elevated);
+  border-bottom: 1px solid var(--tg-border);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.tg-browser-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+  gap: 14px;
+  padding: 14px 16px;
+  overflow: hidden;
+}
+
+.tg-browser-main-col,
+.tg-browser-inspector-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#browser-headless-viewport {
+  border-radius: 12px;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-bg-surface);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tg-browser-frame-stage {
+  border-radius: 8px;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-bg-app);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+}
+
+.tg-browser-frame-stage img,
+.tg-browser-frame-stage canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#browser-inspector-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--tg-bg-surface);
+  border: 1px solid var(--tg-border);
+  flex-wrap: wrap;
+}
+
+.tg-browser-inspector-tab {
+  flex: 1 1 auto;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--tg-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tg-browser-inspector-tab:hover {
+  color: var(--tg-text-primary);
+  background: var(--tg-bg-hover);
+}
+
+.tg-browser-inspector-tab--active {
+  background: var(--tg-accent-soft);
+  color: var(--tg-accent);
+  border-color: var(--tg-accent-strong);
+}
+
+#automation-app-store-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tg-secret-leak-alert {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--tg-danger-soft);
+  border: 1px solid var(--tg-danger);
+  color: var(--tg-text-primary);
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   2-Pane Apple System Settings Panel (Offset Past #nav-rail on Desktop)
+   -------------------------------------------------------------------------- */
+
+.tg-settings-backdrop {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: var(--tg-nav-rail-width, 64px);
+  z-index: 55;
+  background: var(--tg-bg-overlay);
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+#settings-panel.tg-settings-panel {
+  position: relative;
+  width: min(860px, calc(100vw - var(--tg-nav-rail-width, 64px)));
+  max-width: 100%;
+  height: 100%;
+  background: var(--tg-bg-surface);
+  border-right: 1px solid var(--tg-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--tg-text-primary);
+}
+
+:root[data-theme="night"] #settings-panel.tg-settings-panel,
+:root[data-theme="tinted"] #settings-panel.tg-settings-panel {
+  box-shadow: none;
+}
+
+.tg-settings-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--tg-border);
+  background: var(--tg-bg-surface);
+  flex-shrink: 0;
+}
+
+.tg-settings-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.tg-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--tg-border);
+  background: var(--tg-bg-app);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.tg-settings-nav-profile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  margin-bottom: 6px;
+  border-radius: 10px;
+  background: var(--tg-bg-surface);
+  border: 1px solid var(--tg-border);
+}
+
+.tg-settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--tg-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tg-settings-nav-item:hover {
+  background: var(--tg-bg-hover);
+}
+
+.tg-settings-nav-item--active {
+  background: var(--tg-accent-soft);
+  color: var(--tg-accent);
+  border-color: var(--tg-accent-strong);
+  font-weight: 600;
+}
+
+.tg-settings-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--tg-bg-surface);
+}
+
+.tg-settings-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--tg-bg-elevated);
+  border: 1px solid var(--tg-border);
+}
+
+.tg-settings-switch {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--tg-border-strong);
+  background: var(--tg-bg-input);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.tg-settings-switch[aria-checked="true"] {
+  background: var(--tg-accent);
+  border-color: var(--tg-accent);
+}
+
+.tg-settings-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #FFFFFF;
+  transition: transform 140ms ease;
+}
+
+.tg-settings-switch[aria-checked="true"]::after {
+  transform: translateX(18px);
+}
+
+/* --------------------------------------------------------------------------
+   Vault & X25519 Device Trust Ring Panel
+   -------------------------------------------------------------------------- */
+
+#vault-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.tg-device-sync-code {
+  display: inline-block;
+  padding: 6px 14px;
+  border-radius: 10px;
+  background: var(--tg-accent-soft);
+  border: 1px solid var(--tg-accent-strong);
+  color: var(--tg-accent);
+  font-family: var(--tg-font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 3px;
+}
+
+/* --------------------------------------------------------------------------
+   Talk Mode Orb & Wallet Modal
+   -------------------------------------------------------------------------- */
+
+#talk-mode-orb .tg-talk-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+}
+
+#wallet-stars-modal .tg-wallet-balance-hero {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tg-wallet-metric-card {
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--tg-bg-elevated);
+  border: 1px solid var(--tg-border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tg-wallet-metric-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--tg-text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Responsive Breakpoints (< 960px / < 768px)
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 960px) {
+  .tg-browser-body {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 767px) {
+  .tg-settings-backdrop {
+    left: 0;
+  }
+
+  #settings-panel.tg-settings-panel {
+    width: 100vw;
+  }
+
+  .tg-settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .tg-settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-bottom: 1px solid var(--tg-border);
+    padding: 8px;
+  }
+
+  .tg-settings-nav-profile {
+    display: none;
+  }
+
+  .tg-settings-nav-item {
+    width: auto;
+    white-space: nowrap;
+  }
+}

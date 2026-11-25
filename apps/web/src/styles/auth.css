@@ -1,0 +1,73 @@
+/* ==========================================================================
+   Fabushi Web v1.6.11 — Auth & Passcode Lock Screens (auth.css)
+   Apple glass cards, hairline borders, 12% top specular, zero dark shadows.
+   ========================================================================== */
+
+#auth-screen {
+  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  background-color: var(--tg-bg-app);
+  color: var(--tg-text-primary);
+}
+
+#passcode-lock-screen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  background-color: var(--tg-bg-app);
+  z-index: var(--tg-z-passcode-lock);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.tg-passcode-card {
+  width: 100%;
+  max-width: 380px;
+  padding: 32px 26px;
+  border-radius: var(--tg-radius-xl);
+  background-color: var(--tg-bg-glass);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border: 1px solid var(--tg-hairline-border);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-lg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.tg-passcode-icon {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background-color: var(--tg-accent-soft);
+  color: var(--tg-accent);
+  border: 1px solid var(--tg-hairline-border);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tg-passcode-error {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--tg-radius-sm);
+  background-color: var(--tg-danger-soft);
+  color: var(--tg-danger);
+  border: 1px solid var(--tg-danger);
+  font-size: 13px;
+  font-weight: 500;
+}

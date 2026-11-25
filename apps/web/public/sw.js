@@ -1,5 +1,5 @@
-/* GPUI Telegram Web — Standalone Offline-Capable Service Worker (Root & Subpath Safe) */
-const CACHE_NAME = 'gpui-telegram-web-shell-v3';
+/* Fabushi Web v1.6.11 — Standalone Offline-Capable Service Worker (Root & Subpath Safe) */
+const CACHE_NAME = 'fabushi-web-v4';
 
 function resolveScopedUrl(relPath) {
   const scope = (self.registration && self.registration.scope) || self.location.origin + '/';
@@ -61,8 +61,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
-  // Never intercept REST/SSE/WS endpoints — let client adapters & offline outbox handle them directly
-  if (url.pathname.includes('/api/')) return;
+  // Never intercept REST/SSE/WS/OAuth/MCP/Bot endpoints — let client adapters & offline outbox handle them directly
+  if (/\/(api|oauth|mcp|\.well-known)\/|^\/mcp$|^\/bot[^/]+\//.test(url.pathname)) return;
 
   event.respondWith(
     fetch(request)

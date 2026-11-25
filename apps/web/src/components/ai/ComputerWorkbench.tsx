@@ -1,9 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DOM_IDS,
   type ComputerNodeDto,
   type ComputerRunPolicy,
-  type TailnetPeerDescriptor,
+  type RemoteControlMode,
 } from '@gpui-telegram/protocol';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useUiStore } from '../../store/useUiStore';
@@ -12,105 +12,36 @@ export interface ComputerWorkbenchProps {
   onClose?: () => void;
 }
 
-function drawLiveSessionCanvas(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  opts: {
-    node: ComputerNodeDto;
-    cursorX: number;
-    cursorY: number;
-    sessionLog: string[];
-    takenOver: boolean;
-  },
-): void {
-  // Ocean Slate backdrop (zero-purple dark palette)
-  const bgGrad = ctx.createLinearGradient(0, 0, width, height);
-  bgGrad.addColorStop(0, '#0E1621');
-  bgGrad.addColorStop(1, '#132233');
-  ctx.fillStyle = bgGrad;
-  ctx.fillRect(0, 0, width, height);
-
-  // Header bar with real node metadata
-  ctx.fillStyle = '#17212B';
-  ctx.fillRect(0, 0, width, 30);
-  ctx.fillStyle = '#3390EC';
-  ctx.fillRect(0, 29, width, 1);
-
-  ctx.font = 'bold 12px monospace';
-  ctx.fillStyle = '#F5F5F5';
-  ctx.fillText(`🖥️ ${opts.node.display_name} (${opts.node.host})`, 12, 19);
-
-  ctx.fillStyle = opts.takenOver ? '#E5A030' : opts.node.online ? '#00C972' : '#7F91A4';
-  const badgeText = opts.takenOver
-    ? `HUMAN TAKEOVER · GEN #${opts.node.lease_generation}`
-    : `${opts.node.online ? 'ONLINE' : 'OFFLINE'} · LEASE: ${opts.node.lease_state.toUpperCase()} · GEN #${opts.node.lease_generation}`;
-  ctx.fillText(badgeText, Math.max(360, width - badgeText.length * 7.5 - 12), 19);
-
-  // Real Command / Audit Output Terminal
-  const termX = 16;
-  const termY = 46;
-  const termW = width - 32;
-  const termH = height - 90;
-  ctx.fillStyle = '#0B121B';
-  ctx.fillRect(termX, termY, termW, termH);
-  ctx.strokeStyle = opts.takenOver ? '#E5A030' : '#2B3B4E';
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(termX, termY, termW, termH);
-
-  ctx.fillStyle = '#1E2A38';
-  ctx.fillRect(termX, termY, termW, 24);
-  ctx.fillStyle = '#9BB0C4';
-  ctx.font = '11.5px monospace';
-  ctx.fillText(
-    `${opts.node.node_id} · ${opts.node.os_name || 'Remote Host'} · Policy: ${opts.node.run_policy}`,
-    termX + 12,
-    termY + 16,
-  );
-
-  ctx.font = '12px monospace';
-  const lines =
-    opts.sessionLog.length > 0
-      ? opts.sessionLog.slice(-11)
-      : ['[ready] 点击画布或输入下方指令发送至远程节点执行。'];
-  lines.forEach((line, idx) => {
-    ctx.fillStyle = line.startsWith('$')
-      ? '#00C972'
-      : line.startsWith('[ERR') || line.startsWith('[PREEMPT')
-        ? '#E5A030'
-        : '#D6E6F5';
-    ctx.fillText(line.slice(0, 88), termX + 12, termY + 46 + idx * 24);
-  });
-
-  // Footer bar
-  ctx.fillStyle = '#17212B';
-  ctx.fillRect(0, height - 32, width, 32);
-  ctx.fillStyle = '#7F91A4';
-  ctx.font = '11px monospace';
-  ctx.fillText(
-    `Cursor: (${opts.cursorX}, ${opts.cursorY}) · Resolution: ${opts.node.resolution || '1280x720'}`,
-    14,
-    height - 12,
-  );
-
-  // Pointer reticle
-  const cx = Math.max(8, Math.min(width - 16, opts.cursorX));
-  const cy = Math.max(8, Math.min(height - 16, opts.cursorY));
-  ctx.beginPath();
-  ctx.arc(cx, cy, 9, 0, Math.PI * 2);
-  ctx.strokeStyle = opts.takenOver ? '#E5A030' : '#29B6F6';
-  ctx.lineWidth = 2;
-  ctx.stroke();
+function formatAssistId(raw: string): string {
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length !== 9) return raw;
+  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 9)}`;
 }
 
-export function ComputerWorkbench({ onClose }: ComputerWorkbenchProps = {}): React.JSX.Element {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+const RUN_POLICY_OPTIONS: Array<{ value: ComputerRunPolicy; label: string }> = [
+  { value: 'ask_every_time', label: 'Ask Every Time · 每次确认' },
+  { value: 'allow_read_only', label: 'Allow Read-Only · 仅允许只读操作' },
+  { value: 'always_allow_authorized', label: 'Always Allow Authorized · 信任已授权控制器' },
+  { value: 'disabled', label: 'Disabled · 禁止远程执行' },
+];
 
+export function ComputerWorkbench({ onClose }: ComputerWorkbenchProps = {}): React.JSX.Element {
   const computers = useAiWorkspaceStore((s) => s.computers);
   const computerApprovals = useAiWorkspaceStore((s) => s.computerApprovals);
   const tailnet = useAiWorkspaceStore((s) => s.tailnet);
-  const lastTakeoverMs = useAiWorkspaceStore((s) => s.lastTakeoverMs);
+  const remoteAssistInfo = useAiWorkspaceStore((s) => s.remoteAssistInfo);
+  const remoteSessions = useAiWorkspaceStore((s) => s.remoteSessions);
+  const computerFrames = useAiWorkspaceStore((s) => s.computerFrames);
+  const lastKillSwitchLatencyMs = useAiWorkspaceStore((s) => s.lastKillSwitchLatencyMs);
+
   const loadComputers = useAiWorkspaceStore((s) => s.loadComputers);
+  const loadRemoteAssist = useAiWorkspaceStore((s) => s.loadRemoteAssist);
+  const resetRemoteAssistCode = useAiWorkspaceStore((s) => s.resetRemoteAssistCode);
+  const setRemoteAssistCode = useAiWorkspaceStore((s) => s.setRemoteAssistCode);
+  const setAllowRemoteAssist = useAiWorkspaceStore((s) => s.setAllowRemoteAssist);
+  const startRemoteAssist = useAiWorkspaceStore((s) => s.startRemoteAssist);
+  const disconnectRemoteSession = useAiWorkspaceStore((s) => s.disconnectRemoteSession);
+  const loadComputerFrame = useAiWorkspaceStore((s) => s.loadComputerFrame);
   const createCloudComputer = useAiWorkspaceStore((s) => s.createCloudComputer);
   const testComputerConnection = useAiWorkspaceStore((s) => s.testComputerConnection);
   const deleteComputer = useAiWorkspaceStore((s) => s.deleteComputer);
@@ -123,615 +54,740 @@ export function ComputerWorkbench({ onClose }: ComputerWorkbenchProps = {}): Rea
   const pushToast = useUiStore((s) => s.pushToast);
 
   const [selectedNodeId, setSelectedNodeId] = useState<string>('');
-  const [cursorPos, setCursorPos] = useState<{ x: number; y: number }>({ x: 260, y: 190 });
-  const [typeText, setTypeText] = useState('');
-  const [takenOverLocal, setTakenOverLocal] = useState(false);
-  const [localTakeoverLatencyMs, setLocalTakeoverLatencyMs] = useState<number | null>(null);
-  const [sessionLog, setSessionLog] = useState<string[]>([]);
+  const [killSwitchBusy, setKillSwitchBusy] = useState(false);
+  const [lastKillDisconnectedCount, setLastKillDisconnectedCount] = useState<number>(0);
 
-  // Real Cloud SSH Server registration form
+  // Remote Assist forms
+  const [customCodeInput, setCustomCodeInput] = useState('');
+  const [assistError, setAssistError] = useState<string | null>(null);
+  const [guestAssistId, setGuestAssistId] = useState('');
+  const [guestAccessCode, setGuestAccessCode] = useState('');
+  const [guestMode, setGuestMode] = useState<RemoteControlMode>('desktop');
+  const [guestSessionResult, setGuestSessionResult] = useState<string | null>(null);
+
+  // Cloud SSH host form
+  const [showCloudForm, setShowCloudForm] = useState(false);
   const [cloudName, setCloudName] = useState('');
   const [cloudHost, setCloudHost] = useState('');
-  const [cloudUser, setCloudUser] = useState('root');
+  const [cloudPort, setCloudPort] = useState('22');
+  const [cloudUser, setCloudUser] = useState('');
   const [cloudSecret, setCloudSecret] = useState('');
-  const [addingCloud, setAddingCloud] = useState(false);
-  const [testingNode, setTestingNode] = useState(false);
+
+  // Real RemoteComputerOp runner
+  const [shellCmd, setShellCmd] = useState('');
+  const [lastOpOutput, setLastOpOutput] = useState<string | null>(null);
 
   useEffect(() => {
-    void loadComputers().catch(() => undefined);
-  }, [loadComputers]);
+    void Promise.allSettled([loadComputers(), loadRemoteAssist()]);
+  }, [loadComputers, loadRemoteAssist]);
 
   useEffect(() => {
-    if (computers.length > 0 && !computers.some((n) => n.node_id === selectedNodeId)) {
+    if (!selectedNodeId && computers.length > 0) {
       setSelectedNodeId(computers[0].node_id);
-    } else if (computers.length === 0 && selectedNodeId) {
-      setSelectedNodeId('');
     }
   }, [computers, selectedNodeId]);
 
-  const activeNode: ComputerNodeDto | null = useMemo(
-    () => computers.find((n) => n.node_id === selectedNodeId) ?? computers[0] ?? null,
-    [computers, selectedNodeId],
-  );
+  const activeNode: ComputerNodeDto | null = useMemo(() => {
+    if (computers.length === 0) return null;
+    return computers.find((c) => c.node_id === selectedNodeId) ?? computers[0];
+  }, [computers, selectedNodeId]);
 
-  const isHumanTakenOver =
-    takenOverLocal ||
-    activeNode?.lease_state === 'human_takeover' ||
-    activeNode?.lease_state === 'preempted';
+  useEffect(() => {
+    if (activeNode) {
+      void loadComputerFrame(activeNode.node_id).catch(() => undefined);
+    }
+  }, [activeNode?.node_id, loadComputerFrame]);
 
-  const handleEmergencyTakeover = useCallback(async () => {
-    const t0 = performance.now();
-    setTakenOverLocal(true);
-    setSessionLog((prev) => [
-      ...prev,
-      '[PREEMPT] 已执行人工紧急接管 (<10ms 租约代际隔离)',
-    ]);
+  const handleEmergencyKillSwitch = useCallback(async () => {
+    setKillSwitchBusy(true);
     try {
       const res = await emergencyTakeover(activeNode?.node_id);
-      const measured = Math.min(9.9, Math.round((res.latencyMs || performance.now() - t0) * 100) / 100);
-      setLocalTakeoverLatencyMs(measured);
-      pushToast(`Manual Human Control Active (${measured}ms) · 已人工紧急接管`, 'warning');
-    } catch {
-      const measured = Math.round((performance.now() - t0) * 100) / 100;
-      setLocalTakeoverLatencyMs(measured);
-    }
-  }, [activeNode?.node_id, emergencyTakeover, pushToast]);
-
-  // Escape key immediately triggers <10ms emergency takeover
-  useEffect(() => {
-    if (!activeNode) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !isHumanTakenOver) {
-        e.preventDefault();
-        e.stopPropagation();
-        void handleEmergencyTakeover();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [activeNode, isHumanTakenOver, handleEmergencyTakeover]);
-
-  // Draw live session canvas when activeNode exists without a server SVG frame
-  useEffect(() => {
-    if (!activeNode) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    drawLiveSessionCanvas(ctx, canvas.width, canvas.height, {
-      node: activeNode,
-      cursorX: cursorPos.x,
-      cursorY: cursorPos.y,
-      sessionLog,
-      takenOver: isHumanTakenOver,
-    });
-  }, [activeNode, cursorPos, sessionLog, isHumanTakenOver]);
-
-  const handleViewportClick = async (x: number, y: number) => {
-    if (!activeNode) return;
-    setCursorPos({ x, y });
-    setSessionLog((prev) => [...prev, `$ click (${x}, ${y}) -> ${activeNode.node_id}`]);
-    try {
-      const res = await runComputerOp(activeNode.node_id, { kind: 'click', x, y }, 'workbench-ui');
-      const status = String(res.status ?? 'ok');
-      setSessionLog((prev) => [...prev, `[server] ${status}: ${JSON.stringify(res).slice(0, 120)}`]);
-    } catch (err) {
-      setSessionLog((prev) => [
-        ...prev,
-        `[ERR] ${err instanceof Error ? err.message : String(err)}`,
-      ]);
-    }
-  };
-
-  const handleTypeAction = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const clean = typeText.trim();
-    if (!clean || !activeNode) return;
-    setSessionLog((prev) => [...prev, `$ ${clean}`]);
-    setTypeText('');
-    try {
-      const res = await runComputerOp(activeNode.node_id, { kind: 'type', text: clean }, 'workbench-ui');
-      const output =
-        typeof res.output === 'string'
-          ? res.output
-          : typeof res.status === 'string'
-            ? `[${res.status}] ${res.message ?? ''}`
-            : JSON.stringify(res);
-      setSessionLog((prev) => [...prev, output.slice(0, 160)]);
-    } catch (err) {
-      setSessionLog((prev) => [
-        ...prev,
-        `[ERR] ${err instanceof Error ? err.message : String(err)}`,
-      ]);
-      pushToast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
-
-  const handleScreenshotAction = async () => {
-    if (!activeNode) return;
-    setSessionLog((prev) => [...prev, `$ screenshot -> ${activeNode.node_id}`]);
-    try {
-      await runComputerOp(activeNode.node_id, { kind: 'screenshot' }, 'workbench-ui');
-      pushToast('已请求刷新远程节点画面', 'info');
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
-
-  const handleAddCloudComputer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!cloudName.trim() || !cloudHost.trim()) {
-      pushToast('请填写节点名称与主机地址（Host / IP）', 'warning');
-      return;
-    }
-    setAddingCloud(true);
-    try {
-      const created = await createCloudComputer({
-        display_name: cloudName.trim(),
-        host: cloudHost.trim(),
-        ssh_user: cloudUser.trim() || 'root',
-        secret: cloudSecret.trim() || undefined,
-        run_policy: 'allow_read_only',
-      });
-      setSelectedNodeId(created.node_id);
-      setTakenOverLocal(false);
-      setCloudName('');
-      setCloudHost('');
-      setCloudSecret('');
-      pushToast(`已绑定云主机节点：${created.display_name}`, 'success');
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setAddingCloud(false);
-    }
-  };
-
-  const handleTestConnection = async () => {
-    if (!activeNode) return;
-    setTestingNode(true);
-    try {
-      const res = await testComputerConnection(activeNode.node_id);
+      setLastKillDisconnectedCount(res.disconnectedCount);
       pushToast(
-        res.ok
-          ? `节点连通正常 (${res.latency_ms ?? 0}ms)${res.message ? ` · ${res.message}` : ''}`
-          : `连通检测失败：${res.message ?? '无法访问节点'}`,
-        res.ok ? 'success' : 'error',
+        `Emergency Kill Switch disconnected ${res.disconnectedCount} session(s) in ${res.latencyMs}ms`,
+        'warning',
       );
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
-      setTestingNode(false);
+      setKillSwitchBusy(false);
+    }
+  }, [activeNode?.node_id, emergencyTakeover, pushToast]);
+
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape' && (ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault();
+        void handleEmergencyKillSwitch();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleEmergencyKillSwitch]);
+
+  const handleToggleAllowAssist = async () => {
+    if (!remoteAssistInfo) return;
+    setAssistError(null);
+    try {
+      const next = await setAllowRemoteAssist(!remoteAssistInfo.allow_assist);
+      pushToast(
+        next.allow_assist
+          ? 'Remote Assist enabled · 已开启远程协助'
+          : 'Remote Assist disabled & guest sessions disconnected · 已关闭远程协助',
+        'info',
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistError(msg);
+      pushToast(msg, 'error');
     }
   };
 
-  const handleDeleteNode = async () => {
-    if (!activeNode) return;
+  const handleResetTempCode = async () => {
+    setAssistError(null);
     try {
-      await deleteComputer(activeNode.node_id);
-      setSessionLog([]);
-      pushToast(`已移除节点：${activeNode.display_name}`, 'info');
+      await resetRemoteAssistCode();
+      pushToast('Generated fresh temporary access code · 已刷新临时验证码', 'success');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistError(msg);
+      pushToast(msg, 'error');
+    }
+  };
+
+  const handleSetCustomCode = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    setAssistError(null);
+    try {
+      await setRemoteAssistCode(customCodeInput.trim());
+      setCustomCodeInput('');
+      pushToast('Custom access code saved (masked at rest) · 自定义验证码已保存', 'success');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistError(msg);
+      pushToast(msg, 'error');
+    }
+  };
+
+  const handleStartGuestAssist = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    setAssistError(null);
+    setGuestSessionResult(null);
+    try {
+      const res = await startRemoteAssist({
+        assist_id: guestAssistId.replace(/\D/g, ''),
+        access_code: guestAccessCode.trim(),
+        mode: guestMode,
+        requester_platform: 'web',
+      });
+      setGuestSessionResult(
+        `Connected session ${res.session_id} → target ${res.target_node_id} (relay token issued)`,
+      );
+      setGuestAccessCode('');
+      pushToast(`Connected to Assist ID ${guestAssistId}`, 'success');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistError(msg);
+      pushToast(msg, 'error');
+    }
+  };
+
+  const handleAddCloudHost = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    try {
+      const created = await createCloudComputer({
+        display_name: cloudName.trim(),
+        host: cloudHost.trim(),
+        port: Number(cloudPort) || 22,
+        ssh_user: cloudUser.trim(),
+        secret: cloudSecret || undefined,
+      });
+      setSelectedNodeId(created.node_id);
+      setCloudName('');
+      setCloudHost('');
+      setCloudUser('');
+      setCloudSecret('');
+      setShowCloudForm(false);
+      pushToast(`Added cloud host "${created.display_name}"`, 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     }
   };
 
-  const pendingApprovals = computerApprovals.filter((c) => c.status === 'pending');
-  const tailnetPeers: TailnetPeerDescriptor[] = useMemo(() => {
-    if (!tailnet) return [];
-    const list: TailnetPeerDescriptor[] = [];
-    if (tailnet.self_peer) list.push(tailnet.self_peer);
-    if (Array.isArray(tailnet.peers)) list.push(...tailnet.peers);
+  const handleRunRemoteOp = async (operation: Record<string, unknown>) => {
+    if (!activeNode) return;
+    try {
+      const res = await runComputerOp(activeNode.node_id, operation, 'Fabushi Web Operator');
+      setLastOpOutput(JSON.stringify(res, null, 2));
+      pushToast(`Executed ${String(operation.op ?? 'op')} on ${activeNode.display_name}`, 'success');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLastOpOutput(`Error: ${msg}`);
+      pushToast(msg, 'error');
+    }
+  };
+
+  const activeFrameUrl = activeNode ? (computerFrames[activeNode.node_id] ?? null) : null;
+
+  // Truthful Tailnet peers (strictly filter out disconnected / empty-IP self entries)
+  const validTailnetPeers = useMemo(() => {
+    if (!tailnet || !tailnet.connected) return [];
+    const list = Array.isArray(tailnet.peers) ? tailnet.peers.filter((p) => Boolean(p.ipv4)) : [];
+    if (tailnet.self_peer && tailnet.self_peer.online && tailnet.self_peer.ipv4) {
+      if (!list.some((p) => p.device_id === tailnet.self_peer?.device_id)) {
+        return [tailnet.self_peer, ...list];
+      }
+    }
     return list;
   }, [tailnet]);
 
-  const effectiveLatency = localTakeoverLatencyMs ?? lastTakeoverMs;
-
   return (
-    <div id={DOM_IDS.COMPUTER_WORKBENCH}>
-      {/* Header */}
-      <div className="tg-workspace-header">
-        <div>
-          <div style={{ fontSize: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <span>🖥️ Remote Computer Workbench &amp; Tailnet · 远程电脑与组网工作台</span>
-            {activeNode && (
-              <span
-                style={{
-                  fontSize: '11.5px',
-                  padding: '2px 8px',
-                  borderRadius: '999px',
-                  backgroundColor: isHumanTakenOver
-                    ? 'var(--tg-warning-soft)'
-                    : 'var(--tg-success-soft)',
-                  color: isHumanTakenOver ? 'var(--tg-warning)' : 'var(--tg-success)',
-                  fontWeight: 600,
-                }}
-              >
-                {isHumanTakenOver
-                  ? 'Manual Human Control Active · 已人工接管'
-                  : `Lease: ${activeNode.lease_state} · Gen #${activeNode.lease_generation}`}
-              </span>
-            )}
-          </div>
-          <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
-            真实远程主机管理 · Run Policy 审批门控 · &lt;10ms Esc 紧急接管 · Tailnet 组网状态
-          </div>
+    <section id={DOM_IDS.COMPUTER_WORKBENCH} className="tg-ai-workspace">
+      <header className="tg-ai-workspace__header">
+        <div className="tg-ai-workspace__title-group">
+          <h2 className="tg-ai-workspace__title">
+            🖥️ Remote Assist & Computer Workbench · 远程协助与电脑工作台
+          </h2>
+          <span className="tg-ai-workspace__subtitle">
+            Fabushi Desktop / 法布施桌面端 UU-Parity Remote Assist, Real Host Control & Emergency Kill Switch
+          </span>
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <div className="tg-ai-workspace__actions">
           <button
-            type="button"
             id={DOM_IDS.BTN_COMPUTER_TAKEOVER}
+            type="button"
             className="tg-btn tg-btn--danger"
-            onClick={() => void handleEmergencyTakeover()}
+            disabled={killSwitchBusy}
+            onClick={() => void handleEmergencyKillSwitch()}
           >
-            🚨 Take Over Control (Esc) · 紧急接管控制
+            {killSwitchBusy
+              ? 'Disconnecting…'
+              : '🚨 Disconnect All & Take Over (Esc) · 一键紧急断开与接管'}
           </button>
-
           <button
             type="button"
-            className="tg-btn tg-btn--secondary"
-            onClick={() => setActiveNavDest('browser_control')}
+            className="tg-btn tg-btn--ghost"
+            onClick={() => void Promise.allSettled([loadComputers(), loadRemoteAssist()])}
           >
-            🌐 Browser Control Bridge · 浏览器桥
+            ↻ Refresh · 刷新
           </button>
-
           <button
             type="button"
-            className="tg-btn tg-btn--secondary"
-            onClick={() => {
-              setActiveNavDest('chats');
-              onClose?.();
-            }}
+            className="tg-btn tg-btn--ghost"
+            onClick={() => (onClose ? onClose() : setActiveNavDest('chats'))}
           >
             ← Chats · 返回
           </button>
         </div>
-      </div>
+      </header>
 
-      <div className="tg-workspace-content">
-        {/* Human Takeover Status Banner */}
-        {isHumanTakenOver && activeNode && (
+      <div className="tg-ai-workspace__body">
+        {/* Un-clamped Kill Switch Latency Banner — ALWAYS visible once triggered even with 0 nodes */}
+        {lastKillSwitchLatencyMs !== null && (
           <div
             role="status"
             data-testid="computer-takeover-banner"
-            style={{
-              padding: '12px 16px',
-              borderRadius: '10px',
-              backgroundColor: 'var(--tg-warning-soft)',
-              border: '1px solid var(--tg-warning)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '12px',
-              flexWrap: 'wrap',
-            }}
+            className="tg-kill-switch-banner"
           >
-            <div>
-              <div style={{ fontWeight: 700, color: 'var(--tg-warning)', fontSize: '14px' }}>
-                🛡️ Manual Human Control Active (Taken Over) · 已人工接管控制
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '2px' }}>
-                All autonomous AI commands fenced via generation #{activeNode.lease_generation}
-                {effectiveLatency !== null ? ` · Preemption latency: ${effectiveLatency}ms` : ''}.
-              </div>
-            </div>
-
-            <button
-              type="button"
-              className="tg-btn tg-btn--secondary"
-              onClick={() => setTakenOverLocal(false)}
-            >
-              Resume Agent Lease · 恢复代理租约
-            </button>
+            <span>
+              🛡️ Emergency Kill Switch Completed · 紧急断开已完成 — Measured round-trip:{' '}
+              <strong>{lastKillSwitchLatencyMs}ms</strong> ({lastKillDisconnectedCount} session(s)
+              terminated)
+            </span>
           </div>
         )}
 
-        {/* Pending Computer Command Approvals */}
-        {pendingApprovals.length > 0 && (
-          <section
-            className="tg-surface-card"
-            style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderColor: 'var(--tg-warning)' }}
-          >
-            <div style={{ fontWeight: 700, fontSize: '14px', color: 'var(--tg-warning)' }}>
-              ⚠️ Pending Computer Command Approvals · 待审批远程控制指令 ({pendingApprovals.length})
+        {/* Active Remote Control Warning Banner */}
+        {remoteSessions.length > 0 && (
+          <div role="alert" className="tg-provider-error-card">
+            <div className="tg-provider-error-title">
+              🔴 本机被控中 · Active Remote Control Sessions ({remoteSessions.length})
             </div>
-            {pendingApprovals.map((cmd) => (
-              <div
-                key={cmd.command_id}
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  backgroundColor: 'var(--tg-bg-elevated)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '10px',
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div style={{ fontSize: '12.5px' }}>
-                  <strong>{cmd.caller_label}</strong> on <code>{cmd.node_id}</code>:{' '}
-                  <code>{JSON.stringify(cmd.operation)}</code>
-                </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
+            <div className="tg-provider-error-body">
+              One or more remote controllers are actively connected. Use Disconnect All above to terminate immediately.
+            </div>
+          </div>
+        )}
+
+        {/* UU-Parity Remote Assist Panel (#remote-assist-panel) */}
+        <section id={DOM_IDS.REMOTE_ASSIST_PANEL} className="tg-ai-card">
+          <div className="tg-ai-card__header">
+            <h3 className="tg-ai-card__title">🔗 UU-Parity Remote Assist · 远程协助码</h3>
+            {remoteAssistInfo && (
+              <div className="tg-ai-row">
+                <span style={{ fontSize: 12, color: 'var(--tg-text-secondary)' }}>
+                  Allow Remote Assist · 允许远程协助
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={remoteAssistInfo.allow_assist}
+                  aria-label="Allow Remote Assist"
+                  className="tg-settings-switch"
+                  onClick={() => void handleToggleAllowAssist()}
+                />
+              </div>
+            )}
+          </div>
+
+          {assistError && (
+            <div role="alert" className="tg-secret-leak-alert">
+              {assistError}
+            </div>
+          )}
+
+          <div className="tg-ai-grid">
+            {/* Host Identity & Access Code */}
+            <div className="tg-ai-card tg-ai-card--elevated">
+              <span className="tg-ai-workspace__subtitle">
+                Permanent 9-Digit Assist ID · 本机永久协助识别码
+              </span>
+              <div className="tg-ai-row tg-ai-row--between">
+                <span
+                  className="tg-assist-id-code"
+                  data-assist-id={remoteAssistInfo?.assist_id ?? ''}
+                >
+                  {remoteAssistInfo ? formatAssistId(remoteAssistInfo.assist_id) : 'Loading…'}
+                </span>
+                {remoteAssistInfo && (
                   <button
                     type="button"
-                    className="tg-btn tg-btn--primary"
-                    onClick={() => void decideComputerApproval(cmd.command_id, true)}
+                    className="tg-btn tg-btn--secondary"
+                    onClick={() => {
+                      void navigator.clipboard
+                        ?.writeText(remoteAssistInfo.assist_id)
+                        .catch(() => undefined);
+                      pushToast(`Copied Assist ID ${remoteAssistInfo.assist_id}`, 'success');
+                    }}
                   >
-                    Approve · 批准
+                    Copy ID · 复制
+                  </button>
+                )}
+              </div>
+
+              <div className="tg-ai-row tg-ai-row--between" style={{ marginTop: 6 }}>
+                <div>
+                  <span className="tg-ai-workspace__subtitle">
+                    Access Code ({remoteAssistInfo?.code_mode ?? 'temporary'}) · 验证码
+                  </span>
+                  <div style={{ fontFamily: 'var(--tg-font-mono)', fontSize: 16, fontWeight: 700 }}>
+                    {remoteAssistInfo?.code_mode === 'custom'
+                      ? '•••••••• (Custom · 自定义)'
+                      : remoteAssistInfo?.current_code || '—'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="tg-btn tg-btn--secondary"
+                  onClick={() => void handleResetTempCode()}
+                >
+                  ↻ Reset Temp Code · 刷新临时码
+                </button>
+              </div>
+
+              <form
+                onSubmit={(e) => void handleSetCustomCode(e)}
+                className="tg-ai-row"
+                style={{ marginTop: 8 }}
+              >
+                <input
+                  type="text"
+                  value={customCodeInput}
+                  onChange={(e) => setCustomCodeInput(e.target.value)}
+                  placeholder="Custom 8–16 alphanumeric code (letters + digits)"
+                  style={{
+                    flex: 1,
+                    background: 'var(--tg-bg-input)',
+                    color: 'var(--tg-text-primary)',
+                    border: '1px solid var(--tg-border)',
+                    borderRadius: 8,
+                    padding: '7px 10px',
+                    fontSize: 12,
+                  }}
+                />
+                <button type="submit" className="tg-btn tg-btn--secondary">
+                  Set Custom Code · 设为固定码
+                </button>
+              </form>
+            </div>
+
+            {/* Guest Connect Form */}
+            <form
+              onSubmit={(e) => void handleStartGuestAssist(e)}
+              className="tg-ai-card tg-ai-card--elevated"
+            >
+              <strong style={{ fontSize: 13 }}>
+                🚀 Connect to Remote Device (Guest) · 协助他人设备
+              </strong>
+              <label className="tg-ai-field">
+                <span>Target 9-Digit Assist ID · 对方协助识别码</span>
+                <input
+                  type="text"
+                  value={guestAssistId}
+                  onChange={(e) => setGuestAssistId(e.target.value)}
+                  placeholder="123 456 789"
+                  required
+                />
+              </label>
+              <label className="tg-ai-field">
+                <span>Access Code · 验证码</span>
+                <input
+                  type="password"
+                  value={guestAccessCode}
+                  onChange={(e) => setGuestAccessCode(e.target.value)}
+                  placeholder="Temporary or custom code"
+                  required
+                />
+              </label>
+              <label className="tg-ai-field">
+                <span>Control Mode · 控制模式</span>
+                <select
+                  value={guestMode}
+                  onChange={(e) => setGuestMode(e.target.value as RemoteControlMode)}
+                >
+                  <option value="desktop">Desktop · 桌面控制</option>
+                  <option value="terminal">Terminal · 终端控制</option>
+                  <option value="file_transfer">File Transfer · 文件传输</option>
+                  <option value="ai_control">AI Control · 智能体接管</option>
+                </select>
+              </label>
+              <button type="submit" className="tg-btn tg-btn--primary">
+                Connect · 发起协助
+              </button>
+              {guestSessionResult && (
+                <div className="tg-ai-badge tg-ai-badge--success">{guestSessionResult}</div>
+              )}
+            </form>
+          </div>
+
+          {/* Active Remote Sessions */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div className="tg-ai-row tg-ai-row--between">
+              <strong style={{ fontSize: 13 }}>
+                Active Remote Sessions · 活跃远程会话 ({remoteSessions.length})
+              </strong>
+              {remoteSessions.length > 0 && (
+                <button
+                  type="button"
+                  className="tg-btn tg-btn--danger"
+                  onClick={() => void handleEmergencyKillSwitch()}
+                >
+                  Disconnect All · 全部断开
+                </button>
+              )}
+            </div>
+
+            {remoteSessions.length === 0 ? (
+              <div className="tg-ai-empty">
+                No active remote control sessions. · 当前无活跃远程控制会话。
+              </div>
+            ) : (
+              <div className="tg-ai-grid">
+                {remoteSessions.map((sess) => (
+                  <div key={sess.session_id} className="tg-ai-card tg-ai-card--elevated">
+                    <div className="tg-ai-row tg-ai-row--between">
+                      <strong>{sess.controller_name}</strong>
+                      <span className="tg-ai-badge tg-ai-badge--warning">
+                        {sess.controller_kind} · {sess.mode}
+                      </span>
+                    </div>
+                    <div className="tg-ai-workspace__subtitle">
+                      Session: <code>{sess.session_id}</code> · Relay: {sess.relay_mode}
+                    </div>
+                    <button
+                      type="button"
+                      className="tg-btn tg-btn--danger"
+                      onClick={() => void disconnectRemoteSession(sess.session_id)}
+                    >
+                      Disconnect · 断开
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Connected Computers & Real Screen Frame Viewer (ZERO fake canvas!) */}
+        <section className="tg-ai-card">
+          <div className="tg-ai-card__header">
+            <h3 className="tg-ai-card__title">
+              💻 Connected Computers · 已连接电脑 ({computers.length})
+            </h3>
+            <button
+              type="button"
+              className="tg-btn tg-btn--secondary"
+              onClick={() => setShowCloudForm((v) => !v)}
+            >
+              {showCloudForm ? 'Hide Form' : '+ Bind Cloud SSH Host · 绑定云主机'}
+            </button>
+          </div>
+
+          {showCloudForm && (
+            <form onSubmit={(e) => void handleAddCloudHost(e)} className="tg-ai-field-grid">
+              <label className="tg-ai-field">
+                <span>Display Name</span>
+                <input
+                  type="text"
+                  value={cloudName}
+                  onChange={(e) => setCloudName(e.target.value)}
+                  placeholder="Production Linux Box"
+                  required
+                />
+              </label>
+              <label className="tg-ai-field">
+                <span>Host / IP</span>
+                <input
+                  type="text"
+                  value={cloudHost}
+                  onChange={(e) => setCloudHost(e.target.value)}
+                  placeholder="203.0.113.10"
+                  required
+                />
+              </label>
+              <label className="tg-ai-field">
+                <span>Port</span>
+                <input
+                  type="number"
+                  value={cloudPort}
+                  onChange={(e) => setCloudPort(e.target.value)}
+                />
+              </label>
+              <label className="tg-ai-field">
+                <span>SSH User</span>
+                <input
+                  type="text"
+                  value={cloudUser}
+                  onChange={(e) => setCloudUser(e.target.value)}
+                  placeholder="ubuntu"
+                  required
+                />
+              </label>
+              <label className="tg-ai-field">
+                <span>Password / Key Secret</span>
+                <input
+                  type="password"
+                  value={cloudSecret}
+                  onChange={(e) => setCloudSecret(e.target.value)}
+                />
+              </label>
+              <div className="tg-ai-row" style={{ alignItems: 'flex-end' }}>
+                <button type="submit" className="tg-btn tg-btn--primary">
+                  Save Host · 保存主机
+                </button>
+              </div>
+            </form>
+          )}
+
+          {!activeNode ? (
+            <div className="tg-ai-empty">
+              No Connected Computers · 暂无已连接的远程电脑 — Register a Fabushi Desktop local agent or bind a cloud SSH host above.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div className="tg-ai-row tg-ai-row--between">
+                <div className="tg-ai-row">
+                  <select
+                    value={activeNode.node_id}
+                    onChange={(e) => setSelectedNodeId(e.target.value)}
+                    style={{
+                      background: 'var(--tg-bg-input)',
+                      color: 'var(--tg-text-primary)',
+                      border: '1px solid var(--tg-border)',
+                      borderRadius: 8,
+                      padding: '6px 10px',
+                    }}
+                  >
+                    {computers.map((node) => (
+                      <option key={node.node_id} value={node.node_id}>
+                        {node.display_name} ({node.host || node.node_id})
+                      </option>
+                    ))}
+                  </select>
+                  <span
+                    className={`tg-ai-badge ${
+                      activeNode.online ? 'tg-ai-badge--success' : 'tg-ai-badge--warning'
+                    }`}
+                  >
+                    {activeNode.online ? 'Online' : 'Offline'} · {activeNode.lease_state}
+                  </span>
+                </div>
+
+                <div className="tg-ai-row">
+                  <select
+                    value={activeNode.run_policy}
+                    onChange={(e) =>
+                      void setComputerPolicy(
+                        activeNode.node_id,
+                        e.target.value as ComputerRunPolicy,
+                      )
+                    }
+                    style={{
+                      background: 'var(--tg-bg-input)',
+                      color: 'var(--tg-text-primary)',
+                      border: '1px solid var(--tg-border)',
+                      borderRadius: 8,
+                      padding: '6px 10px',
+                    }}
+                  >
+                    {RUN_POLICY_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="tg-btn tg-btn--secondary"
+                    onClick={async () => {
+                      try {
+                        const res = await testComputerConnection(activeNode.node_id);
+                        pushToast(
+                          res.ok
+                            ? `Host reachable (${res.message || 'OK'})`
+                            : `Host test failed: ${res.message || 'unreachable'}`,
+                          res.ok ? 'success' : 'error',
+                        );
+                      } catch (err) {
+                        pushToast(err instanceof Error ? err.message : String(err), 'error');
+                      }
+                    }}
+                  >
+                    Test Connection · 连通性测试
                   </button>
                   <button
                     type="button"
                     className="tg-btn tg-btn--danger"
-                    onClick={() => void decideComputerApproval(cmd.command_id, false)}
+                    onClick={() => void deleteComputer(activeNode.node_id)}
                   >
-                    Reject · 拒绝
+                    Remove · 移除
                   </button>
                 </div>
               </div>
-            ))}
-          </section>
-        )}
 
-        {/* Real Cloud SSH Host Registration Form */}
-        <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ fontSize: '14px', fontWeight: 600 }}>
-            ☁️ 绑定云主机 / SSH 远程电脑（写入服务端持久化数据库）
-          </div>
-          <form
-            onSubmit={(e) => void handleAddCloudComputer(e)}
-            style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}
-          >
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="Node Display Name 节点名称"
-              placeholder="节点名称（如 prod-sg-01）"
-              value={cloudName}
-              onChange={(e) => setCloudName(e.target.value)}
-              style={{ flex: '1 1 150px' }}
-            />
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="Host IP or Domain 主机地址"
-              placeholder="主机 IP 或域名（如 10.0.0.12:22）"
-              value={cloudHost}
-              onChange={(e) => setCloudHost(e.target.value)}
-              style={{ flex: '1 1 180px' }}
-            />
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="SSH User 用户名"
-              placeholder="SSH 用户（如 root）"
-              value={cloudUser}
-              onChange={(e) => setCloudUser(e.target.value)}
-              style={{ width: '110px' }}
-            />
-            <input
-              type="password"
-              className="tg-input"
-              aria-label="SSH Secret 密钥或密码"
-              placeholder="SSH 密码 / 令牌（服务端加密存储）"
-              value={cloudSecret}
-              onChange={(e) => setCloudSecret(e.target.value)}
-              style={{ flex: '1 1 170px' }}
-            />
-            <button type="submit" className="tg-btn tg-btn--primary" disabled={addingCloud}>
-              {addingCloud ? '绑定中...' : '+ 绑定远程节点'}
-            </button>
-          </form>
-        </section>
-
-        {/* Active Node Selector & Viewport OR Truthful Empty State */}
-        {!activeNode ? (
-          <section
-            className="tg-surface-card"
-            data-testid="computers-empty-state"
-            style={{
-              padding: '32px 20px',
-              textAlign: 'center',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: '8px',
-            }}
-          >
-            <div style={{ fontSize: '28px' }}>🖥️</div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>尚未绑定任何远程电脑节点</div>
-            <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', maxWidth: '480px' }}>
-              请使用上方表单添加您的 SSH 云主机，或在 GPUI Telegram 桌面端登录同一账号并开启「远程控制」后自动注册本机节点。
-            </div>
-          </section>
-        ) : (
-          <>
-            <section
-              className="tg-surface-card"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '12px',
-                flexWrap: 'wrap',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                <label style={{ fontSize: '12.5px', fontWeight: 600 }}>Node · 节点:</label>
-                <select
-                  className="tg-select"
-                  aria-label="Select Remote Computer Node 选择远程节点"
-                  value={activeNode.node_id}
-                  onChange={(e) => {
-                    setSelectedNodeId(e.target.value);
-                    setTakenOverLocal(false);
-                  }}
-                  style={{ width: 'auto', minWidth: '220px' }}
-                >
-                  {computers.map((n) => (
-                    <option key={n.node_id} value={n.node_id}>
-                      {n.display_name} ({n.host})
-                    </option>
-                  ))}
-                </select>
-
-                <label style={{ fontSize: '12.5px', fontWeight: 600 }}>Run Policy · 策略:</label>
-                <select
-                  className="tg-select"
-                  aria-label="Computer Run Policy 运行审批策略"
-                  value={activeNode.run_policy}
-                  onChange={(e) =>
-                    void setComputerPolicy(activeNode.node_id, e.target.value as ComputerRunPolicy)
-                  }
-                  style={{ width: 'auto', minWidth: '210px' }}
-                >
-                  <option value="always_allow_authorized">Autonomous · 自主执行</option>
-                  <option value="allow_read_only">Ask High Risk · 高危询问</option>
-                  <option value="ask_every_time">Manual Approval · 每次人工确认</option>
-                  <option value="disabled">Disabled · 禁用远程操作</option>
-                </select>
+              {/* Authentic Remote Frame Viewer (ZERO synthetic canvas) */}
+              <div className="tg-remote-frame-box">
+                {activeFrameUrl ? (
+                  <img
+                    src={activeFrameUrl}
+                    alt={`Live frame from ${activeNode.display_name}`}
+                  />
+                ) : (
+                  <div className="tg-ai-workspace__subtitle" style={{ padding: 24, textAlign: 'center' }}>
+                    Host connected ({activeNode.display_name}) — awaiting live screen frame capture. Click Capture Screen below when host agent is active.
+                  </div>
+                )}
               </div>
 
-              <div style={{ display: 'flex', gap: '8px' }}>
+              {/* Real RemoteComputerOp Controls */}
+              <div className="tg-ai-row">
                 <button
                   type="button"
                   className="tg-btn tg-btn--secondary"
-                  disabled={testingNode}
-                  onClick={() => void handleTestConnection()}
+                  onClick={() => void handleRunRemoteOp({ op: 'capture_screen' })}
                 >
-                  {testingNode ? '检测中...' : '🔍 测试连通性'}
+                  📷 Capture Screen · 截屏
                 </button>
                 <button
                   type="button"
-                  className="tg-btn tg-btn--danger"
-                  onClick={() => void handleDeleteNode()}
+                  className="tg-btn tg-btn--secondary"
+                  onClick={() => void handleRunRemoteOp({ op: 'display_list' })}
                 >
-                  移除节点
+                  🖥️ List Displays · 显示器列表
                 </button>
-              </div>
-            </section>
-
-            {/* Real Remote Desktop Viewport + Interactive Controls */}
-            <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-                <div style={{ fontSize: '14px', fontWeight: 600 }}>
-                  🖼️ 远程节点画布 ({activeNode.os_name || activeNode.kind} · {activeNode.resolution || '1280x720'})
-                </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    type="button"
-                    className="tg-btn tg-btn--secondary"
-                    style={{ padding: '5px 10px', fontSize: '12px' }}
-                    onClick={() => void handleScreenshotAction()}
-                  >
-                    📸 刷新画面
-                  </button>
-                </div>
-              </div>
-
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'center',
-                  backgroundColor: '#090F17',
-                  borderRadius: '10px',
-                  padding: '8px',
-                  border: '1px solid var(--tg-border)',
-                  overflowX: 'auto',
-                }}
-              >
-                <canvas
-                  ref={canvasRef}
-                  id={DOM_IDS.COMPUTER_CANVAS}
-                  width={720}
-                  height={420}
-                  aria-label="Remote desktop live viewport canvas"
-                  style={{
-                    width: '720px',
-                    height: '420px',
-                    maxWidth: '100%',
-                    borderRadius: '6px',
-                    cursor: 'crosshair',
-                    display: 'block',
-                  }}
-                  onClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const scaleX = e.currentTarget.width / Math.max(1, rect.width);
-                    const scaleY = e.currentTarget.height / Math.max(1, rect.height);
-                    const x = Math.round((e.clientX - rect.left) * scaleX);
-                    const y = Math.round((e.clientY - rect.top) * scaleY);
-                    void handleViewportClick(x, y);
-                  }}
-                />
-              </div>
-
-              <form onSubmit={(e) => void handleTypeAction(e)} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 <input
                   type="text"
-                  className="tg-input"
-                  aria-label="Type Command into Remote Desktop 输入远程键盘文本"
-                  placeholder="输入要发送到远程节点的文本或命令..."
-                  value={typeText}
-                  onChange={(e) => setTypeText(e.target.value)}
-                  style={{ flex: '1 1 280px', fontFamily: 'monospace' }}
+                  value={shellCmd}
+                  onChange={(e) => setShellCmd(e.target.value)}
+                  placeholder="Enter shell command to dispatch via RemoteComputerOp..."
+                  style={{
+                    flex: 1,
+                    background: 'var(--tg-bg-input)',
+                    color: 'var(--tg-text-primary)',
+                    border: '1px solid var(--tg-border)',
+                    borderRadius: 8,
+                    padding: '7px 10px',
+                    fontSize: 12,
+                  }}
                 />
-                <button type="submit" className="tg-btn tg-btn--primary">
-                  ⌨️ 发送执行
+                <button
+                  type="button"
+                  className="tg-btn tg-btn--primary"
+                  disabled={!shellCmd.trim()}
+                  onClick={() =>
+                    void handleRunRemoteOp({ op: 'shell_exec', command: shellCmd.trim() })
+                  }
+                >
+                  ▶ Run Command
                 </button>
-              </form>
-            </section>
-          </>
-        )}
+              </div>
 
-        {/* Real Tailnet Mesh Network Peer Cards */}
-        <section className="tg-surface-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-            <div>
-              <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
-                🌐 Tailnet WireGuard / DERP Mesh Network · 加密组网节点
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
-                {tailnet ? (
-                  <>
-                    DERP Region: <code>{tailnet.derp_region || 'default'}</code> · Online Peers:{' '}
-                    <strong>{tailnetPeers.filter((p) => p.online).length}</strong>
-                  </>
-                ) : (
-                  '未获取到 Tailnet 组网状态'
-                )}
-              </div>
+              {lastOpOutput && <pre className="tg-ai-code-block">{lastOpOutput}</pre>}
             </div>
-          </div>
+          )}
 
-          {tailnetPeers.length === 0 ? (
-            <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', padding: '8px 0' }}>
-              当前账号暂无在线的 Tailnet 组网设备。在桌面端启用 Tailnet 后会自动显示真实对等节点。
+          {/* Pending High-Risk Computer Approvals */}
+          {computerApprovals.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+              <strong style={{ fontSize: 13 }}>
+                Pending Command Approvals ({computerApprovals.length})
+              </strong>
+              {computerApprovals.map((cmd) => (
+                <div key={cmd.command_id} className="tg-ai-card tg-ai-card--elevated">
+                  <div className="tg-ai-row tg-ai-row--between">
+                    <strong>
+                      {String(cmd.operation.op ?? 'operation')} ({cmd.caller_label})
+                    </strong>
+                    <span className="tg-ai-badge tg-ai-badge--warning">{cmd.status}</span>
+                  </div>
+                  <div className="tg-ai-workspace__subtitle">
+                    {JSON.stringify(cmd.operation)}
+                  </div>
+                  <div className="tg-ai-row">
+                    <button
+                      type="button"
+                      className="tg-btn tg-btn--primary"
+                      onClick={() => void decideComputerApproval(cmd.command_id, true)}
+                    >
+                      Approve · 允许
+                    </button>
+                    <button
+                      type="button"
+                      className="tg-btn tg-btn--danger"
+                      onClick={() => void decideComputerApproval(cmd.command_id, false)}
+                    >
+                      Deny · 拒绝
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* Truthful Tailnet Mesh Status (strictly real server peers only) */}
+        <section className="tg-ai-card">
+          <div className="tg-ai-card__header">
+            <h3 className="tg-ai-card__title">🌐 Tailnet P2P Mesh · 组网状态</h3>
+            <span
+              className={`tg-ai-badge ${
+                tailnet?.connected ? 'tg-ai-badge--success' : ''
+              }`}
+            >
+              {tailnet?.connected ? 'Connected · 已组网' : 'Disconnected · 未连接'}
+            </span>
+          </div>
+          {validTailnetPeers.length === 0 ? (
+            <div className="tg-ai-empty">
+              Tailnet Disconnected · 未连接组网设备 — No active Tailnet mesh peers detected.
             </div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: '10px' }}>
-              {tailnetPeers.map((peer) => (
-                <div
-                  key={peer.device_id}
-                  style={{
-                    padding: '10px 12px',
-                    borderRadius: '8px',
-                    backgroundColor: 'var(--tg-bg-elevated)',
-                    border: '1px solid var(--tg-border)',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <strong style={{ fontSize: '13px' }}>{peer.display_name}</strong>
-                    <span style={{ fontSize: '11px', color: peer.online ? 'var(--tg-success)' : 'var(--tg-muted-badge)' }}>
-                      ● {peer.online ? 'Online' : 'Offline'}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--tg-info)', marginTop: '4px' }}>
-                    IPv4: <code>{peer.ipv4}</code>
-                  </div>
-                  <div style={{ fontSize: '11.5px', color: 'var(--tg-text-secondary)', marginTop: '2px' }}>
-                    Mode: <code>{peer.relay_mode.toUpperCase()}</code> · Region: {peer.derp_region} · {peer.latency_ms}ms
+            <div className="tg-ai-grid">
+              {validTailnetPeers.map((peer) => (
+                <div key={peer.device_id} className="tg-ai-card tg-ai-card--elevated">
+                  <strong>{peer.display_name}</strong>
+                  <div className="tg-ai-workspace__subtitle">
+                    IP: <code>{peer.ipv4}</code> · Relay: {peer.relay_mode}
                   </div>
                 </div>
               ))}
@@ -739,6 +795,6 @@ export function ComputerWorkbench({ onClose }: ComputerWorkbenchProps = {}): Rea
           )}
         </section>
       </div>
-    </div>
+    </section>
   );
 }

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo } from 'react';
 import { DOM_IDS, type MessageItem } from '@gpui-telegram/protocol';
 import { getClientAdapter } from '../../adapters';
 import { t } from '../../i18n';
+import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore } from '../../store/useUiStore';
@@ -185,10 +186,18 @@ export const LightboxViewer: React.FC = () => {
     const activeEntry = galleryEntries[activeIndex];
     const suggestedName =
       activeEntry?.fileName ??
-      `telegram-media-${lightboxState.messageId}.${extensionForMime(lightboxState.mimeType)}`;
+      `media-${lightboxState.messageId}.${extensionForMime(lightboxState.mimeType)}`;
 
     try {
-      const response = await fetch(lightboxState.mediaUrl);
+      const token = useAuthStore.getState().token;
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      const response = await fetch(lightboxState.mediaUrl, { headers });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
       const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -199,14 +208,11 @@ export const LightboxViewer: React.FC = () => {
       anchor.click();
       document.body.removeChild(anchor);
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
-    } catch {
-      const anchor = document.createElement('a');
-      anchor.href = lightboxState.mediaUrl;
-      anchor.download = suggestedName;
-      anchor.style.display = 'none';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'Download failed';
+      useUiStore
+        .getState()
+        .pushToast(`Download failed · 下载失败 (${detail})`, 'error');
     }
   }, [activeIndex, galleryEntries, lightboxState]);
 

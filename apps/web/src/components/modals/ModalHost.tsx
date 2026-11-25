@@ -9,6 +9,7 @@ import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore, type ModalId } from '../../store/useUiStore';
 import { ContactsModal } from './ContactsModal';
+import { CreateBotModal } from './CreateBotModal';
 import { CreateChannelModal } from './CreateChannelModal';
 import { CreateGroupModal } from './CreateGroupModal';
 import { CreateInvoiceModal } from './CreateInvoiceModal';
@@ -359,6 +360,7 @@ export const ModalHost: React.FC = () => {
   const isOwnedModalOpen =
     modalKey === 'create_group' ||
     modalKey === 'create_channel' ||
+    modalKey === 'create_bot' ||
     modalKey === 'contacts' ||
     modalKey === 'forward_messages' ||
     modalKey === 'create_poll' ||
@@ -432,6 +434,8 @@ export const ModalHost: React.FC = () => {
       return <CreateGroupModal onClose={closeModal} />;
     case 'create_channel':
       return <CreateChannelModal onClose={closeModal} />;
+    case 'create_bot':
+      return <CreateBotModal onClose={closeModal} />;
     case 'contacts':
       return <ContactsModal onClose={closeModal} />;
     case 'forward_messages':

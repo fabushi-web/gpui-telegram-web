@@ -12,7 +12,7 @@ import {
 } from './components/ai';
 import { AuthScreen, PasscodeLockScreen } from './components/auth';
 import { CallOverlay } from './components/calls';
-import { MainShell } from './components/layout';
+import { GlobalToastBannerFallback, MainShell } from './components/layout';
 import { LeftColumn } from './components/left';
 import {
   InstantViewModal,
@@ -30,7 +30,6 @@ import {
   useChatStore,
   useSettingsStore,
   useUiStore,
-  type ModalId,
 } from './store';
 
 function isEditableElement(target: EventTarget | null): boolean {
@@ -40,71 +39,10 @@ function isEditableElement(target: EventTarget | null): boolean {
   return target.isContentEditable;
 }
 
-const ToastStack: React.FC = () => {
-  const toasts = useUiStore((s) => s.toasts);
-  const dismissToast = useUiStore((s) => s.dismissToast);
-
-  if (toasts.length === 0) return null;
-
-  return (
-    <div
-      className="tg-toast-stack"
-      role="status"
-      aria-live="polite"
-      style={{
-        position: 'fixed',
-        right: '18px',
-        bottom: '18px',
-        zIndex: 'var(--tg-z-toast, 950)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-        maxWidth: 'min(380px, calc(100vw - 36px))',
-        pointerEvents: 'none',
-      }}
-    >
-      {toasts.map((toast) => {
-        const borderColor =
-          toast.kind === 'error'
-            ? 'var(--tg-danger)'
-            : toast.kind === 'success'
-              ? 'var(--tg-success)'
-              : toast.kind === 'warning'
-                ? 'var(--tg-warning)'
-                : 'var(--tg-accent)';
-        return (
-          <div
-            key={toast.id}
-            data-testid="toast-notification"
-            data-toast-kind={toast.kind}
-            onClick={() => dismissToast(toast.id)}
-            style={{
-              pointerEvents: 'auto',
-              cursor: 'pointer',
-              padding: '10px 14px',
-              borderRadius: '10px',
-              backgroundColor: 'var(--tg-bg-elevated)',
-              color: 'var(--tg-text-primary)',
-              border: '1px solid var(--tg-border)',
-              borderLeft: `3px solid ${borderColor}`,
-              boxShadow: 'var(--tg-shadow-lg)',
-              fontSize: '13px',
-              lineHeight: 1.45,
-            }}
-          >
-            {toast.message}
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
 export function App(): React.JSX.Element {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const isAddingAccount = useAuthStore((s) => s.isAddingAccount);
   const isLocked = useAuthStore((s) => s.isLocked);
-  const adapterMode = useAuthStore((s) => s.adapterMode);
 
   const theme = useSettingsStore((s) => s.theme);
   const language = useSettingsStore((s) => s.language);
@@ -125,18 +63,26 @@ export function App(): React.JSX.Element {
     void useAuthStore.getState().hydrateAuth();
   }, []);
 
-  // Bridge custom shortcut modal events across LeftColumn / SettingsPanel / ModalHost
+  // Bridge custom shortcut modal & Magpie Gateway events across SettingsPanel / LeftColumn / ModalHost
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const onOpenShortcuts = (): void => {
       useUiStore.setState({
-        activeModal: 'shortcuts' as unknown as ModalId,
+        activeModal: 'shortcuts',
         modalPayload: { source: 'menu' },
       });
     };
+    const onOpenMagpieGateway = (): void => {
+      useUiStore.getState().closeSettings();
+      useUiStore.getState().setActiveNavDest('hermes');
+    };
     window.addEventListener('gpui:open-shortcuts-modal', onOpenShortcuts);
+    window.addEventListener('gpui:open-shortcuts', onOpenShortcuts);
+    window.addEventListener('gpui:open-magpie-gateway', onOpenMagpieGateway);
     return () => {
       window.removeEventListener('gpui:open-shortcuts-modal', onOpenShortcuts);
+      window.removeEventListener('gpui:open-shortcuts', onOpenShortcuts);
+      window.removeEventListener('gpui:open-magpie-gateway', onOpenMagpieGateway);
     };
   }, []);
 
@@ -145,14 +91,14 @@ export function App(): React.JSX.Element {
     if (typeof document === 'undefined') return;
     const activeChat = activeChatId !== null ? chatsById[activeChatId] : undefined;
     const titlePrefix = activeChat?.title ? `${activeChat.title} · ` : '';
-    document.title = `${titlePrefix}GPUI Telegram Web`;
+    document.title = `${titlePrefix}Fabushi Web v1.6.11`;
     document.documentElement.lang = language === 'zh-CN' ? 'zh-CN' : 'en';
 
     if (!isAuthenticated || isLocked) return;
 
     const timer = setTimeout(() => {
       const statePayload = browserControlAgent.buildStateReportPayload();
-      void getClientAdapter(adapterMode)
+      void getClientAdapter()
         .reportBrowserState({
           ...statePayload,
           theme,
@@ -168,7 +114,6 @@ export function App(): React.JSX.Element {
   }, [
     isAuthenticated,
     isLocked,
-    adapterMode,
     activeChatId,
     activeNavDest,
     theme,
@@ -271,7 +216,7 @@ export function App(): React.JSX.Element {
     return (
       <>
         <AuthScreen />
-        <ToastStack />
+        <GlobalToastBannerFallback />
       </>
     );
   }
@@ -281,7 +226,7 @@ export function App(): React.JSX.Element {
     return (
       <>
         <PasscodeLockScreen />
-        <ToastStack />
+        <GlobalToastBannerFallback />
       </>
     );
   }
@@ -303,7 +248,7 @@ export function App(): React.JSX.Element {
       <MediaEditorModal />
       <InstantViewModal />
       <CallOverlay />
-      <ToastStack />
+      <GlobalToastBannerFallback />
     </MainShell>
   );
 }

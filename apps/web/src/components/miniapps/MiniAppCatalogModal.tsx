@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { MiniAppEntry } from '@gpui-telegram/protocol';
+import { getServerAdapter } from '../../adapters';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useUiStore } from '../../store/useUiStore';
@@ -30,6 +31,9 @@ export function MiniAppCatalogModal({
 
   const [searchQuery, setSearchQuery] = useState('');
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [installedKeys, setInstalledKeys] = useState<Set<string>>(new Set());
+  const [recentApps, setRecentApps] = useState<MiniAppEntry[]>([]);
+  const [togglingInstallKey, setTogglingInstallKey] = useState<string | null>(null);
 
   // Quick @BotFather form state
   const [botDisplayName, setBotDisplayName] = useState('');
@@ -41,10 +45,22 @@ export function MiniAppCatalogModal({
 
   const visible = isOpen !== undefined ? isOpen : activeModal === 'miniapp_catalog';
 
+  const appKey = (app: MiniAppEntry): string =>
+    `${app.bot_username.toLowerCase()}/${app.short_name.toLowerCase()}`;
+
   useEffect(() => {
     if (!visible) return;
+    const server = getServerAdapter();
     void loadMiniApps().catch(() => undefined);
     void loadBots().catch(() => undefined);
+    void server
+      .listInstalledMiniApps()
+      .then((list) => setInstalledKeys(new Set(list.map(appKey))))
+      .catch(() => undefined);
+    void server
+      .listRecentMiniApps()
+      .then((list) => setRecentApps(list))
+      .catch(() => undefined);
   }, [visible, loadMiniApps, loadBots]);
 
   const mergedApps = useMemo(() => {
@@ -78,6 +94,32 @@ export function MiniAppCatalogModal({
       );
     } finally {
       setLaunchingId(null);
+    }
+  };
+
+  const handleToggleInstall = async (app: MiniAppEntry) => {
+    const key = appKey(app);
+    const isInstalled = installedKeys.has(key);
+    setTogglingInstallKey(key);
+    try {
+      const server = getServerAdapter();
+      if (isInstalled) {
+        await server.uninstallMiniApp(app.bot_username, app.short_name);
+        setInstalledKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+        pushToast(`Uninstalled ${app.title} · 已卸载`, 'info');
+      } else {
+        await server.installMiniApp(app.bot_username, app.short_name);
+        setInstalledKeys((prev) => new Set(prev).add(key));
+        pushToast(`Installed ${app.title} · 已安装`, 'success');
+      }
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setTogglingInstallKey(null);
     }
   };
 
@@ -121,7 +163,7 @@ export function MiniAppCatalogModal({
       className="tg-modal-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label="Telegram Mini Apps Catalog & @BotFather 小程序中心"
+      aria-label="Fabushi Mini Apps Catalog & @BotFather 小程序中心"
       onClick={(e) => {
         if (e.target === e.currentTarget) {
           handleClose();
@@ -138,7 +180,7 @@ export function MiniAppCatalogModal({
               🧩 Mini Apps Center &amp; @BotFather · 小程序与机器人中心
             </div>
             <div style={{ fontSize: '12px', fontWeight: 400, color: 'var(--tg-text-secondary)' }}>
-              Sandboxed Telegram.WebApp v8.0 Host · Rust/WASM 3D Globe &amp; Custom /newapp Apps
+              Fabushi Web v1.6.11 · WebApp v8.0 + WebMCP Host · Rust/WASM 3D Globe &amp; External Mini Apps
             </div>
           </div>
           <button
@@ -164,102 +206,138 @@ export function MiniAppCatalogModal({
             />
           </div>
 
+          {/* Recent Mini Apps Strip */}
+          {recentApps.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--tg-text-secondary)' }}>
+                Recent Mini Apps · 最近使用 ({recentApps.length})
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {recentApps.map((app) => (
+                  <button
+                    key={`recent_${appKey(app)}`}
+                    type="button"
+                    className="tg-btn tg-btn--secondary"
+                    style={{ padding: '5px 10px', fontSize: '12px' }}
+                    onClick={() => void handleLaunch(app)}
+                  >
+                    {app.icon_emoji || '🧩'} {app.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Mini Apps Grid */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--tg-text-secondary)' }}>
               Available Mini Apps · 可用小程序 ({mergedApps.length})
             </div>
 
-            {mergedApps.map((app) => (
-              <div
-                key={`${app.bot_username}_${app.short_name}`}
-                data-miniapp-id={app.app_id}
-                data-miniapp-short-name={app.short_name}
-                className="tg-surface-card"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '12px',
-                  padding: '12px 14px',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
-                  <div
-                    style={{
-                      width: '44px',
-                      height: '44px',
-                      borderRadius: '12px',
-                      backgroundColor: 'var(--tg-accent-soft)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: '22px',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {app.icon_emoji || '🧩'}
+            {mergedApps.map((app) => {
+              const key = appKey(app);
+              const isInstalled = installedKeys.has(key);
+              return (
+                <div
+                  key={`${app.bot_username}_${app.short_name}`}
+                  data-miniapp-id={app.app_id}
+                  data-miniapp-short-name={app.short_name}
+                  className="tg-surface-card"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '12px',
+                    padding: '12px 14px',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+                    <div
+                      style={{
+                        width: '44px',
+                        height: '44px',
+                        borderRadius: '12px',
+                        backgroundColor: 'var(--tg-accent-soft)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '22px',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {app.icon_emoji || '🧩'}
+                    </div>
+
+                    <div style={{ minWidth: 0 }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          flexWrap: 'wrap',
+                          fontWeight: 600,
+                          fontSize: '14px',
+                        }}
+                      >
+                        <span>{app.title}</span>
+                        {app.has_wasm && (
+                          <span
+                            style={{
+                              fontSize: '10.5px',
+                              padding: '1px 6px',
+                              borderRadius: '999px',
+                              backgroundColor: 'var(--tg-info-soft)',
+                              color: 'var(--tg-info)',
+                            }}
+                          >
+                            WASM 3D
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '2px' }}>
+                        {app.description}
+                      </div>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          fontSize: '11.5px',
+                          color: 'var(--tg-text-muted)',
+                          marginTop: '4px',
+                        }}
+                      >
+                        <span>@{app.bot_username}</span>
+                        <span>·</span>
+                        <code>{app.short_name}</code>
+                        <span>·</span>
+                        <span>{app.category}</span>
+                      </div>
+                    </div>
                   </div>
 
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        flexWrap: 'wrap',
-                        fontWeight: 600,
-                        fontSize: '14px',
-                      }}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      className="tg-btn tg-btn--secondary"
+                      disabled={togglingInstallKey === key}
+                      onClick={() => void handleToggleInstall(app)}
+                      style={{ padding: '6px 10px', fontSize: '12px' }}
                     >
-                      <span>{app.title}</span>
-                      {app.has_wasm && (
-                        <span
-                          style={{
-                            fontSize: '10.5px',
-                            padding: '1px 6px',
-                            borderRadius: '999px',
-                            backgroundColor: 'var(--tg-info-soft)',
-                            color: 'var(--tg-info)',
-                          }}
-                        >
-                          WASM 3D
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)', marginTop: '2px' }}>
-                      {app.description}
-                    </div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        fontSize: '11.5px',
-                        color: 'var(--tg-text-muted)',
-                        marginTop: '4px',
-                      }}
+                      {isInstalled ? 'Uninstall · 卸载' : 'Install · 安装'}
+                    </button>
+                    <button
+                      type="button"
+                      className="tg-btn tg-btn--primary"
+                      disabled={launchingId === app.app_id}
+                      onClick={() => void handleLaunch(app)}
                     >
-                      <span>@{app.bot_username}</span>
-                      <span>·</span>
-                      <code>{app.short_name}</code>
-                      <span>·</span>
-                      <span>{app.category}</span>
-                    </div>
+                      {launchingId === app.app_id ? 'Launching...' : 'Launch · 打开'}
+                    </button>
                   </div>
                 </div>
-
-                <button
-                  type="button"
-                  className="tg-btn tg-btn--primary"
-                  disabled={launchingId === app.app_id}
-                  onClick={() => void handleLaunch(app)}
-                  style={{ flexShrink: 0 }}
-                >
-                  {launchingId === app.app_id ? 'Launching...' : 'Launch · 打开'}
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Quick @BotFather Creator */}

@@ -254,7 +254,7 @@ export function exportAndDownloadChat(
         content = buildChatExportJson(chat, messages, peers);
       }
     }
-    const fileName = `telegram-export-${slug}.json`;
+    const fileName = `fabushi-export-${slug}.json`;
     const mimeType = 'application/json;charset=utf-8';
     triggerFileDownload(content, fileName, mimeType);
     return { content, fileName, mimeType };
@@ -264,7 +264,7 @@ export function exportAndDownloadChat(
     preRenderedServerPayload && preRenderedServerPayload.includes('<html')
       ? preRenderedServerPayload
       : buildChatExportHtml(chat, messages, peers);
-  const fileName = `telegram-export-${slug}.html`;
+  const fileName = `fabushi-export-${slug}.html`;
   const mimeType = 'text/html;charset=utf-8';
   triggerFileDownload(content, fileName, mimeType);
   return { content, fileName, mimeType };

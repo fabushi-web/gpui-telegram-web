@@ -4,3 +4,4 @@ export * from './chatExport';
 export * from './webrtcManager';
 export * from './e2eeClient';
 export * from './browserControlAgent';
+export * from './splitKeyCrypto';

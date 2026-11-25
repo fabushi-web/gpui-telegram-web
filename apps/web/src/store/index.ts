@@ -50,6 +50,7 @@ registerUiEscapeHooks({
     return false;
   },
   closeMiniApp: () => {
+    useUiStore.getState().setMiniAppPipMinimized(false);
     useAiWorkspaceStore.getState().closeMiniApp();
   },
 });

@@ -1,3 +1,10 @@
+export { AppleComposeStage } from './AppleComposeStage';
+export {
+  BotDescriptionCard,
+  BotPreStartBar,
+  type BotDescriptionCardProps,
+  type BotPreStartBarProps,
+} from './BotPreStartBar';
 export { ChatHeader, type ChatHeaderProps } from './ChatHeader';
 export { InChatSearchBar, type InChatSearchBarProps } from './InChatSearchBar';
 export { PinnedBanner, type PinnedBannerProps } from './PinnedBanner';

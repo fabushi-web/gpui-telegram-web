@@ -24,7 +24,7 @@ const KEYBOARD_SHORTCUTS: readonly ShortcutRow[] = [
   { keys: 'Ctrl+,', descEn: 'Open Settings Slide-Stack', descZh: '打开设置抽屉面板' },
   { keys: 'Ctrl+0', descEn: 'Open Saved Messages Vault', descZh: '直达个人云端收藏夹' },
   { keys: 'Ctrl+J', descEn: 'Open Hermes AI Studio', descZh: '打开 Hermes 智能工作台' },
-  { keys: 'Ctrl+N', descEn: 'Create New Group', descZh: '新建群组会话' },
+  { keys: 'Ctrl+N', descEn: 'New Message (Inline Compose Stage)', descZh: '新建消息（内联写信面板）' },
   { keys: 'Ctrl+P', descEn: 'Next Unread / Pinned Chat', descZh: '跳转置顶或下一会话' },
   { keys: 'ArrowUp', descEn: 'Edit Last Sent Message (in empty composer)', descZh: '输入框为空时编辑上一条已发消息' },
   { keys: 'Esc', descEn: 'Pop Topmost Overlay / Drawer / Chat Layer', descZh: '逐层关闭顶层弹窗或抽屉' },

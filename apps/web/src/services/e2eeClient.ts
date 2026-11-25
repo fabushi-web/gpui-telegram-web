@@ -155,7 +155,7 @@ export async function generateIdentityKeyPair(
 
 export function toPublishPreKeysRequest(
   identity: PersistedE2eeIdentityRecord,
-  deviceName = 'Telegram Web (Browser)',
+  deviceName = 'Fabushi Web (Browser)',
 ): PublishPreKeysRequest {
   return {
     device_id: identity.deviceId,

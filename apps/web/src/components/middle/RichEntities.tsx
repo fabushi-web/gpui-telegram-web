@@ -159,58 +159,6 @@ function shiftEntities(
   return result;
 }
 
-function synthesizeWebPageFromUrl(rawUrl: string): WebPagePreview | null {
-  if (!isSafeEntityUrl(rawUrl)) return null;
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return null;
-    }
-    const host = parsed.hostname.replace(/^www\./i, '');
-    const slugParts = parsed.pathname
-      .split('/')
-      .filter(Boolean)
-      .map((part) =>
-        decodeURIComponent(part)
-          .replace(/[-_]+/g, ' ')
-          .replace(/\b\w/g, (ch) => ch.toUpperCase()),
-      );
-    const derivedTitle =
-      slugParts.length > 0
-        ? `${slugParts.slice(-2).join(' · ')} — ${host}`
-        : `${host} — Official Web Article`;
-
-    return {
-      url: parsed.toString(),
-      display_url: `${host}${parsed.pathname === '/' ? '' : parsed.pathname}`,
-      site_name: host,
-      title: derivedTitle,
-      description: `OpenGraph preview for ${parsed.toString()} · Instant View reader available for distraction-free typography and offline-friendly reading.`,
-      instant_view_available: true,
-      instant_view_blocks: [
-        {
-          kind: 'heading',
-          text: 'Architecture & Protocol Overview',
-        },
-        {
-          kind: 'paragraph',
-          text: `This Instant View article is generated from ${host}${parsed.pathname}. Telegram Instant View renders web articles with zero page-load delay, customizable serif or sans-serif typography, and eye-friendly dark, sepia, and light themes.`,
-        },
-        {
-          kind: 'quote',
-          text: 'Fast, secure, XSS-safe structured article rendering without external tracking scripts.',
-        },
-        {
-          kind: 'paragraph',
-          text: `Source link: ${parsed.toString()}`,
-        },
-      ],
-    };
-  } catch {
-    return null;
-  }
-}
-
 const CodeBlockRenderer: React.FC<{ code: string; language?: string }> = ({
   code,
   language,
@@ -412,18 +360,12 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
   );
 
   const effectiveWebPage = useMemo<WebPagePreview | null>(() => {
+    if (suppressAutoPreview) return null;
     if (webPage && isSafeEntityUrl(webPage.url)) {
       return webPage;
     }
-    if (suppressAutoPreview) return null;
-    const urlEnt = normalizedEntities.find(
-      (e) => e.type === 'url' || e.type === 'text_url',
-    );
-    if (!urlEnt) return null;
-    const rawUrl =
-      urlEnt.url ?? text.slice(urlEnt.offset, urlEnt.offset + urlEnt.length);
-    return synthesizeWebPageFromUrl(rawUrl);
-  }, [normalizedEntities, suppressAutoPreview, text, webPage]);
+    return null;
+  }, [suppressAutoPreview, webPage]);
 
   const toggleSpoiler = useCallback((key: string) => {
     setRevealedSpoilers((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -525,7 +467,7 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
                 style={{
                   fontFamily:
                     'var(--tg-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
-                  backgroundColor: 'rgba(0, 0, 0, 0.24)',
+                  backgroundColor: 'rgba(0, 0, 0, 0.20)',
                   padding: '1px 5px',
                   borderRadius: '4px',
                   fontSize: '0.92em',
@@ -563,7 +505,7 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
                 style={
                   revealed
                     ? {
-                        backgroundColor: 'rgba(51, 144, 236, 0.16)',
+                        backgroundColor: 'var(--tg-accent-soft)',
                         borderRadius: '4px',
                         padding: '0 3px',
                         cursor: 'pointer',
@@ -597,7 +539,7 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
                   rel="noopener noreferrer"
                   onClick={(e) => e.stopPropagation()}
                   style={{
-                    color: 'var(--tg-accent, #3390EC)',
+                    color: 'inherit',
                     textDecoration: 'underline',
                     overflowWrap: 'anywhere',
                     wordBreak: 'break-word',
@@ -662,22 +604,17 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
 
   const handleOpenInstantView = (wp: WebPagePreview, e: React.MouseEvent) => {
     e.stopPropagation();
-    const structuredHtml =
-      wp.instant_view_blocks && wp.instant_view_blocks.length > 0
-        ? wp.instant_view_blocks
-            .map((b) => {
-              if (b.kind === 'heading') return `<h2>${b.text}</h2>`;
-              if (b.kind === 'quote') return `<blockquote>${b.text}</blockquote>`;
-              if (b.kind === 'code') return `<pre>${b.text}</pre>`;
-              return `<p>${b.text}</p>`;
-            })
-            .join('\n\n')
-        : [
-            wp.description ? `<p>${wp.description}</p>` : '',
-            `<p>Full article content rendered in Instant View for ${wp.display_url || wp.url}.</p>`,
-          ]
-            .filter(Boolean)
-            .join('\n\n');
+    const blocks = wp.instant_view_blocks ?? [];
+    if (blocks.length === 0) return;
+
+    const structuredHtml = blocks
+      .map((b) => {
+        if (b.kind === 'heading') return `<h2>${b.text}</h2>`;
+        if (b.kind === 'quote') return `<blockquote>${b.text}</blockquote>`;
+        if (b.kind === 'code') return `<pre>${b.text}</pre>`;
+        return `<p>${b.text}</p>`;
+      })
+      .join('\n\n');
 
     const wordCount = structuredHtml.split(/\s+/).length;
     openInstantView({
@@ -688,6 +625,12 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
       readingTimeMinutes: Math.max(1, Math.ceil(wordCount / 180)),
     });
   };
+
+  const hasInstantViewBlocks = Boolean(
+    effectiveWebPage?.instant_view_available &&
+      effectiveWebPage.instant_view_blocks &&
+      effectiveWebPage.instant_view_blocks.length > 0,
+  );
 
   return (
     <div
@@ -736,9 +679,9 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
           style={{
             marginTop: '8px',
             padding: '8px 10px',
-            borderLeft: '3px solid var(--tg-accent, #3390EC)',
+            borderLeft: '3px solid var(--tg-accent)',
             borderRadius: '4px 8px 8px 4px',
-            backgroundColor: 'rgba(51, 144, 236, 0.08)',
+            backgroundColor: 'var(--tg-bubble-quote-bg)',
             display: 'flex',
             flexDirection: 'column',
             gap: '4px',
@@ -748,7 +691,7 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
             style={{
               fontSize: '11px',
               fontWeight: 600,
-              color: 'var(--tg-accent, #3390EC)',
+              color: 'var(--tg-accent)',
             }}
           >
             {effectiveWebPage.site_name || effectiveWebPage.display_url}
@@ -762,7 +705,7 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
               style={{
                 fontSize: '13px',
                 fontWeight: 600,
-                color: 'var(--tg-text-primary, #F5F5F5)',
+                color: 'inherit',
                 textDecoration: 'none',
               }}
             >
@@ -773,32 +716,34 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
             <div
               style={{
                 fontSize: '12px',
-                color: 'var(--tg-text-secondary, #8FA2B7)',
+                opacity: 0.85,
                 lineHeight: 1.4,
               }}
             >
               {effectiveWebPage.description}
             </div>
           )}
-          <div style={{ marginTop: '4px' }}>
-            <button
-              type="button"
-              data-testid="btn-instant-view"
-              onClick={(e) => handleOpenInstantView(effectiveWebPage, e)}
-              style={{
-                padding: '4px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(51, 144, 236, 0.45)',
-                backgroundColor: 'rgba(51, 144, 236, 0.16)',
-                color: 'var(--tg-accent, #3390EC)',
-                fontSize: '12px',
-                fontWeight: 600,
-                cursor: 'pointer',
-              }}
-            >
-              ⚡ Instant View · 即时预览
-            </button>
-          </div>
+          {hasInstantViewBlocks && (
+            <div style={{ marginTop: '4px' }}>
+              <button
+                type="button"
+                data-testid="btn-instant-view"
+                onClick={(e) => handleOpenInstantView(effectiveWebPage, e)}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--tg-accent)',
+                  backgroundColor: 'var(--tg-accent-soft)',
+                  color: 'var(--tg-accent)',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                ⚡ Instant View · 即时预览
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

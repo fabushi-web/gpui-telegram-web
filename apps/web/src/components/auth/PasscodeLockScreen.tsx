@@ -44,33 +44,9 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ classNam
     <div id={DOM_IDS.PASSCODE_LOCK_SCREEN} className={className}>
       <form
         onSubmit={(e) => void handleSubmit(e)}
-        className="tg-surface-card"
-        style={{
-          width: '100%',
-          maxWidth: '380px',
-          padding: '32px 26px',
-          borderRadius: 'var(--tg-radius-lg)',
-          boxShadow: 'var(--tg-shadow-lg)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '16px',
-          textAlign: 'center',
-        }}
+        className="tg-passcode-card"
       >
-        <div
-          aria-hidden="true"
-          style={{
-            width: '58px',
-            height: '58px',
-            borderRadius: '50%',
-            backgroundColor: 'var(--tg-accent-soft)',
-            color: 'var(--tg-accent)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
+        <div className="tg-passcode-icon" aria-hidden="true">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <rect x="4" y="11" width="16" height="10" rx="2" />
             <path d="M8 11V7a4 4 0 0 1 8 0v4" />
@@ -94,16 +70,7 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ classNam
             role="alert"
             aria-live="assertive"
             data-testid="passcode-error-alert"
-            style={{
-              width: '100%',
-              padding: '9px 12px',
-              borderRadius: 'var(--tg-radius-sm)',
-              backgroundColor: 'var(--tg-danger-soft)',
-              color: 'var(--tg-danger)',
-              border: '1px solid var(--tg-danger)',
-              fontSize: '13px',
-              fontWeight: 500,
-            }}
+            className="tg-passcode-error"
           >
             {errorMessage}
           </div>

@@ -19,36 +19,19 @@ export interface ActiveWebRtcCallRuntime {
   emojiFingerprint: [string, string, string, string];
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
-  fallbackCanvas: HTMLCanvasElement | null;
-  isSyntheticStream: boolean;
   mediaError?: string | null;
 }
 
 type CallRuntimeListener = (runtime: ActiveWebRtcCallRuntime | null) => void;
 
-function isSyntheticTestRuntime(): boolean {
-  if (typeof navigator !== 'undefined' && navigator.webdriver) {
-    return true;
-  }
-  if (typeof window !== 'undefined') {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('mode') === 'sandbox') return true;
-      if (window.localStorage?.getItem('gpui_tg_adapter_mode') === 'sandbox') return true;
-    } catch {
-      // Ignore storage access errors
-    }
-  }
-  return false;
-}
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
+  { urls: ['stun:stun.l.google.com:19302'] },
+];
 
 class WebRtcCallManager {
   private current: ActiveWebRtcCallRuntime | null = null;
   private localPc: RTCPeerConnection | null = null;
-  private loopbackPeerPc: RTCPeerConnection | null = null;
   private localUserId = 0;
-  private synthAnimRaf = 0;
-  private audioCtx: AudioContext | null = null;
   private listeners = new Set<CallRuntimeListener>();
   private signalSender: ((signal: CallSignalPayload) => Promise<void>) | null = null;
 
@@ -78,139 +61,20 @@ class WebRtcCallManager {
     }
   }
 
-  private createSyntheticCanvasAndStream(
-    mode: 'camera' | 'screen',
-    includeAudio: boolean,
-  ): { stream: MediaStream | null; canvas: HTMLCanvasElement | null } {
-    if (typeof document === 'undefined') {
-      return { stream: null, canvas: null };
-    }
-
-    const canvas = document.createElement('canvas');
-    canvas.width = mode === 'screen' ? 640 : 480;
-    canvas.height = 360;
-    const ctx = canvas.getContext('2d');
-    let tick = 0;
-
-    if (this.synthAnimRaf) {
-      cancelAnimationFrame(this.synthAnimRaf);
-      this.synthAnimRaf = 0;
-    }
-
-    const draw = (): void => {
-      if (!ctx) return;
-      tick += 1;
-      const w = canvas.width;
-      const h = canvas.height;
-
-      // Zero-purple dark ocean / teal gradient
-      const bg = ctx.createLinearGradient(0, 0, w, h);
-      if (mode === 'screen') {
-        bg.addColorStop(0, '#0E1621');
-        bg.addColorStop(0.5, '#17212B');
-        bg.addColorStop(1, '#1B4978');
-      } else {
-        bg.addColorStop(0, '#0E1621');
-        bg.addColorStop(0.6, '#182533');
-        bg.addColorStop(1, '#2B5278');
-      }
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, w, h);
-
-      if (mode === 'screen') {
-        ctx.fillStyle = '#202B36';
-        ctx.fillRect(28, 28, w - 56, h - 56);
-        ctx.strokeStyle = '#3390EC';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(28, 28, w - 56, h - 56);
-
-        ctx.fillStyle = '#00C972';
-        ctx.beginPath();
-        ctx.arc(48, 46, 5, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = '#F5F5F5';
-        ctx.font = '600 15px sans-serif';
-        ctx.textAlign = 'left';
-        ctx.fillText('LIVE SCREEN SHARE · E2EE STREAM', 64, 51);
-
-        for (let i = 0; i < 12; i++) {
-          const barH = 28 + Math.abs(Math.sin(tick * 0.07 + i * 0.5)) * 90;
-          ctx.fillStyle = i % 2 === 0 ? '#3390EC' : '#3FC1B0';
-          ctx.fillRect(56 + i * 42, h - 56 - barH, 26, barH);
-        }
-      } else {
-        const cx = w / 2;
-        const cy = h / 2;
-        for (let rIdx = 0; rIdx < 3; rIdx++) {
-          const radius = 48 + rIdx * 28 + ((tick * 0.8) % 24);
-          ctx.beginPath();
-          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-          ctx.strokeStyle = rIdx === 0 ? '#29B6F6' : '#3FC1B0';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        }
-        ctx.beginPath();
-        ctx.arc(cx, cy, 40, 0, Math.PI * 2);
-        ctx.fillStyle = '#3390EC';
-        ctx.fill();
-
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = '600 15px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('ENCRYPTED WEBRTC VIDEO', cx, cy + 78);
-      }
-
-      this.synthAnimRaf = requestAnimationFrame(draw);
-    };
-    draw();
-
-    const stream =
-      typeof canvas.captureStream === 'function' ? canvas.captureStream(24) : null;
-
-    if (stream && includeAudio) {
-      try {
-        const AudioCtxCtor =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-        if (AudioCtxCtor) {
-          this.audioCtx = new AudioCtxCtor();
-          const osc = this.audioCtx.createOscillator();
-          const gain = this.audioCtx.createGain();
-          osc.frequency.value = 330;
-          gain.gain.value = 0.015;
-          const dest = this.audioCtx.createMediaStreamDestination();
-          osc.connect(gain);
-          gain.connect(dest);
-          osc.start();
-          for (const audioTrack of dest.stream.getAudioTracks()) {
-            stream.addTrack(audioTrack);
-          }
-        }
-      } catch {
-        // Ignore AudioContext restriction
-      }
-    }
-
-    return { stream, canvas };
-  }
-
   public async startCallSession(params: {
     callSession: CallSessionState;
     localUserId: number;
     chatId?: number;
+    iceServers?: RTCIceServer[];
   }): Promise<ActiveWebRtcCallRuntime> {
     await this.cleanupConnections();
 
-    const { callSession, localUserId, chatId } = params;
+    const { callSession, localUserId, chatId, iceServers } = params;
     this.localUserId = localUserId;
     const peerUserId =
       callSession.caller_id === localUserId ? callSession.callee_id : callSession.caller_id;
-    const allowSynthetic = isSyntheticTestRuntime();
 
     let localStream: MediaStream | null = null;
-    let fallbackCanvas: HTMLCanvasElement | null = null;
-    let isSyntheticStream = false;
     let mediaError: string | null = null;
 
     if (
@@ -225,21 +89,12 @@ class WebRtcCallManager {
         });
       } catch (err) {
         localStream = null;
-        mediaError =
-          err instanceof Error
-            ? `无法访问音视频设备：${err.message}`
-            : '无法访问麦克风或摄像头，请检查浏览器权限';
+        const msg = err instanceof Error ? err.message : String(err || 'NotAllowedError');
+        mediaError = `Camera/microphone permission denied: ${msg} · 权限被拒绝，无法访问麦克风或摄像头`;
       }
-    } else if (!allowSynthetic) {
-      mediaError = '当前浏览器上下文不支持 WebRTC 媒体采集（需 HTTPS 或 localhost）';
-    }
-
-    if (allowSynthetic && (!localStream || (callSession.is_video && localStream.getVideoTracks().length === 0))) {
-      isSyntheticStream = true;
-      mediaError = null;
-      const synth = this.createSyntheticCanvasAndStream('camera', true);
-      localStream = synth.stream;
-      fallbackCanvas = synth.canvas;
+    } else {
+      mediaError =
+        'Camera/microphone permission denied: WebRTC MediaDevices unavailable (requires HTTPS or localhost) · 权限受限';
     }
 
     let emojiFingerprint: [string, string, string, string] = [
@@ -255,7 +110,7 @@ class WebRtcCallManager {
       );
       emojiFingerprint = fp.emojis;
     } catch {
-      // Keep server-seeded fallback emojis
+      // Keep server-provided safety emojis
     }
 
     this.current = {
@@ -270,22 +125,20 @@ class WebRtcCallManager {
       startedAtMs: callSession.started_at_ms || Date.now(),
       emojiFingerprint,
       localStream,
-      remoteStream: allowSynthetic ? localStream : null,
-      fallbackCanvas,
-      isSyntheticStream,
+      remoteStream: null,
       mediaError,
     };
     this.emit();
 
-    if (typeof RTCPeerConnection !== 'undefined') {
+    if (typeof RTCPeerConnection !== 'undefined' && !mediaError) {
       try {
-        const pcA = new RTCPeerConnection({
-          iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
-        });
-        this.localPc = pcA;
+        const resolvedIceServers =
+          iceServers && iceServers.length > 0 ? iceServers : DEFAULT_ICE_SERVERS;
+        const pc = new RTCPeerConnection({ iceServers: resolvedIceServers });
+        this.localPc = pc;
 
         const remoteMedia = new MediaStream();
-        pcA.ontrack = (ev) => {
+        pc.ontrack = (ev) => {
           for (const track of ev.streams[0]?.getTracks() ?? [ev.track]) {
             remoteMedia.addTrack(track);
           }
@@ -300,84 +153,44 @@ class WebRtcCallManager {
 
         if (localStream) {
           for (const track of localStream.getTracks()) {
-            pcA.addTrack(track, localStream);
+            pc.addTrack(track, localStream);
           }
         }
 
-        if (allowSynthetic) {
-          // Local loopback peer strictly in automated headless/sandbox testing
-          const pcB = new RTCPeerConnection();
-          this.loopbackPeerPc = pcB;
-          pcA.onicecandidate = (ev) => {
-            if (ev.candidate) {
-              void pcB.addIceCandidate(ev.candidate).catch(() => undefined);
-            }
-          };
-          pcB.onicecandidate = (ev) => {
-            if (ev.candidate) {
-              void pcA.addIceCandidate(ev.candidate).catch(() => undefined);
-            }
-          };
-          if (localStream) {
-            for (const track of localStream.getTracks()) {
-              pcB.addTrack(track.clone(), localStream);
-            }
-          }
-          const offer = await pcA.createOffer();
-          await pcA.setLocalDescription(offer);
-          if (this.signalSender) {
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate && this.signalSender && this.current) {
             void this.signalSender({
-              call_id: callSession.call_id,
-              chat_id: chatId ?? callSession.chat_id,
-              from_user_id: localUserId,
-              target_user_id: peerUserId,
-              signal_type: 'offer',
-              sdp: offer.sdp,
+              call_id: this.current.callId,
+              chat_id: this.current.chatId,
+              from_user_id: this.localUserId,
+              target_user_id: this.current.peerUserId,
+              signal_type: 'ice_candidate',
+              candidate: JSON.stringify(ev.candidate.toJSON()),
             }).catch(() => undefined);
           }
-          await pcB.setRemoteDescription(offer);
-          const answer = await pcB.createAnswer();
-          await pcB.setLocalDescription(answer);
-          await pcA.setRemoteDescription(answer);
-          if (this.current) {
-            this.current.status = 'connected';
-            this.current.connectedAtMs = Date.now();
-            this.emit();
-          }
-        } else {
-          // Production P2P WebRTC signaling over real server WS/REST relay
-          pcA.onicecandidate = (ev) => {
-            if (ev.candidate && this.signalSender && this.current) {
-              void this.signalSender({
-                call_id: this.current.callId,
-                chat_id: this.current.chatId,
-                from_user_id: this.localUserId,
-                target_user_id: this.current.peerUserId,
-                signal_type: 'ice_candidate',
-                candidate: JSON.stringify(ev.candidate.toJSON()),
-              }).catch(() => undefined);
-            }
-          };
-          const offer = await pcA.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: callSession.is_video,
-          });
-          await pcA.setLocalDescription(offer);
-          if (this.signalSender) {
-            void this.signalSender({
-              call_id: callSession.call_id,
-              chat_id: chatId ?? callSession.chat_id,
-              from_user_id: localUserId,
-              target_user_id: peerUserId,
-              signal_type: 'offer',
-              sdp: offer.sdp,
-            }).catch(() => undefined);
-          }
+        };
+
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: callSession.is_video,
+        });
+        await pc.setLocalDescription(offer);
+        if (this.signalSender) {
+          void this.signalSender({
+            call_id: callSession.call_id,
+            chat_id: chatId ?? callSession.chat_id,
+            from_user_id: localUserId,
+            target_user_id: peerUserId,
+            signal_type: 'offer',
+            sdp: offer.sdp,
+          }).catch(() => undefined);
         }
       } catch (err) {
-        if (this.current && !allowSynthetic) {
+        if (this.current) {
           this.current.mediaError =
-            err instanceof Error ? `WebRTC 连接初始化失败：${err.message}` : 'WebRTC 连接初始化失败';
+            err instanceof Error
+              ? `WebRTC connection error: ${err.message} · WebRTC 连接初始化失败`
+              : 'WebRTC connection error · WebRTC 连接初始化失败';
           this.emit();
         }
       }
@@ -444,23 +257,14 @@ class WebRtcCallManager {
   public setVideoEnabled(enabled?: boolean): boolean {
     if (!this.current) return false;
     const nextVideo = enabled ?? !this.current.isVideoEnabled;
-    const allowSynthetic = isSyntheticTestRuntime();
     this.current.isVideoEnabled = nextVideo;
     this.current.isVideo = nextVideo || this.current.isScreenSharing;
 
-    if (nextVideo && (!this.current.localStream || this.current.localStream.getVideoTracks().length === 0)) {
-      if (allowSynthetic) {
-        const synth = this.createSyntheticCanvasAndStream('camera', false);
-        this.current.fallbackCanvas = synth.canvas;
-        if (synth.stream && this.current.localStream) {
-          for (const vt of synth.stream.getVideoTracks()) {
-            this.current.localStream.addTrack(vt);
-          }
-        } else if (synth.stream) {
-          this.current.localStream = synth.stream;
-        }
-        this.current.remoteStream = this.current.localStream;
-      } else if (
+    if (
+      nextVideo &&
+      (!this.current.localStream || this.current.localStream.getVideoTracks().length === 0)
+    ) {
+      if (
         typeof navigator !== 'undefined' &&
         navigator.mediaDevices &&
         typeof navigator.mediaDevices.getUserMedia === 'function'
@@ -483,10 +287,14 @@ class WebRtcCallManager {
           .catch((err) => {
             if (!this.current) return;
             this.current.isVideoEnabled = false;
-            this.current.mediaError =
-              err instanceof Error ? `无法开启摄像头：${err.message}` : '无法开启摄像头，请检查权限';
+            const msg = err instanceof Error ? err.message : String(err || 'NotAllowedError');
+            this.current.mediaError = `Camera permission denied: ${msg} · 无法开启摄像头`;
             this.emit();
           });
+      } else {
+        this.current.isVideoEnabled = false;
+        this.current.mediaError =
+          'Camera permission denied: MediaDevices unavailable · 无法开启摄像头';
       }
     } else if (this.current.localStream) {
       for (const vt of this.current.localStream.getVideoTracks()) {
@@ -501,64 +309,37 @@ class WebRtcCallManager {
   public async toggleScreenShare(forceState?: boolean): Promise<boolean> {
     if (!this.current) return false;
     const nextSharing = forceState ?? !this.current.isScreenSharing;
-    const allowSynthetic = isSyntheticTestRuntime();
 
     if (nextSharing) {
-      let screenStream: MediaStream | null = null;
-      let screenCanvas: HTMLCanvasElement | null = null;
-
       if (
-        typeof navigator !== 'undefined' &&
-        navigator.mediaDevices &&
-        typeof navigator.mediaDevices.getDisplayMedia === 'function'
+        typeof navigator === 'undefined' ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getDisplayMedia !== 'function'
       ) {
-        try {
-          screenStream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
-            audio: false,
-          });
-        } catch (err) {
-          screenStream = null;
-          if (!allowSynthetic) {
-            this.current.mediaError =
-              err instanceof Error ? `屏幕共享已取消或受限：${err.message}` : '屏幕共享被拒绝或不可用';
-            this.emit();
-            return false;
-          }
-        }
+        this.current.mediaError =
+          'Screen share unsupported: getDisplayMedia unavailable · 当前浏览器不支持屏幕共享';
+        this.emit();
+        return false;
       }
 
-      if (!screenStream) {
-        if (!allowSynthetic) {
-          this.current.mediaError = '当前浏览器不支持屏幕共享（getDisplayMedia）';
-          this.emit();
-          return false;
-        }
-        const synth = this.createSyntheticCanvasAndStream('screen', false);
-        screenStream = synth.stream;
-        screenCanvas = synth.canvas;
-      }
-
-      if (screenStream) {
+      try {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false,
+        });
         this.current.localStream = screenStream;
-        if (allowSynthetic) {
-          this.current.remoteStream = screenStream;
-        }
+        this.current.mediaError = null;
+        this.current.isScreenSharing = true;
+        this.current.isVideo = true;
+        this.current.isVideoEnabled = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err || 'NotAllowedError');
+        this.current.mediaError = `Screen share denied or cancelled: ${msg} · 屏幕共享已取消或受限`;
+        this.emit();
+        return false;
       }
-      if (screenCanvas) {
-        this.current.fallbackCanvas = screenCanvas;
-      }
-      this.current.mediaError = null;
-      this.current.isScreenSharing = true;
-      this.current.isVideo = true;
-      this.current.isVideoEnabled = true;
     } else {
-      if (allowSynthetic) {
-        const camSynth = this.createSyntheticCanvasAndStream('camera', true);
-        this.current.localStream = camSynth.stream;
-        this.current.remoteStream = camSynth.stream;
-        this.current.fallbackCanvas = camSynth.canvas;
-      } else if (this.current.localStream) {
+      if (this.current.localStream) {
         for (const t of this.current.localStream.getVideoTracks()) {
           t.stop();
         }
@@ -577,10 +358,6 @@ class WebRtcCallManager {
   }
 
   private async cleanupConnections(): Promise<void> {
-    if (this.synthAnimRaf) {
-      cancelAnimationFrame(this.synthAnimRaf);
-      this.synthAnimRaf = 0;
-    }
     if (this.current?.localStream) {
       for (const t of this.current.localStream.getTracks()) {
         try {
@@ -597,18 +374,6 @@ class WebRtcCallManager {
         // Ignore
       }
       this.localPc = null;
-    }
-    if (this.loopbackPeerPc) {
-      try {
-        this.loopbackPeerPc.close();
-      } catch {
-        // Ignore
-      }
-      this.loopbackPeerPc = null;
-    }
-    if (this.audioCtx) {
-      await this.audioCtx.close().catch(() => undefined);
-      this.audioCtx = null;
     }
   }
 }

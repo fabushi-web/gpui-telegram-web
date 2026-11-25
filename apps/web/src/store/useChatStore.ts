@@ -11,6 +11,8 @@ import {
   mapUserDtoToDomain,
   parseMarkdownEntities,
   type AlbumMediaItem,
+  type ArchiveLocalBotReplyRequest,
+  type ArchiveLocalBotReplyResponse,
   type ChannelStatisticsDto,
   type ChatFolder,
   type ChatMemberDto,
@@ -40,6 +42,7 @@ import {
 import {
   broadcastSync,
   getClientAdapter,
+  getServerAdapter,
   indexedDbCache,
 } from '../adapters';
 import type {
@@ -54,6 +57,7 @@ import {
 } from '../services/e2eeClient';
 import { webrtcManager } from '../services/webrtcManager';
 import { useAuthStore } from './useAuthStore';
+import { useUiStore } from './useUiStore';
 
 const localTabSendTimestampByChat = new Map<number, number>();
 
@@ -76,6 +80,30 @@ export interface ReplyTargetState {
   senderName?: string;
   previewText: string;
   quoteText?: string;
+}
+
+export interface RoomAgentState {
+  currentSpeaker: string | null;
+  queuedCount: number;
+  loopHops: number;
+  updatedAtMs: number;
+  workspaceRevision?: number;
+  lastWorkspaceKey?: string;
+}
+
+export interface BotActivityState {
+  botUserId: number;
+  state: string;
+  detail?: string | null;
+  updatedAtMs: number;
+}
+
+export interface AgentHandoffState {
+  fromAgent: string;
+  toAgent: string;
+  hop: number;
+  maxHops: number;
+  updatedAtMs: number;
 }
 
 export interface ChatState {
@@ -120,6 +148,12 @@ export interface ChatState {
   decryptedSecretTexts: Record<string, string>;
   voiceTranscripts: Record<string, string>;
 
+  roomAgentStateByChat: Record<number, RoomAgentState>;
+  botActivityByChat: Record<number, BotActivityState>;
+  agentFloorByChat: Record<number, { currentSpeaker: string | null; queuedCount: number; loopHops: number }>;
+  agentWorkspaceByChat: Record<number, Record<string, unknown>>;
+  lastAgentHandoffByChat: Record<number, AgentHandoffState>;
+
   isLoadingChats: boolean;
   isLoadingMessages: boolean;
   uploadProgress: number | null;
@@ -148,8 +182,13 @@ export interface ChatState {
       silent?: boolean;
       scheduleAtMs?: number;
       ttlSeconds?: number;
+      skipServerBotReply?: boolean;
     },
   ) => Promise<MessageItem>;
+  archiveLocalBotReply: (
+    chatId: number,
+    req: ArchiveLocalBotReplyRequest,
+  ) => Promise<ArchiveLocalBotReplyResponse>;
   sendMediaFiles: (
     chatId: number,
     files: Array<File | Blob>,
@@ -217,12 +256,14 @@ export interface ChatState {
   ) => Promise<ChatSummary>;
   setChatTtl: (chatId: number, ttlSeconds: number) => Promise<void>;
   createGroupOrChannel: (req: {
-    title: string;
+    title?: string;
     kind: 'group' | 'supergroup' | 'channel';
     about?: string;
     username?: string;
     isForum?: boolean;
     memberIds?: number[];
+    memberUsernames?: string[];
+    clientNonce?: string;
   }) => Promise<ChatSummary>;
   createSecretChat: (peerUserId: number, ttlSeconds?: number) => Promise<ChatSummary>;
   openSavedMessages: () => Promise<ChatSummary>;
@@ -320,6 +361,7 @@ function mergeMessageIntoTimeline(existing: MessageItem[], incoming: MessageItem
 }
 
 let activeSelectSequence = 0;
+let chatStoreAccountEpoch = 0;
 let realtimeUnbindFn: (() => void) | null = null;
 
 export const useChatStore = create<ChatState>((set, get) => {
@@ -395,6 +437,12 @@ export const useChatStore = create<ChatState>((set, get) => {
     decryptedSecretTexts: {},
     voiceTranscripts: {},
 
+    roomAgentStateByChat: {},
+    botActivityByChat: {},
+    agentFloorByChat: {},
+    agentWorkspaceByChat: {},
+    lastAgentHandoffByChat: {},
+
     isLoadingChats: false,
     isLoadingMessages: false,
     uploadProgress: null,
@@ -404,11 +452,17 @@ export const useChatStore = create<ChatState>((set, get) => {
     bootstrapChats: async () => {
       const adapter = getClientAdapter();
       const accountId = useAuthStore.getState().activeAccountId ?? 'default';
+      const epoch = chatStoreAccountEpoch;
       set({ isLoadingChats: true, connectionState: adapter.getConnectionState() });
 
-      // Hydrate instant IndexedDB cache first
+      // Hydrate instant IndexedDB cache strictly scoped to current account & epoch
       const cachedChats = await indexedDbCache.loadChats(accountId).catch(() => []);
-      if (cachedChats.length > 0 && Object.keys(get().chatsById).length === 0) {
+      if (
+        epoch === chatStoreAccountEpoch &&
+        useAuthStore.getState().activeAccountId === accountId &&
+        cachedChats.length > 0 &&
+        Object.keys(get().chatsById).length === 0
+      ) {
         const map: Record<number, ChatSummary> = {};
         for (const c of cachedChats) map[c.chatId] = c;
         set({ chatsById: map, orderedChatIds: sortChatIds(map) });
@@ -422,20 +476,27 @@ export const useChatStore = create<ChatState>((set, get) => {
           indexedDbCache.listOutbox(accountId).catch(() => []),
         ]);
 
+        if (epoch !== chatStoreAccountEpoch) return;
+
+        // Always overwrite with authoritative server list (even when chats is empty!)
         const chatsById: Record<number, ChatSummary> = {};
-        const draftsByChat: Record<number, DraftState> = { ...get().draftsByChat };
+        const draftsByChat: Record<number, DraftState> = {};
         for (const c of chats) {
           chatsById[c.chatId] = c;
           if (c.draft) draftsByChat[c.chatId] = c.draft;
         }
-        const peersById: Record<number, UserProfile> = { ...get().peersById };
+        const peersById: Record<number, UserProfile> = {};
         for (const u of [...users, ...adapter.getDiscoveredPeers()]) {
           peersById[u.userId] = u;
         }
 
+        const currentActive = get().activeChatId;
+        const validActive = currentActive !== null && chatsById[currentActive] ? currentActive : null;
+
         set({
           chatsById,
           orderedChatIds: sortChatIds(chatsById),
+          activeChatId: validActive,
           peersById,
           folders,
           storyGroups: stories,
@@ -444,7 +505,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           isLoadingChats: false,
         });
 
-        if (get().activeChatId === null && typeof sessionStorage !== 'undefined') {
+        if (validActive === null && typeof sessionStorage !== 'undefined') {
           try {
             const savedRaw = sessionStorage.getItem('gpui_tg_active_chat_id');
             const savedId = savedRaw ? Number(savedRaw) : NaN;
@@ -456,12 +517,19 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
         }
       } catch {
-        set({ isLoadingChats: false });
+        if (epoch === chatStoreAccountEpoch) {
+          set({ isLoadingChats: false });
+        }
       }
     },
 
     selectChat: async (chatId, topicId = null) => {
+      const prevChatId = get().activeChatId;
+      if (prevChatId !== chatId) {
+        useUiStore.getState().clearToastsForChat(prevChatId);
+      }
       const seq = ++activeSelectSequence;
+      const epoch = chatStoreAccountEpoch;
       if (chatId === null) {
         if (typeof sessionStorage !== 'undefined') {
           try {
@@ -500,7 +568,12 @@ export const useChatStore = create<ChatState>((set, get) => {
       const accountId = useAuthStore.getState().activeAccountId ?? 'default';
 
       const cached = await indexedDbCache.loadChatMessages(accountId, chatId).catch(() => []);
-      if (seq === activeSelectSequence && cached.length > 0 && !get().messagesByChat[chatId]?.length) {
+      if (
+        seq === activeSelectSequence &&
+        epoch === chatStoreAccountEpoch &&
+        cached.length > 0 &&
+        !get().messagesByChat[chatId]?.length
+      ) {
         set((prev) => ({
           messagesByChat: { ...prev.messagesByChat, [chatId]: cached },
         }));
@@ -515,7 +588,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             : Promise.resolve(get().topicsByChat[chatId] ?? []),
         ]);
 
-        if (seq !== activeSelectSequence) return;
+        if (seq !== activeSelectSequence || epoch !== chatStoreAccountEpoch) return;
 
         const sorted = [...msgRes.messages].map(enrichMessageItem).sort((a, b) => a.id - b.id);
         set((prev) => ({
@@ -533,7 +606,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           void get().markChatRead(chatId, lastMsg.id);
         }
       } catch {
-        if (seq === activeSelectSequence) {
+        if (seq === activeSelectSequence && epoch === chatStoreAccountEpoch) {
           set({ isLoadingMessages: false });
         }
       }
@@ -627,6 +700,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         silent: opts?.silent,
         scheduleAtMs: opts?.scheduleAtMs,
         ttlSeconds: opts?.ttlSeconds ?? chat?.ttlSeconds,
+        skipServerBotReply: opts?.skipServerBotReply,
       });
 
       const msg = enrichMessageItem(res.message);
@@ -662,6 +736,10 @@ export const useChatStore = create<ChatState>((set, get) => {
       });
 
       return msg;
+    },
+
+    archiveLocalBotReply: async (chatId, req) => {
+      return getServerAdapter().archiveLocalBotReply(chatId, req);
     },
 
     sendMediaFiles: async (chatId, files, opts) => {
@@ -1175,13 +1253,20 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     createGroupOrChannel: async (req) => {
       const chatType = req.kind === 'channel' ? 3 : req.kind === 'supergroup' || req.isForum ? 2 : 1;
-      const created = await getClientAdapter().createChat({
-        title: req.title,
+      const clientNonce =
+        req.clientNonce ??
+        (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `chat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`);
+      const created = await getServerAdapter().createChat({
+        title: req.title ?? '',
         chatType,
         about: req.about,
         username: req.username,
         isForum: req.isForum,
         memberIds: req.memberIds,
+        memberUsernames: req.memberUsernames,
+        clientNonce,
       });
       set((prev) => {
         const nextChats = { ...prev.chatsById, [created.chatId]: created };
@@ -1237,6 +1322,15 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     deleteOrLeaveChat: async (chatId) => {
       await getClientAdapter().deleteOrLeaveChat(chatId);
+      if (typeof sessionStorage !== 'undefined') {
+        try {
+          if (sessionStorage.getItem('gpui_tg_active_chat_id') === String(chatId)) {
+            sessionStorage.removeItem('gpui_tg_active_chat_id');
+          }
+        } catch {
+          // Ignore
+        }
+      }
       set((prev) => {
         const nextChats = { ...prev.chatsById };
         delete nextChats[chatId];
@@ -1724,6 +1818,94 @@ export const useChatStore = create<ChatState>((set, get) => {
             void webrtcManager.handleRemoteSignal(event.data);
             break;
           }
+          case 'BotActivityChanged': {
+            const { chat_id, bot_user_id, state, detail } = event.data;
+            set((prev) => ({
+              botActivityByChat: {
+                ...prev.botActivityByChat,
+                [chat_id]: {
+                  botUserId: bot_user_id,
+                  state,
+                  detail: detail ?? null,
+                  updatedAtMs: Date.now(),
+                },
+              },
+            }));
+            break;
+          }
+          case 'AgentFloorChanged': {
+            const { chat_id, current_speaker, queued_count, loop_hops } = event.data;
+            set((prev) => ({
+              agentFloorByChat: {
+                ...prev.agentFloorByChat,
+                [chat_id]: {
+                  currentSpeaker: current_speaker,
+                  queuedCount: queued_count,
+                  loopHops: loop_hops,
+                },
+              },
+              roomAgentStateByChat: {
+                ...prev.roomAgentStateByChat,
+                [chat_id]: {
+                  ...(prev.roomAgentStateByChat[chat_id] ?? {}),
+                  currentSpeaker: current_speaker,
+                  queuedCount: queued_count,
+                  loopHops: loop_hops,
+                  updatedAtMs: Date.now(),
+                },
+              },
+            }));
+            break;
+          }
+          case 'AgentWorkspaceUpdated': {
+            const { chat_id, revision, key, value } = event.data;
+            set((prev) => ({
+              agentWorkspaceByChat: {
+                ...prev.agentWorkspaceByChat,
+                [chat_id]: {
+                  ...(prev.agentWorkspaceByChat[chat_id] ?? {}),
+                  [key]: value,
+                },
+              },
+              roomAgentStateByChat: {
+                ...prev.roomAgentStateByChat,
+                [chat_id]: {
+                  currentSpeaker: prev.roomAgentStateByChat[chat_id]?.currentSpeaker ?? null,
+                  queuedCount: prev.roomAgentStateByChat[chat_id]?.queuedCount ?? 0,
+                  loopHops: prev.roomAgentStateByChat[chat_id]?.loopHops ?? 0,
+                  workspaceRevision: revision,
+                  lastWorkspaceKey: key,
+                  updatedAtMs: Date.now(),
+                },
+              },
+            }));
+            break;
+          }
+          case 'AgentHandoffEvent': {
+            const { chat_id, from_agent, to_agent, hop, max_hops } = event.data;
+            set((prev) => ({
+              lastAgentHandoffByChat: {
+                ...prev.lastAgentHandoffByChat,
+                [chat_id]: {
+                  fromAgent: from_agent,
+                  toAgent: to_agent,
+                  hop,
+                  maxHops: max_hops,
+                  updatedAtMs: Date.now(),
+                },
+              },
+              roomAgentStateByChat: {
+                ...prev.roomAgentStateByChat,
+                [chat_id]: {
+                  ...(prev.roomAgentStateByChat[chat_id] ?? { queuedCount: 0 }),
+                  currentSpeaker: to_agent,
+                  loopHops: hop,
+                  updatedAtMs: Date.now(),
+                },
+              },
+            }));
+            break;
+          }
           default:
             break;
         }
@@ -1799,19 +1981,45 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     resetChatStore: () => {
       activeSelectSequence += 1;
+      chatStoreAccountEpoch += 1;
       set({
         chatsById: {},
         orderedChatIds: [],
         activeChatId: null,
         activeTopicId: null,
+        activeFolderId: 'all',
+        showArchived: false,
         messagesByChat: {},
+        hasMoreByChat: {},
         pinnedByChat: {},
         topicsByChat: {},
+        folders: [],
         draftsByChat: {},
+        replyTargetByChat: {},
+        editingMessageByChat: {},
         selectedMessageIds: [],
         isMultiSelectMode: false,
+        peersById: {},
+        contacts: [],
+        blockedUsers: [],
+        privacySettings: null,
+        membersByChat: {},
+        invitesByChat: {},
+        statsByChat: {},
+        storyGroups: [],
+        globalSearchQuery: '',
         globalSearchResults: null,
+        inChatSearchQuery: '',
         inChatSearchHits: [],
+        typingByChat: {},
+        decryptedSecretTexts: {},
+        voiceTranscripts: {},
+        roomAgentStateByChat: {},
+        botActivityByChat: {},
+        agentFloorByChat: {},
+        agentWorkspaceByChat: {},
+        lastAgentHandoffByChat: {},
+        pendingOutboxCount: 0,
       });
     },
   };

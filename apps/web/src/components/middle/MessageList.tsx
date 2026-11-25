@@ -9,6 +9,7 @@ import React, {
 } from 'react';
 import {
   DOM_IDS,
+  type BotRegistryEntry,
   type ChatSummary,
   type MessageItem,
 } from '@gpui-telegram/protocol';
@@ -19,6 +20,7 @@ import {
   useChatStore,
   wasSentLocallyInTab,
 } from '../../store/useChatStore';
+import { BotDescriptionCard } from './BotPreStartBar';
 import { MessageBubble } from './MessageBubble';
 import { ThinkingBubble } from './MessageCards';
 
@@ -29,6 +31,8 @@ export interface MessageListHandle {
 
 export interface MessageListProps {
   chat: ChatSummary;
+  botMeta?: BotRegistryEntry;
+  showBotPrestart?: boolean;
   highlightedMessageId: number | null;
   onHighlightMessage: (messageId: number | null) => void;
   onDropFiles?: (files: File[]) => void;
@@ -76,6 +80,8 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
   function MessageList(
     {
       chat,
+      botMeta,
+      showBotPrestart = false,
       highlightedMessageId,
       onHighlightMessage,
       onDropFiles,
@@ -507,20 +513,25 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
           )}
 
           {filteredMessages.length === 0 && !isLoadingMessages && (
-            <div
-              data-testid="empty-timeline"
-              style={{
-                margin: 'auto',
-                padding: '20px 24px',
-                borderRadius: '14px',
-                backgroundColor: 'rgba(14, 22, 33, 0.56)',
-                color: 'var(--tg-text-secondary, #8FA2B7)',
-                textAlign: 'center',
-                fontSize: '13.5px',
-              }}
-            >
-              No messages here yet · Say hello to {chat.title}!
-            </div>
+            showBotPrestart ? (
+              <BotDescriptionCard chat={chat} bot={botMeta} />
+            ) : (
+              <div
+                data-testid="empty-timeline"
+                style={{
+                  margin: 'auto',
+                  padding: '20px 24px',
+                  borderRadius: '14px',
+                  backgroundColor: 'var(--tg-bg-elevated)',
+                  border: '1px solid var(--tg-hairline-border)',
+                  color: 'var(--tg-text-secondary)',
+                  textAlign: 'center',
+                  fontSize: '13.5px',
+                }}
+              >
+                No messages here yet · Say hello to {chat.title}!
+              </div>
+            )
           )}
 
           {filteredMessages.map((msg, idx) => {
@@ -585,11 +596,12 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
                       margin: '8px 0 6px',
                       padding: '3px 12px',
                       borderRadius: '999px',
-                      backgroundColor: 'rgba(14, 22, 33, 0.72)',
-                      color: '#DCE6F2',
+                      backgroundColor: 'var(--tg-bg-glass)',
+                      border: '1px solid var(--tg-hairline-border)',
+                      color: 'var(--tg-text-secondary)',
                       fontSize: '12px',
                       fontWeight: 600,
-                      backdropFilter: 'blur(6px)',
+                      backdropFilter: 'blur(12px)',
                       userSelect: 'none',
                     }}
                   >
@@ -605,9 +617,9 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
                       maxWidth: '780px',
                       margin: '8px auto',
                       padding: '4px 12px',
-                      borderRadius: '6px',
-                      backgroundColor: 'rgba(51, 144, 236, 0.16)',
-                      color: '#7CC2FF',
+                      borderRadius: '8px',
+                      backgroundColor: 'var(--tg-accent-soft)',
+                      color: 'var(--tg-accent)',
                       textAlign: 'center',
                       fontSize: '12px',
                       fontWeight: 600,
@@ -663,22 +675,7 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
             aria-label="Scroll to bottom"
             onClick={scrollToBottom}
             style={{
-              position: 'absolute',
-              right: '20px',
-              bottom: '16px',
-              zIndex: 18,
-              width: '42px',
-              height: '42px',
-              borderRadius: '50%',
-              border: '1px solid var(--tg-border, #242F3D)',
-              backgroundColor: 'var(--tg-bg-surface, #17212B)',
-              color: 'var(--tg-text-primary, #F5F5F5)',
-              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.42)',
               fontSize: '18px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
             }}
           >
             ↓
@@ -692,7 +689,7 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
                   height: '18px',
                   padding: '0 5px',
                   borderRadius: '999px',
-                  backgroundColor: 'var(--tg-accent, #3390EC)',
+                  backgroundColor: 'var(--tg-accent)',
                   color: '#FFFFFF',
                   fontSize: '11px',
                   fontWeight: 700,

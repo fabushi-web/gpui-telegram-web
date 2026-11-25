@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import {
+  DEFAULT_ARGON2_KDF_PARAMS,
   mapUserDtoToDomain,
   peerAvatarColorIndex,
-  type AdapterMode,
+  type AuthCustodyUpdateResponse,
   type AuthResponse,
   type QrPairSessionDto,
   type SessionDto,
@@ -13,16 +14,16 @@ import {
   TwoFactorChallengeError,
   broadcastSync,
   getClientAdapter,
-  getMtprotoAdapter,
   getServerAdapter,
   switchClientAdapterMode,
-  type MtprotoConfig,
 } from '../adapters';
 import { generateIdentityKeyPair, toPublishPreKeysRequest } from '../services/e2eeClient';
+import { deriveSplitKeyV2, generateRandomSaltB64 } from '../services/splitKeyCrypto';
 
 export const MAX_STORED_ACCOUNTS = 6;
 const AUTH_STORAGE_KEY = 'gpui_tg_auth_v1';
 const ACTIVE_TOKEN_MIRROR_KEY = 'gpui_tg_active_token';
+const ACTIVE_CHAT_SESSION_KEY = 'gpui_tg_active_chat_id';
 
 export interface AlipayAuthSession {
   session_id: string;
@@ -40,14 +41,14 @@ export interface StoredAccountSession {
   sessionId: string;
   expiresAtMs: number;
   user: UserProfile;
-  adapterMode: AdapterMode;
+  adapterMode: 'server';
   serverUrl: string;
 }
 
 interface PersistedAuthEnvelope {
   accounts: StoredAccountSession[];
   activeAccountId: string | null;
-  adapterMode: AdapterMode;
+  adapterMode: 'server';
   serverUrl: string;
   passcodeHash: string | null;
   isLocked: boolean;
@@ -63,6 +64,13 @@ export interface ServerHealthSnapshot {
   error?: string;
 }
 
+export interface PasskeySummaryItem {
+  cred_id: string;
+  label: string;
+  created_at_ms: number;
+  last_used_ms?: number | null;
+}
+
 export interface AuthState {
   accounts: StoredAccountSession[];
   activeAccountId: string | null;
@@ -71,10 +79,9 @@ export interface AuthState {
   isAuthenticated: boolean;
   isAddingAccount: boolean;
 
-  adapterMode: AdapterMode;
+  adapterMode: 'server';
   serverUrl: string;
   serverHealth: ServerHealthSnapshot;
-  mtprotoConfig: MtprotoConfig;
 
   passcodeHash: string | null;
   isLocked: boolean;
@@ -84,7 +91,6 @@ export interface AuthState {
   error: string | null;
   phoneCodeHash: string | null;
   pendingPhone: string | null;
-  devCodeHint: string | null;
   requires2fa: boolean;
   twoFaChallengeToken: string | null;
   twoFaHint: string | null;
@@ -98,12 +104,9 @@ export interface AuthState {
   hydrateAuth: () => Promise<void>;
   probeServerHealth: (overrideUrl?: string) => Promise<ServerHealthSnapshot>;
   clearError: () => void;
-  setAdapterMode: (mode: AdapterMode) => Promise<void>;
   setServerUrl: (url: string) => void;
-  setMtprotoConfig: (patch: Partial<MtprotoConfig>) => void;
 
-  loginDemo: (slot?: number) => Promise<UserProfile>;
-  sendPhoneCode: (phone: string) => Promise<{ phoneCodeHash: string; devCode?: string }>;
+  sendPhoneCode: (phone: string) => Promise<{ phoneCodeHash: string }>;
   verifyPhoneCode: (params: {
     phone?: string;
     code: string;
@@ -124,7 +127,6 @@ export interface AuthState {
 
   startQrPairing: (deviceName?: string) => Promise<QrPairSessionDto>;
   pollQrPairing: (pairId?: string) => Promise<QrPairSessionDto | null>;
-  simulateQrAccept: (pairId?: string) => Promise<UserProfile>;
 
   loginPassword: (
     username: string,
@@ -137,13 +139,15 @@ export interface AuthState {
     firstName?: string;
     lastName?: string;
   }) => Promise<UserProfile>;
+  upgradeSplitKey: (oldPassword: string) => Promise<AuthCustodyUpdateResponse>;
+  changePassword: (oldSecret: string, newPassword: string) => Promise<AuthCustodyUpdateResponse>;
 
-  sendEmailCode: (email: string) => Promise<{ emailCodeHash: string; devCode?: string }>;
+  sendEmailCode: (email: string) => Promise<{ emailCodeHash: string }>;
   verifyEmailCode: (params: {
     email?: string;
     code: string;
     emailCodeHash?: string;
-  }) => Promise<UserProfile>;
+  }) => Promise<{ authenticated: boolean; requires2fa?: boolean }>;
   registerEmail: (params: {
     email?: string;
     code: string;
@@ -156,15 +160,17 @@ export interface AuthState {
 
   startAlipay: () => Promise<AlipayAuthSession>;
   pollAlipay: (sessionId?: string) => Promise<AlipayAuthSession | null>;
-  confirmAlipay: (sessionId?: string) => Promise<UserProfile>;
 
   registerPasskey: (label?: string) => Promise<boolean>;
   loginPasskey: (username?: string) => Promise<UserProfile>;
+  listPasskeys: () => Promise<PasskeySummaryItem[]>;
+  deletePasskey: (credId: string) => Promise<void>;
 
   switchAccount: (accountId: string) => Promise<void>;
   addAccountFlow: () => void;
   cancelAddAccountFlow: () => void;
   removeAccount: (accountId: string) => Promise<void>;
+  deleteAccount: () => Promise<void>;
   logout: (logoutAll?: boolean) => Promise<void>;
 
   loadSessions: () => Promise<SessionDto[]>;
@@ -177,14 +183,14 @@ export interface AuthState {
   unlockApp: (passcode: string) => Promise<boolean>;
 }
 
-export function isDemoUiEnabled(adapterMode: AdapterMode): boolean {
-  if (adapterMode === 'sandbox') return true;
-  if (import.meta.env?.VITE_ENABLE_DEMO === '1') return true;
-  if (typeof window !== 'undefined') {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('dev') === '1' || params.get('mode') === 'sandbox') return true;
+function clearSavedActiveChatId(): void {
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem(ACTIVE_CHAT_SESSION_KEY);
+    }
+  } catch {
+    // Ignore sessionStorage restrictions
   }
-  return false;
 }
 
 function authResponseToUserProfile(authRes: AuthResponse): UserProfile {
@@ -245,7 +251,7 @@ function arrayBufferToBase64Url(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let bin = '';
   for (let i = 0; i < bytes.length; i++) {
-    bin += String.fromCharCode(bytes[i]);
+    bin += String.fromCharCode(bytes[i]!);
   }
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
@@ -256,11 +262,17 @@ function loadPersistedAuth(): PersistedAuthEnvelope {
       const raw = localStorage.getItem(AUTH_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<PersistedAuthEnvelope>;
-        const accounts = Array.isArray(parsed.accounts) ? parsed.accounts : [];
+        const rawAccounts = Array.isArray(parsed.accounts) ? parsed.accounts : [];
+        const accounts: StoredAccountSession[] = rawAccounts
+          .filter((a) => a && typeof a.token === 'string' && a.token.trim().length > 0)
+          .map((a) => ({
+            ...a,
+            adapterMode: 'server' as const,
+          }));
         return {
           accounts,
           activeAccountId: parsed.activeAccountId ?? accounts[0]?.accountId ?? null,
-          adapterMode: parsed.adapterMode ?? 'server',
+          adapterMode: 'server',
           serverUrl: parsed.serverUrl ?? '',
           passcodeHash: parsed.passcodeHash ?? null,
           isLocked: Boolean(parsed.passcodeHash && parsed.isLocked),
@@ -283,7 +295,7 @@ function loadPersistedAuth(): PersistedAuthEnvelope {
 function persistAuthEnvelope(
   state: Pick<
     AuthState,
-    'accounts' | 'activeAccountId' | 'adapterMode' | 'serverUrl' | 'passcodeHash' | 'isLocked' | 'token'
+    'accounts' | 'activeAccountId' | 'serverUrl' | 'passcodeHash' | 'isLocked' | 'token'
   >,
 ): void {
   try {
@@ -291,7 +303,7 @@ function persistAuthEnvelope(
       const env: PersistedAuthEnvelope = {
         accounts: state.accounts,
         activeAccountId: state.activeAccountId,
-        adapterMode: state.adapterMode,
+        adapterMode: 'server',
         serverUrl: state.serverUrl,
         passcodeHash: state.passcodeHash,
         isLocked: state.isLocked,
@@ -310,22 +322,19 @@ function persistAuthEnvelope(
 
 const bootAuth = loadPersistedAuth();
 
-function detectInitialBootOverride(): { mode?: AdapterMode; serverUrl?: string } {
+function detectInitialServerUrlOverride(): string | undefined {
   const envDefaultServer = (import.meta.env?.VITE_DEFAULT_SERVER_URL ?? '').trim().replace(/\/+$/, '');
   if (typeof window === 'undefined') {
-    return envDefaultServer ? { serverUrl: envDefaultServer } : {};
+    return envDefaultServer || undefined;
   }
   try {
     const params = new URLSearchParams(window.location.search);
-    const qMode = params.get('mode');
     const qServer = params.get('server') || params.get('api');
-    const validMode: AdapterMode | undefined =
-      qMode === 'sandbox' || qMode === 'server' || qMode === 'mtproto' ? qMode : undefined;
-    if (validMode || qServer) {
-      return { mode: validMode, serverUrl: qServer?.trim().replace(/\/+$/, '') || undefined };
+    if (qServer && qServer.trim()) {
+      return qServer.trim().replace(/\/+$/, '');
     }
     if (envDefaultServer && !bootAuth.serverUrl) {
-      return { mode: 'server', serverUrl: envDefaultServer };
+      return envDefaultServer;
     }
     const host = window.location.hostname.toLowerCase();
     const isKnownStaticHost =
@@ -334,29 +343,16 @@ function detectInitialBootOverride(): { mode?: AdapterMode; serverUrl?: string }
       host.endsWith('.netlify.app') ||
       host.endsWith('.vercel.app');
     if (isKnownStaticHost && !bootAuth.serverUrl) {
-      // Production static CDN deployments connect to the real web.ombhrum.com backend instead of fake sandbox!
-      return { mode: 'server', serverUrl: 'https://web.ombhrum.com' };
+      return 'https://web.ombhrum.com';
     }
   } catch {
     // Ignore URL parse error
   }
-  return {};
+  return undefined;
 }
 
-const bootOverride = detectInitialBootOverride();
-const initialServerUrl = bootOverride.serverUrl ?? bootAuth.serverUrl;
-// Never restore accidental stale 'sandbox' mode in production unless explicitly requested via ?mode=sandbox
-const initialAdapterMode: AdapterMode =
-  bootOverride.mode ??
-  (bootAuth.adapterMode === 'sandbox' && import.meta.env?.VITE_ENABLE_DEMO !== '1'
-    ? 'server'
-    : bootAuth.adapterMode);
-
-if (bootOverride.mode || initialServerUrl) {
-  void switchClientAdapterMode(initialAdapterMode, {
-    serverUrl: initialServerUrl,
-  });
-}
+const bootServerOverride = detectInitialServerUrlOverride();
+const initialServerUrl = bootServerOverride ?? bootAuth.serverUrl;
 
 const initialActiveAccount =
   bootAuth.accounts.find((a) => a.accountId === bootAuth.activeAccountId) ??
@@ -365,7 +361,7 @@ const initialActiveAccount =
 
 if (initialActiveAccount) {
   getServerAdapter().configure({
-    serverUrl: bootOverride.serverUrl || initialActiveAccount.serverUrl || initialServerUrl,
+    serverUrl: bootServerOverride || initialActiveAccount.serverUrl || initialServerUrl,
     token: initialActiveAccount.token,
     accountId: initialActiveAccount.accountId,
     userId: initialActiveAccount.userId ?? initialActiveAccount.user.userId,
@@ -386,8 +382,12 @@ export const useAuthStore = create<AuthState>((set, get) => {
   const commitAuthSuccess = async (authRes: AuthResponse): Promise<UserProfile> => {
     const user = authResponseToUserProfile(authRes);
     const accountId = String(user.userId);
-    const mode = get().adapterMode;
+    const prevAccountId = get().activeAccountId;
     const serverUrl = get().serverUrl;
+
+    if (prevAccountId && prevAccountId !== accountId) {
+      clearSavedActiveChatId();
+    }
 
     const entry: StoredAccountSession = {
       accountId,
@@ -396,14 +396,14 @@ export const useAuthStore = create<AuthState>((set, get) => {
       sessionId: authRes.session_id,
       expiresAtMs: authRes.expires_at_ms ?? Date.now() + 30 * 86_400_000,
       user,
-      adapterMode: mode,
+      adapterMode: 'server',
       serverUrl,
     };
 
     const existingOthers = get().accounts.filter((a) => a.accountId !== accountId);
     const accounts = [entry, ...existingOthers].slice(0, MAX_STORED_ACCOUNTS);
 
-    await switchClientAdapterMode(mode, {
+    await switchClientAdapterMode('server', {
       serverUrl,
       token: authRes.token,
       accountId,
@@ -426,11 +426,11 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     persistAuthEnvelope(get());
 
-    const adapter = getClientAdapter(mode);
+    const adapter = getClientAdapter();
     await adapter.connect(authRes.token).catch(() => undefined);
 
     void generateIdentityKeyPair(user.userId)
-      .then((identity) => adapter.publishPreKeys(toPublishPreKeysRequest(identity)))
+      .then((identity) => adapter.publishPreKeys(toPublishPreKeysRequest(identity, 'Fabushi Web (Browser)')))
       .catch(() => undefined);
 
     broadcastSync.publish({ kind: 'auth_switched', activeAccountId: accountId });
@@ -446,10 +446,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
     isAuthenticated: Boolean(initialActiveAccount?.token),
     isAddingAccount: false,
 
-    adapterMode: initialActiveAccount?.adapterMode ?? initialAdapterMode,
-    serverUrl: bootOverride.serverUrl ?? initialActiveAccount?.serverUrl ?? initialServerUrl,
+    adapterMode: 'server',
+    serverUrl: bootServerOverride ?? initialActiveAccount?.serverUrl ?? initialServerUrl,
     serverHealth: { status: 'unknown' },
-    mtprotoConfig: getMtprotoAdapter().getMtprotoConfig(),
 
     passcodeHash: bootAuth.passcodeHash,
     isLocked: bootAuth.isLocked,
@@ -459,7 +458,6 @@ export const useAuthStore = create<AuthState>((set, get) => {
     error: null,
     phoneCodeHash: null,
     pendingPhone: null,
-    devCodeHint: null,
     requires2fa: false,
     twoFaChallengeToken: null,
     twoFaHint: null,
@@ -495,40 +493,32 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     hydrateAuth: async () => {
       const loaded = loadPersistedAuth();
-      const override = detectInitialBootOverride();
-      const effectiveServerUrl = override.serverUrl ?? loaded.serverUrl;
+      const serverOverride = detectInitialServerUrlOverride();
+      const effectiveServerUrl = serverOverride ?? loaded.serverUrl;
       const active =
         loaded.accounts.find((a) => a.accountId === loaded.activeAccountId) ??
         loaded.accounts[0] ??
         null;
 
       if (!active) {
-        const resolvedMode: AdapterMode =
-          override.mode ??
-          (loaded.adapterMode === 'sandbox' && import.meta.env?.VITE_ENABLE_DEMO !== '1'
-            ? 'server'
-            : loaded.adapterMode);
-        await switchClientAdapterMode(resolvedMode, { serverUrl: effectiveServerUrl });
+        await switchClientAdapterMode('server', { serverUrl: effectiveServerUrl });
         set({
           accounts: [],
           activeAccountId: null,
           currentUser: null,
           token: null,
           isAuthenticated: false,
-          adapterMode: resolvedMode,
+          adapterMode: 'server',
           serverUrl: effectiveServerUrl,
           passcodeHash: loaded.passcodeHash,
           isLocked: false,
         });
-        if (resolvedMode === 'server') {
-          void get().probeServerHealth(effectiveServerUrl);
-        }
+        void get().probeServerHealth(effectiveServerUrl);
         return;
       }
 
-      const activeMode = override.mode ?? active.adapterMode;
-      const targetServerUrl = override.serverUrl || active.serverUrl || loaded.serverUrl;
-      const adapter = await switchClientAdapterMode(activeMode, {
+      const targetServerUrl = serverOverride || active.serverUrl || loaded.serverUrl;
+      const adapter = await switchClientAdapterMode('server', {
         serverUrl: targetServerUrl,
         token: active.token,
         accountId: active.accountId,
@@ -541,7 +531,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         currentUser: active.user,
         token: active.token,
         isAuthenticated: true,
-        adapterMode: activeMode,
+        adapterMode: 'server',
         serverUrl: targetServerUrl,
         passcodeHash: loaded.passcodeHash,
         isLocked: loaded.isLocked,
@@ -569,8 +559,8 @@ export const useAuthStore = create<AuthState>((set, get) => {
           msg.includes('unauthorized') ||
           msg.includes('invalid or expired') ||
           msg.includes('session revoked');
-        if (isAuthRejected && activeMode === 'server') {
-          // Matching desktop shell.rs: clear expired/revoked session cleanly instead of showing stale cache
+        if (isAuthRejected) {
+          clearSavedActiveChatId();
           const remaining = get().accounts.filter((a) => a.accountId !== active.accountId);
           set({
             accounts: remaining,
@@ -590,21 +580,6 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     clearError: () => set({ error: null, passcodeError: null }),
 
-    setAdapterMode: async (mode) => {
-      const state = get();
-      await switchClientAdapterMode(mode, {
-        serverUrl: state.serverUrl,
-        token: state.token,
-        accountId: state.activeAccountId ?? 'default',
-        userId: state.currentUser?.userId ?? 0,
-      });
-      set({ adapterMode: mode, error: null });
-      persistAuthEnvelope(get());
-      if (state.token) {
-        await getClientAdapter(mode).connect(state.token).catch(() => undefined);
-      }
-    },
-
     setServerUrl: (url) => {
       const clean = url.trim().replace(/\/+$/, '');
       getServerAdapter().configure({ serverUrl: clean });
@@ -612,34 +587,16 @@ export const useAuthStore = create<AuthState>((set, get) => {
       persistAuthEnvelope(get());
     },
 
-    setMtprotoConfig: (patch) => {
-      const next = getMtprotoAdapter().setMtprotoConfig(patch);
-      set({ mtprotoConfig: next });
-    },
-
-    loginDemo: async (slot = 0) => {
-      set({ isLoading: true, error: null });
-      try {
-        const res = await getClientAdapter(get().adapterMode).loginDemo(slot);
-        return await commitAuthSuccess(res);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        set({ isLoading: false, error: msg });
-        throw err;
-      }
-    },
-
     sendPhoneCode: async (phone) => {
       set({ isLoading: true, error: null, requires2fa: false });
       try {
-        const res = await getClientAdapter(get().adapterMode).sendPhoneCode(phone);
+        const res = await getClientAdapter().sendPhoneCode(phone);
         set({
           isLoading: false,
           pendingPhone: phone,
           phoneCodeHash: res.phone_code_hash,
-          devCodeHint: res.dev_code ?? null,
         });
-        return { phoneCodeHash: res.phone_code_hash, devCode: res.dev_code };
+        return { phoneCodeHash: res.phone_code_hash };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         set({ isLoading: false, error: msg });
@@ -652,7 +609,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const phone_code_hash = params.phoneCodeHash ?? get().phoneCodeHash ?? undefined;
       set({ isLoading: true, error: null });
       try {
-        const res = await getClientAdapter(get().adapterMode).verifyPhoneCode({
+        const res = await getClientAdapter().verifyPhoneCode({
           phone,
           phone_code_hash,
           code: params.code,
@@ -691,7 +648,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const challenge_token = get().twoFaChallengeToken ?? '';
       set({ isLoading: true, error: null });
       try {
-        const res = await getClientAdapter(get().adapterMode).verify2fa({
+        const res = await getClientAdapter().verify2fa({
           challenge_token,
           password,
         });
@@ -704,13 +661,13 @@ export const useAuthStore = create<AuthState>((set, get) => {
     },
 
     refresh2faStatus: async () => {
-      const status = await getClientAdapter(get().adapterMode).get2faStatus();
+      const status = await getClientAdapter().get2faStatus();
       set({ twoFaStatus: status });
       return status;
     },
 
     set2faPassword: async (req) => {
-      const status = await getClientAdapter(get().adapterMode).set2faPassword({
+      const status = await getClientAdapter().set2faPassword({
         current_password: req.currentPassword,
         new_password: req.newPassword,
         hint: req.hint,
@@ -721,15 +678,15 @@ export const useAuthStore = create<AuthState>((set, get) => {
     },
 
     disable2faPassword: async (currentPassword) => {
-      const res = await getClientAdapter(get().adapterMode).disable2faPassword(currentPassword);
+      const res = await getClientAdapter().disable2faPassword(currentPassword);
       set({ twoFaStatus: { enabled: false, has_password: false } });
       return res;
     },
 
-    startQrPairing: async (deviceName) => {
+    startQrPairing: async (deviceName = 'Fabushi Web') => {
       set({ isLoading: true, error: null });
       try {
-        const session = await getClientAdapter(get().adapterMode).initQrPairing(deviceName);
+        const session = await getClientAdapter().initQrPairing(deviceName);
         set({ isLoading: false, qrSession: session });
         return session;
       } catch (err) {
@@ -742,7 +699,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     pollQrPairing: async (pairId) => {
       const targetId = pairId ?? get().qrSession?.pair_id;
       if (!targetId) return null;
-      const session = await getClientAdapter(get().adapterMode).pollQrPairing(targetId);
+      const session = await getClientAdapter().pollQrPairing(targetId);
       set({ qrSession: session });
       if (session.status === 'approved' && (session.session || (session.token && session.user))) {
         const auth: AuthResponse = session.session ?? {
@@ -757,39 +714,10 @@ export const useAuthStore = create<AuthState>((set, get) => {
       return session;
     },
 
-    simulateQrAccept: async (pairId) => {
-      const adapter = getClientAdapter(get().adapterMode);
-      const targetId = pairId ?? get().qrSession?.pair_id ?? (await get().startQrPairing()).pair_id;
-      set({ isLoading: true, error: null });
-      try {
-        const session = await adapter.acceptQrPairing(targetId);
-        set({ qrSession: session });
-        if (!session.session && !(session.token && session.user)) {
-          throw new Error('二维码扫码尚未获得服务器授权凭证');
-        }
-        const auth: AuthResponse = session.session ?? {
-          user_id: session.user!.user_id,
-          username: session.user!.username ?? `user${session.user!.user_id}`,
-          session_id: `qr_${session.pair_id}`,
-          token: session.token!,
-          user: session.user,
-        };
-        return await commitAuthSuccess(auth);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        set({ isLoading: false, error: msg });
-        throw err;
-      }
-    },
-
     loginPassword: async (username, password, twoFaPassword) => {
       set({ isLoading: true, error: null });
       try {
-        const res = await getClientAdapter(get().adapterMode).loginPassword(
-          username,
-          password,
-          twoFaPassword,
-        );
+        const res = await getClientAdapter().loginPassword(username, password, twoFaPassword);
         await commitAuthSuccess(res);
         return { authenticated: true };
       } catch (err) {
@@ -812,7 +740,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     registerPassword: async (req) => {
       set({ isLoading: true, error: null });
       try {
-        const res = await getClientAdapter(get().adapterMode).registerPassword({
+        const res = await getClientAdapter().registerPassword({
           username: req.username,
           password: req.password,
           first_name: req.firstName || req.username,
@@ -826,17 +754,57 @@ export const useAuthStore = create<AuthState>((set, get) => {
       }
     },
 
+    upgradeSplitKey: async (oldPassword) => {
+      const salt = generateRandomSaltB64(16);
+      const derived = await deriveSplitKeyV2(oldPassword, salt, DEFAULT_ARGON2_KDF_PARAMS);
+      return getServerAdapter().upgradeSplitKey({
+        old_password: oldPassword,
+        auth_salt_b64: salt,
+        auth_verifier_b64: derived.authVerifierB64,
+        kdf_params: derived.kdfParams,
+      });
+    },
+
+    changePassword: async (oldSecret, newPassword) => {
+      const user = get().currentUser;
+      const server = getServerAdapter();
+      let resolvedOldSecret = oldSecret;
+      if (user?.username) {
+        try {
+          const kdf = await server.getKdfParams(user.username);
+          if (kdf.auth_version === 2 && kdf.auth_salt_b64) {
+            const oldDerived = await deriveSplitKeyV2(
+              oldSecret,
+              kdf.auth_salt_b64,
+              kdf.kdf_params ?? DEFAULT_ARGON2_KDF_PARAMS,
+            );
+            resolvedOldSecret = oldDerived.authVerifierB64;
+          }
+        } catch {
+          // Fall back to direct oldSecret if KDF probe fails
+        }
+      }
+      const newSalt = generateRandomSaltB64(16);
+      const nextDerived = await deriveSplitKeyV2(newPassword, newSalt, DEFAULT_ARGON2_KDF_PARAMS);
+      return server.changePassword({
+        old_secret: resolvedOldSecret,
+        auth_version: 2,
+        new_auth_salt_b64: newSalt,
+        new_auth_verifier_b64: nextDerived.authVerifierB64,
+        new_kdf_params: nextDerived.kdfParams,
+      });
+    },
+
     sendEmailCode: async (email) => {
       set({ isLoading: true, error: null });
       try {
-        const res = await getClientAdapter(get().adapterMode).sendEmailCode(email);
+        const res = await getClientAdapter().sendEmailCode(email);
         set({
           isLoading: false,
           pendingEmail: email,
           emailCodeHash: res.email_code_hash,
-          devCodeHint: res.dev_code ?? null,
         });
-        return { emailCodeHash: res.email_code_hash, devCode: res.dev_code };
+        return { emailCodeHash: res.email_code_hash };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         set({ isLoading: false, error: msg });
@@ -849,13 +817,24 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const email_code_hash = params.emailCodeHash ?? get().emailCodeHash ?? undefined;
       set({ isLoading: true, error: null });
       try {
-        const res = await getClientAdapter(get().adapterMode).verifyEmailCode({
+        const res = await getClientAdapter().verifyEmailCode({
           email,
           code: params.code,
           email_code_hash,
         });
-        return await commitAuthSuccess(res);
+        await commitAuthSuccess(res);
+        return { authenticated: true };
       } catch (err) {
+        if (err instanceof TwoFactorChallengeError) {
+          set({
+            isLoading: false,
+            requires2fa: true,
+            twoFaChallengeToken: err.challengeToken,
+            twoFaHint: err.hint ?? null,
+            error: null,
+          });
+          return { authenticated: false, requires2fa: true };
+        }
         const msg = err instanceof Error ? err.message : String(err);
         set({ isLoading: false, error: msg });
         throw err;
@@ -867,18 +846,15 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const email_code_hash = params.emailCodeHash ?? get().emailCodeHash ?? undefined;
       set({ isLoading: true, error: null });
       try {
-        const adapter = getClientAdapter(get().adapterMode);
-        const res = adapter.emailRegister
-          ? await adapter.emailRegister({
-              email,
-              code: params.code,
-              username: params.username,
-              password: params.password,
-              first_name: params.firstName,
-              last_name: params.lastName,
-              email_code_hash,
-            })
-          : await adapter.verifyEmailCode({ email, code: params.code, email_code_hash });
+        const res = await getServerAdapter().emailRegister({
+          email,
+          code: params.code,
+          username: params.username,
+          password: params.password,
+          first_name: params.firstName,
+          last_name: params.lastName,
+          email_code_hash,
+        });
         return await commitAuthSuccess(res);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -890,7 +866,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     startAlipay: async () => {
       set({ isLoading: true, error: null });
       try {
-        const session = await getClientAdapter(get().adapterMode).startAlipayAuth();
+        const session = await getClientAdapter().startAlipayAuth();
         set({ isLoading: false, alipaySession: session });
         return session;
       } catch (err) {
@@ -904,7 +880,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const base = get().alipaySession;
       const targetId = sessionId ?? base?.session_id;
       if (!targetId) return null;
-      const polled = await getClientAdapter(get().adapterMode).pollAlipayAuth(targetId);
+      const polled = await getClientAdapter().pollAlipayAuth(targetId);
       const next: AlipayAuthSession = {
         session_id: targetId,
         qr_url: base?.qr_url ?? '',
@@ -920,141 +896,129 @@ export const useAuthStore = create<AuthState>((set, get) => {
       return next;
     },
 
-    confirmAlipay: async (sessionId) => {
-      let targetId = sessionId ?? get().alipaySession?.session_id;
-      if (!targetId) {
-        const created = await get().startAlipay();
-        targetId = created.session_id;
-      }
-      set({ isLoading: true, error: null });
-      try {
-        const res = await getClientAdapter(get().adapterMode).confirmAlipayAuth(targetId);
-        return await commitAuthSuccess(res);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        set({ isLoading: false, error: msg });
-        throw err;
-      }
-    },
-
-    registerPasskey: async (label = 'GPUI Web Passkey') => {
-      const adapter = getClientAdapter(get().adapterMode);
+    registerPasskey: async (label = 'Fabushi Web Passkey') => {
+      const server = getServerAdapter();
       const user = get().currentUser;
       if (!user) {
         throw new Error('请先登录后再绑定通行密钥 (Passkey)');
       }
-      const challenge = await adapter.getPasskeyChallenge(user.username);
-
-      let credId: string | undefined;
-      let publicKeyB64 = '';
-
       if (
-        typeof window !== 'undefined' &&
-        typeof window.PublicKeyCredential !== 'undefined' &&
-        navigator.credentials &&
-        typeof navigator.credentials.create === 'function'
+        typeof window === 'undefined' ||
+        typeof window.PublicKeyCredential === 'undefined' ||
+        !navigator.credentials ||
+        typeof navigator.credentials.create !== 'function'
       ) {
-        const userIdBytes = new TextEncoder().encode(String(user.userId));
-        const created = (await navigator.credentials.create({
-          publicKey: {
-            challenge: base64ToUint8Array(challenge.challenge) as BufferSource,
-            rp: {
-              name: 'GPUI Telegram Web',
-              id: challenge.rp_id || window.location.hostname || 'localhost',
-            },
-            user: {
-              id: userIdBytes as BufferSource,
-              name: user.username || `user_${user.userId}`,
-              displayName:
-                `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() ||
-                user.username ||
-                `User ${user.userId}`,
-            },
-            pubKeyCredParams: [
-              { type: 'public-key', alg: -7 },
-              { type: 'public-key', alg: -257 },
-            ],
-            authenticatorSelection: {
-              userVerification: 'preferred',
-              residentKey: 'preferred',
-            },
-            timeout: 60_000,
-          },
-        })) as PublicKeyCredential | null;
-
-        if (created) {
-          credId = created.id || arrayBufferToBase64Url(created.rawId);
-          const resp = created.response as AuthenticatorAttestationResponse;
-          if (typeof resp.getPublicKey === 'function') {
-            const pk = resp.getPublicKey();
-            if (pk) publicKeyB64 = arrayBufferToBase64Url(pk);
-          }
-        }
-      } else if (get().adapterMode === 'sandbox') {
-        credId = `pk_cred_${Date.now()}`;
-      } else {
-        throw new Error('当前浏览器或环境不支持 WebAuthn Passkey（需要 HTTPS 安全上下文）');
+        throw new Error('当前浏览器或环境不支持 WebAuthn Passkey（需要 HTTPS 或 localhost 安全上下文）');
       }
 
-      if (!credId) {
+      const opts = await server.getPasskeyRegisterOptions();
+      const userIdBytes = opts.user?.id
+        ? base64ToUint8Array(opts.user.id)
+        : new TextEncoder().encode(String(user.userId));
+
+      const created = (await navigator.credentials.create({
+        publicKey: {
+          challenge: base64ToUint8Array(opts.challenge) as BufferSource,
+          rp: {
+            name: opts.rp?.name || 'Fabushi Web',
+            id: opts.rp?.id || opts.rp_id || window.location.hostname || 'localhost',
+          },
+          user: {
+            id: userIdBytes as BufferSource,
+            name: opts.user?.name || user.username || `user_${user.userId}`,
+            displayName:
+              opts.user?.displayName ||
+              `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() ||
+              user.username ||
+              `User ${user.userId}`,
+          },
+          pubKeyCredParams: opts.pubKeyCredParams ?? [
+            { type: 'public-key', alg: -7 },
+            { type: 'public-key', alg: -8 },
+            { type: 'public-key', alg: -257 },
+          ],
+          excludeCredentials: (opts.excludeCredentials ?? []).map((c) => ({
+            type: 'public-key' as const,
+            id: base64ToUint8Array(c.id) as BufferSource,
+          })),
+          authenticatorSelection: {
+            userVerification: 'preferred',
+            residentKey: 'preferred',
+          },
+          timeout: opts.timeout ?? 60_000,
+        },
+      })) as PublicKeyCredential | null;
+
+      if (!created) {
         throw new Error('已取消创建通行密钥');
       }
 
-      const res = await adapter.registerPasskey({
+      const credId = created.id || arrayBufferToBase64Url(created.rawId);
+      const resp = created.response as AuthenticatorAttestationResponse;
+      const attestationObject = arrayBufferToBase64Url(resp.attestationObject);
+      const clientDataJSON = arrayBufferToBase64Url(resp.clientDataJSON);
+      let publicKeyB64: string | undefined;
+      if (typeof resp.getPublicKey === 'function') {
+        const pk = resp.getPublicKey();
+        if (pk) publicKeyB64 = arrayBufferToBase64Url(pk);
+      }
+
+      const res = await server.registerPasskey({
+        challenge_id: opts.challenge_id,
         cred_id: credId,
         label,
-        public_key_b64: publicKeyB64 || undefined,
+        attestationObject,
+        clientDataJSON,
+        public_key_b64: publicKeyB64,
       });
-      try {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('gpui_tg_last_passkey_id', res.cred_id || credId);
-        }
-      } catch {
-        // Ignore
-      }
       return Boolean(res.cred_id);
     },
 
     loginPasskey: async (username) => {
       set({ isLoading: true, error: null });
       try {
-        const adapter = getClientAdapter(get().adapterMode);
-        const challenge = await adapter.getPasskeyChallenge(username);
-        let credentialId: string | undefined;
-
         if (
-          typeof window !== 'undefined' &&
-          typeof window.PublicKeyCredential !== 'undefined' &&
-          navigator.credentials &&
-          typeof navigator.credentials.get === 'function'
+          typeof window === 'undefined' ||
+          typeof window.PublicKeyCredential === 'undefined' ||
+          !navigator.credentials ||
+          typeof navigator.credentials.get !== 'function'
         ) {
-          const assertion = (await navigator.credentials.get({
-            publicKey: {
-              challenge: base64ToUint8Array(challenge.challenge) as BufferSource,
-              rpId: challenge.rp_id || window.location.hostname || 'localhost',
-              userVerification: 'preferred',
-              timeout: 60_000,
-            },
-          })) as PublicKeyCredential | null;
-          if (assertion) {
-            credentialId = assertion.id || arrayBufferToBase64Url(assertion.rawId);
-          }
-        } else if (get().adapterMode === 'sandbox') {
-          credentialId =
-            (typeof localStorage !== 'undefined'
-              ? localStorage.getItem('gpui_tg_last_passkey_id')
-              : null) ?? `pk_sandbox_${Date.now()}`;
-        } else {
           throw new Error('当前浏览器不支持 WebAuthn 通行密钥，请使用 HTTPS 或切换其他登录方式');
         }
 
-        if (!credentialId) {
+        const server = getServerAdapter();
+        const opts = await server.getPasskeyChallenge(username);
+        const allowCredentials =
+          opts.allowCredentials && opts.allowCredentials.length > 0
+            ? opts.allowCredentials.map((c) => ({
+                type: 'public-key' as const,
+                id: base64ToUint8Array(c.id) as BufferSource,
+              }))
+            : undefined;
+
+        const assertion = (await navigator.credentials.get({
+          publicKey: {
+            challenge: base64ToUint8Array(opts.challenge) as BufferSource,
+            rpId: opts.rp_id || window.location.hostname || 'localhost',
+            allowCredentials,
+            userVerification: 'preferred',
+            timeout: opts.timeout ?? 60_000,
+          },
+        })) as PublicKeyCredential | null;
+
+        if (!assertion) {
           throw new Error('未获取到通行密钥凭证');
         }
 
-        const auth = await adapter.verifyPasskey({
-          challenge_id: challenge.challenge_id,
+        const credentialId = assertion.id || arrayBufferToBase64Url(assertion.rawId);
+        const resp = assertion.response as AuthenticatorAssertionResponse;
+        const auth = await server.verifyPasskey({
+          challenge_id: opts.challenge_id,
           credential_id: credentialId,
+          clientDataJSON: arrayBufferToBase64Url(resp.clientDataJSON),
+          authenticatorData: arrayBufferToBase64Url(resp.authenticatorData),
+          signature: arrayBufferToBase64Url(resp.signature),
+          device_name: 'Fabushi Web Passkey',
         });
         return await commitAuthSuccess(auth);
       } catch (err) {
@@ -1064,13 +1028,18 @@ export const useAuthStore = create<AuthState>((set, get) => {
       }
     },
 
+    listPasskeys: () => getServerAdapter().listPasskeys(),
+
+    deletePasskey: (credId) => getServerAdapter().deletePasskey(credId),
+
     switchAccount: async (accountId) => {
       const target = get().accounts.find((a) => a.accountId === accountId);
       if (!target) return;
 
-      await getClientAdapter(get().adapterMode).disconnect().catch(() => undefined);
+      clearSavedActiveChatId();
+      await getClientAdapter().disconnect().catch(() => undefined);
 
-      const adapter = await switchClientAdapterMode(target.adapterMode, {
+      const adapter = await switchClientAdapterMode('server', {
         serverUrl: target.serverUrl || get().serverUrl,
         token: target.token,
         accountId: target.accountId,
@@ -1083,7 +1052,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         token: target.token,
         isAuthenticated: true,
         isAddingAccount: false,
-        adapterMode: target.adapterMode,
+        adapterMode: 'server',
         serverUrl: target.serverUrl || get().serverUrl,
         error: null,
       });
@@ -1112,7 +1081,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (get().activeAccountId === accountId) {
         if (remaining.length > 0) {
           set({ accounts: remaining });
-          await get().switchAccount(remaining[0].accountId);
+          await get().switchAccount(remaining[0]!.accountId);
           return;
         }
         await get().logout(true);
@@ -1122,9 +1091,32 @@ export const useAuthStore = create<AuthState>((set, get) => {
       persistAuthEnvelope(get());
     },
 
+    deleteAccount: async () => {
+      const currentId = get().activeAccountId;
+      await getServerAdapter().deleteAccount();
+      clearSavedActiveChatId();
+      const remaining = get().accounts.filter((a) => a.accountId !== currentId);
+      set({
+        accounts: remaining,
+        activeAccountId: null,
+        currentUser: null,
+        token: null,
+        isAuthenticated: false,
+        isAddingAccount: false,
+        isLocked: false,
+        requires2fa: false,
+        twoFaChallengeToken: null,
+        qrSession: null,
+        alipaySession: null,
+      });
+      persistAuthEnvelope(get());
+      broadcastSync.publish({ kind: 'auth_switched', activeAccountId: null });
+    },
+
     logout: async (logoutAll = false) => {
       const currentId = get().activeAccountId;
-      await getClientAdapter(get().adapterMode).logout().catch(() => undefined);
+      clearSavedActiveChatId();
+      await getClientAdapter().logout().catch(() => undefined);
 
       const remaining = logoutAll
         ? []
@@ -1132,7 +1124,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
       if (remaining.length > 0 && !logoutAll) {
         set({ accounts: remaining });
-        await get().switchAccount(remaining[0].accountId);
+        await get().switchAccount(remaining[0]!.accountId);
         return;
       }
 
@@ -1154,18 +1146,18 @@ export const useAuthStore = create<AuthState>((set, get) => {
     },
 
     loadSessions: async () => {
-      const sessions = await getClientAdapter(get().adapterMode).listSessions();
+      const sessions = await getClientAdapter().listSessions();
       set({ activeSessions: sessions });
       return sessions;
     },
 
     revokeSession: async (sessionId) => {
-      await getClientAdapter(get().adapterMode).revokeSession(sessionId);
+      await getClientAdapter().revokeSession(sessionId);
       await get().loadSessions();
     },
 
     revokeOtherSessions: async () => {
-      const count = await getClientAdapter(get().adapterMode).revokeOtherSessions();
+      const count = await getClientAdapter().revokeOtherSessions();
       await get().loadSessions();
       return count;
     },
@@ -1221,6 +1213,28 @@ export const useAuthStore = create<AuthState>((set, get) => {
       return true;
     },
   };
+});
+
+// Listen for server-side session revocation / WS close 4001 / AuthError
+getServerAdapter().onAuthInvalidated((reason) => {
+  const st = useAuthStore.getState();
+  if (!st.isAuthenticated && !st.activeAccountId) return;
+  clearSavedActiveChatId();
+  const remaining = st.accounts.filter((a) => a.accountId !== st.activeAccountId);
+  useAuthStore.setState({
+    accounts: remaining,
+    activeAccountId: null,
+    currentUser: null,
+    token: null,
+    isAuthenticated: false,
+    isAddingAccount: false,
+    isLocked: false,
+    error:
+      reason === 'account_deleted'
+        ? '账号已注销。'
+        : '登录会话已失效或被撤销，请重新登录。',
+  });
+  persistAuthEnvelope(useAuthStore.getState());
 });
 
 // Global Ctrl+Shift+L / Cmd+Shift+L Passcode Lock Shortcut + Multi-Tab Lock Sync

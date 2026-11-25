@@ -6,9 +6,11 @@ import {
   type MessageItem,
   type ReactionDetail,
 } from '@gpui-telegram/protocol';
+import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useUiStore } from '../../store/useUiStore';
+import { GrokBotAvatar, resolveBotHueName } from '../common/GrokBotAvatar';
 import { MessageCards } from './MessageCards';
 
 export const QUICK_7_REACTIONS = [
@@ -29,8 +31,8 @@ export const EXTENDED_32_REACTION_EMOJIS = [
 ] as const;
 
 const SENDER_NAME_COLORS = [
-  '#3390EC',
-  '#00C972',
+  '#0A84FF',
+  '#00BA69',
   '#E5A030',
   '#E86C52',
   '#E15B64',
@@ -65,14 +67,12 @@ function clampPositionToViewport(
   };
 }
 
+/** Local-timezone 24-hour HH:MM formatting avoiding '24:xx' locale quirk (A03-T1-06) */
 function formatMessageTime(isoDate: string, dateMs?: number): string {
   const ts = dateMs ?? Date.parse(isoDate);
   if (!Number.isFinite(ts)) return '';
-  return new Date(ts).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function formatServiceEventCopy(message: MessageItem): string {
@@ -124,16 +124,16 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   const deleteMessages = useChatStore((s) => s.deleteMessages);
   const toggleReaction = useChatStore((s) => s.toggleReaction);
   const fetchReactionDetails = useChatStore((s) => s.fetchReactionDetails);
+  const closePoll = useChatStore((s) => s.closePoll);
 
+  const bots = useAiWorkspaceStore((s) => s.bots);
   const openModal = useUiStore((s) => s.openModal);
   const pushToast = useUiStore((s) => s.pushToast);
   const currentUser = useAuthStore((s) => s.currentUser);
 
   const [hovered, setHovered] = useState<boolean>(false);
   const [stripBelow, setStripBelow] = useState<boolean>(false);
-  const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | null>(
-    null,
-  );
+  const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | null>(null);
   const [ctxMenuPos, setCtxMenuPos] = useState<{
     x: number;
     y: number;
@@ -146,7 +146,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     details: ReactionDetail[];
   } | null>(null);
 
-  // Close local popovers on outside click or Escape
   useEffect(() => {
     if (!pickerPos && !ctxMenuPos && !reactorModalPos) return;
     const onWindowClick = () => {
@@ -212,8 +211,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           style={{
             padding: '3px 12px',
             borderRadius: '999px',
-            backgroundColor: 'rgba(14, 22, 33, 0.56)',
-            color: 'var(--tg-text-secondary, #8FA2B7)',
+            backgroundColor: 'var(--tg-bg-elevated)',
+            border: '1px solid var(--tg-hairline-border)',
+            color: 'var(--tg-text-secondary)',
             fontSize: '12px',
             fontWeight: 500,
           }}
@@ -237,19 +237,29 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       message.content.type === 'Media');
 
   const senderPeer = peersById[message.sender_id];
+  const senderBot = bots.find((b) => b.bot_user_id === message.sender_id);
+  const isBotSender = Boolean(senderBot || senderPeer?.isBot || (!isOut && (chat.isBot || chat.kind === 'bot')));
+  const botHue = isBotSender
+    ? resolveBotHueName(
+        senderBot?.agent_id || senderBot?.username || chat.username || String(message.sender_id),
+        senderBot?.avatar_color,
+      )
+    : undefined;
+
   const senderDisplayName =
     message.sender_id === myUserId
       ? currentUser?.firstName || 'You'
-      : senderPeer
-        ? `${senderPeer.firstName}${senderPeer.lastName ? ` ${senderPeer.lastName}` : ''}`
-        : chat.isChannel
-          ? chat.title
-          : `User #${message.sender_id}`;
+      : senderBot
+        ? senderBot.display_name || senderBot.username
+        : senderPeer
+          ? `${senderPeer.firstName}${senderPeer.lastName ? ` ${senderPeer.lastName}` : ''}`
+          : chat.isChannel
+            ? chat.title
+            : `User #${message.sender_id}`;
 
   const plainBodyText =
     message.text ?? extractPlainTextFromContent(message.content);
 
-  // Delivery / Read receipt status
   const deliveryStatus: 'pending' | 'sent' | 'read' =
     message.delivery_status === 'sending'
       ? 'pending'
@@ -281,7 +291,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     e.preventDefault();
     e.stopPropagation();
     const sel = readBubbleSelection() || selectedQuoteText;
-    const clamped = clampPositionToViewport(e.clientX, e.clientY, 224, 340);
+    const clamped = clampPositionToViewport(e.clientX, e.clientY, 224, 360);
     setPickerPos(null);
     setCtxMenuPos({
       x: clamped.x,
@@ -333,7 +343,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     setSelectedQuoteText('');
   };
 
-  // Reply header resolution
   const replyHeader = message.reply_to;
   const replyQuoteOnly = replyHeader?.quote_text?.trim();
   const resolvedReplyPreview = isReplyDeleted
@@ -354,6 +363,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             : `User #${repliedMessage.sender_id}`)
         : 'Reply');
 
+  const isOpenPoll = message.content.type === 'Poll' && !message.content.data.is_closed;
+
   return (
     <div
       className={`tg-message-row ${isOut ? 'is-outgoing' : 'is-incoming'}`}
@@ -363,13 +374,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         }
       }}
       style={{
-        display: 'flex',
-        alignItems: 'flex-end',
-        justifyContent: isOut ? 'flex-end' : 'flex-start',
-        gap: '8px',
-        width: '100%',
-        maxWidth: '780px',
-        margin: '0 auto',
         cursor: isMultiSelectMode ? 'pointer' : 'default',
       }}
     >
@@ -384,7 +388,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           style={{
             width: '18px',
             height: '18px',
-            accentColor: '#3390EC',
+            accentColor: 'var(--tg-accent)',
             cursor: 'pointer',
             marginBottom: '8px',
             flexShrink: 0,
@@ -396,34 +400,43 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       {!isOut && (chat.isGroup || chat.isSupergroup) && (
         <div
           style={{
-            width: '32px',
-            height: '32px',
+            width: '30px',
+            height: '30px',
             flexShrink: 0,
             visibility: showTail ? 'visible' : 'hidden',
           }}
         >
-          {showTail && (
-            <div
-              data-avatar="true"
-              className="tg-avatar"
-              style={{
-                width: '32px',
-                height: '32px',
-                borderRadius: '50%',
-                backgroundColor:
-                  SENDER_NAME_COLORS[peerAvatarColorIndex(message.sender_id)] ??
-                  '#3390EC',
-                color: '#FFFFFF',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: '12px',
-                fontWeight: 700,
-              }}
-            >
-              {senderDisplayName.slice(0, 1).toUpperCase()}
-            </div>
-          )}
+          {showTail &&
+            (isBotSender ? (
+              <GrokBotAvatar
+                sourceId={senderBot?.agent_id || senderBot?.username || String(message.sender_id)}
+                shape={senderBot?.avatar_shape}
+                color={senderBot?.avatar_color}
+                sizePx={30}
+                initials={senderDisplayName.slice(0, 2).toUpperCase()}
+              />
+            ) : (
+              <div
+                data-avatar="true"
+                className="tg-avatar"
+                style={{
+                  width: '30px',
+                  height: '30px',
+                  borderRadius: '50%',
+                  backgroundColor:
+                    SENDER_NAME_COLORS[peerAvatarColorIndex(message.sender_id)] ??
+                    '#0A84FF',
+                  color: '#FFFFFF',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '11.5px',
+                  fontWeight: 700,
+                }}
+              >
+                {senderDisplayName.slice(0, 1).toUpperCase()}
+              </div>
+            ))}
         </div>
       )}
 
@@ -437,6 +450,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         data-pinned={message.flags?.is_pinned ? 'true' : 'false'}
         data-highlighted={isHighlighted ? 'true' : 'false'}
         data-forwarded={showForwardHeader ? 'true' : undefined}
+        data-bot-hue={!isOut ? botHue : undefined}
         dir="auto"
         className={`tg-message-bubble ${isOut ? 'is-outgoing' : 'is-incoming'}${
           isSelected ? ' is-selected' : ''
@@ -460,31 +474,29 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         }}
         onContextMenu={handleContextMenu}
         style={{
-          position: 'relative',
-          minWidth: '160px',
-          maxWidth: 'min(480px, 84%)',
-          padding: isSticker ? '4px' : '8px 12px 6px',
-          borderRadius: isOut ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+          minWidth: '38px',
+          maxWidth: 'min(520px, 84%)',
+          padding: isSticker ? '4px' : '8px 13px 6px',
+          borderRadius: 'var(--tg-bubble-radius, 18px)',
+          borderBottomRightRadius: isOut && showTail ? '6px' : undefined,
+          borderBottomLeftRadius: !isOut && showTail ? '6px' : undefined,
           backgroundColor: isSticker
             ? 'transparent'
             : isHighlighted
-              ? 'rgba(51, 144, 236, 0.3)'
+              ? 'var(--tg-accent-strong)'
               : isOut
-                ? 'var(--tg-bubble-out, #2B5278)'
-                : 'var(--tg-bubble-in, #182533)',
-          color: 'var(--tg-text-primary, #F5F5F5)',
-          boxShadow: isHighlighted
-            ? '0 0 0 2px var(--tg-accent, #3390EC), 0 8px 24px rgba(51, 144, 236, 0.3)'
-            : isSticker
-              ? 'none'
-              : 'var(--tg-shadow-sm)',
-          outline: isSelected ? '2px solid var(--tg-accent, #3390EC)' : 'none',
-          overflowWrap: 'anywhere',
-          wordBreak: 'break-word',
-          transition: 'background-color 180ms ease, box-shadow 180ms ease',
+                ? 'var(--tg-bubble-out)'
+                : 'var(--tg-bubble-in)',
+          backgroundImage:
+            isOut && !isSticker && !isHighlighted
+              ? 'var(--tg-bubble-out-gradient)'
+              : 'none',
+          color: isOut ? 'var(--tg-bubble-out-text)' : 'var(--tg-bubble-in-text)',
+          boxShadow: isSticker ? 'none' : 'var(--tg-shadow-sm)',
+          outline: isHighlighted || isSelected ? '2px solid var(--tg-accent)' : 'none',
         }}
       >
-        {/* Out-of-Flow Floating Partial Quote Pill when text is selected inside bubble */}
+        {/* Out-of-Flow Floating Partial Quote Pill */}
         {selectedQuoteText.length > 0 && !isMultiSelectMode && (
           <button
             type="button"
@@ -495,18 +507,18 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             }}
             style={{
               position: 'absolute',
-              top: '-30px',
+              top: '-32px',
               left: '8px',
               zIndex: 45,
               padding: '3px 9px',
               borderRadius: '999px',
-              border: '1px solid var(--tg-accent, #3390EC)',
-              backgroundColor: 'var(--tg-bg-surface, #17212B)',
-              color: 'var(--tg-accent, #3390EC)',
+              border: '1px solid var(--tg-accent)',
+              backgroundColor: 'var(--tg-bg-elevated)',
+              color: 'var(--tg-accent)',
               fontSize: '11.5px',
               fontWeight: 700,
               cursor: 'pointer',
-              boxShadow: '0 6px 18px rgba(0,0,0,0.4)',
+              boxShadow: 'var(--tg-shadow-md)',
             }}
           >
             ❝ Quote Selection
@@ -518,11 +530,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           <div
             data-testid="message-sender-name"
             style={{
-              fontSize: '12.5px',
+              fontSize: '12px',
               fontWeight: 700,
               color:
                 SENDER_NAME_COLORS[peerAvatarColorIndex(message.sender_id)] ??
-                '#3390EC',
+                '#0A84FF',
               marginBottom: '3px',
             }}
           >
@@ -530,18 +542,18 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           </div>
         )}
 
-        {/* Forwarded Header (omitted when hidden_sender is true) */}
+        {/* Forwarded Header */}
         {showForwardHeader && message.forward_info && (
           <div
             data-testid="forward-header"
             style={{
               fontSize: '12px',
-              color: 'var(--tg-accent, #6AB8FF)',
+              color: isOut ? 'var(--tg-bubble-out-meta)' : 'var(--tg-accent)',
               marginBottom: '4px',
               fontWeight: 500,
             }}
           >
-            ↪ Forwarded from {message.forward_info.from_name || 'Telegram User'}
+            ↪ Forwarded from {message.forward_info.from_name || 'User'}
           </div>
         )}
 
@@ -569,9 +581,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             style={{
               marginBottom: '6px',
               padding: '4px 8px',
-              borderLeft: '3px solid var(--tg-accent, #3390EC)',
-              borderRadius: '3px 6px 6px 3px',
-              backgroundColor: 'rgba(0, 0, 0, 0.18)',
+              borderLeft: `3px solid ${isOut ? 'rgba(255,255,255,0.75)' : 'var(--tg-accent)'}`,
+              borderRadius: '4px 6px 6px 4px',
+              backgroundColor: isOut ? 'rgba(0, 0, 0, 0.16)' : 'var(--tg-bubble-quote-bg)',
               cursor: isReplyDeleted ? 'default' : 'pointer',
               fontSize: '12px',
             }}
@@ -579,7 +591,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             <div
               style={{
                 fontWeight: 700,
-                color: 'var(--tg-accent, #6AB8FF)',
+                color: isOut ? '#FFFFFF' : 'var(--tg-accent)',
                 fontSize: '11.5px',
               }}
             >
@@ -588,8 +600,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             <div
               style={{
                 color: isReplyDeleted
-                  ? 'var(--tg-text-secondary, #8FA2B7)'
-                  : 'var(--tg-text-primary, #F5F5F5)',
+                  ? isOut
+                    ? 'var(--tg-bubble-out-meta)'
+                    : 'var(--tg-text-secondary)'
+                  : 'inherit',
                 fontStyle: isReplyDeleted ? 'italic' : 'normal',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -604,16 +618,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         {/* Primary Rich Message Content / Cards */}
         <MessageCards message={message} peerUserId={chat.peerUserId} />
 
-        {/* Reaction Counter Pills */}
+        {/* Reaction Counter Chips (Trap #10: data-testid="reaction-chip") */}
         {visibleReactions.length > 0 && (
           <div
             data-testid="reaction-pills"
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: '4px',
-              marginTop: '6px',
-            }}
+            className="tg-reactions-row"
           >
             {visibleReactions.map((r) => {
               const chosen = Boolean(r.chosen ?? r.is_chosen_by_me);
@@ -621,7 +630,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 <button
                   key={r.emoji}
                   type="button"
-                  data-testid="reaction-pill"
+                  data-testid="reaction-chip"
                   data-emoji={r.emoji}
                   data-reaction={r.emoji}
                   data-chosen={chosen ? 'true' : 'false'}
@@ -637,23 +646,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                     e.stopPropagation();
                     void handleOpenReactorList(e.clientX, e.clientY);
                   }}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    padding: '2px 8px',
-                    borderRadius: '999px',
-                    border: chosen
-                      ? '1px solid var(--tg-accent, #3390EC)'
-                      : '1px solid rgba(255, 255, 255, 0.14)',
-                    backgroundColor: chosen
-                      ? 'rgba(51, 144, 236, 0.28)'
-                      : 'rgba(255, 255, 255, 0.1)',
-                    color: chosen ? '#82C8FF' : 'var(--tg-text-primary, #F5F5F5)',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
                 >
                   <span>{r.emoji}</span>{' '}
                   <span>{r.count}</span>
@@ -663,7 +655,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           </div>
         )}
 
-        {/* Metadata Footer: Views, Pinned, Edited, Timestamp, Outgoing Read Receipt */}
+        {/* Metadata Footer: Views, Pinned, Edited, Local HH:MM Timestamp, Outgoing Read Receipt */}
         {' '}
         <div
           style={{
@@ -673,7 +665,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             gap: '5px',
             marginTop: '3px',
             fontSize: '11px',
-            color: 'rgba(220, 230, 242, 0.68)',
+            color: isOut ? 'var(--tg-bubble-out-meta)' : 'var(--tg-bubble-in-meta)',
             userSelect: 'none',
           }}
         >
@@ -701,7 +693,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </>
           )}
 
-          <time dateTime={message.date} data-testid="message-timestamp">
+          <time
+            dateTime={message.date}
+            data-testid="message-timestamp"
+            className="tg-bubble-timestamp"
+          >
             {formatMessageTime(message.date, message.date_ms)}
           </time>
 
@@ -721,8 +717,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 style={{
                   color:
                     deliveryStatus === 'read'
-                      ? '#62C0FF'
-                      : 'rgba(220, 230, 242, 0.72)',
+                      ? '#FFFFFF'
+                      : 'var(--tg-bubble-out-meta)',
                   fontWeight: 700,
                   letterSpacing: '-1px',
                 }}
@@ -747,17 +743,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               isOut ? 'tg-bubble-tail--out' : 'tg-bubble-tail--in'
             }`}
             style={{
-              position: 'absolute',
-              bottom: 0,
               [isOut ? 'right' : 'left']: '-6px',
-              width: '9px',
-              height: '16px',
-              pointerEvents: 'none',
               color: isHighlighted
-                ? '#3390EC'
+                ? 'var(--tg-accent)'
                 : isOut
-                  ? 'var(--tg-bubble-out, #2B5278)'
-                  : 'var(--tg-bubble-in, #182533)',
+                  ? 'var(--tg-bubble-out-bottom)'
+                  : 'var(--tg-bubble-in)',
             }}
           >
             {isOut ? (
@@ -768,41 +759,52 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           </svg>
         )}
 
-        {/* Out-of-Flow Hover Quick Reaction Strip (0px layout shift!) */}
+        {/* Out-of-Flow Hover Action Bar (Trap #10: 0px layout shift & reaction-trigger FIRST!) */}
         {hovered && !isMultiSelectMode && (
           <div
             role="toolbar"
-            data-testid="quick-reaction-strip"
-            aria-label="Quick reactions"
+            data-testid="hover-action-bar"
+            aria-label="Message quick actions"
             onClick={(e) => e.stopPropagation()}
             style={{
               position: 'absolute',
-              [stripBelow ? 'bottom' : 'top']: '-36px',
+              [stripBelow ? 'bottom' : 'top']: '-38px',
               [isOut ? 'right' : 'left']: '0px',
               paddingBottom: stripBelow ? 0 : '6px',
               paddingTop: stripBelow ? '6px' : 0,
               zIndex: 40,
             }}
           >
-            <div
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '2px',
-                padding: '3px 6px',
-                borderRadius: '999px',
-                backgroundColor: 'var(--tg-bg-surface, #17212B)',
-                border: '1px solid var(--tg-border, #242F3D)',
-                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.42)',
-              }}
-            >
+            <div className="tg-hover-action-bar" style={{ position: 'static' }}>
+              {/* First button matching [data-testid*="reaction" i] opens 32-emoji picker (no double-toggle!) */}
+              <button
+                type="button"
+                data-testid="reaction-trigger"
+                aria-label="React to message"
+                aria-expanded={Boolean(pickerPos)}
+                onClick={handleOpenExtendedPicker}
+                style={{
+                  width: '26px',
+                  height: '26px',
+                  borderRadius: '50%',
+                  backgroundColor: 'var(--tg-accent-soft)',
+                  color: 'var(--tg-accent)',
+                  fontSize: '14px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                ☺
+              </button>
+
               {QUICK_7_REACTIONS.map((emoji) => (
                 <button
                   key={emoji}
                   type="button"
-                  data-testid="btn-quick-react"
-                  data-quick-reaction={emoji}
-                  aria-label={`React ${emoji}`}
+                  data-testid="quick-emoji-btn"
+                  data-quick-emoji={emoji}
+                  aria-label={`Emoji ${emoji}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     setHovered(false);
@@ -812,54 +814,28 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                     width: '26px',
                     height: '26px',
                     borderRadius: '50%',
-                    border: 'none',
                     backgroundColor: 'transparent',
                     fontSize: '15px',
                     lineHeight: 1,
                     display: 'inline-flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    cursor: 'pointer',
-                    padding: 0,
                   }}
                 >
                   {emoji}
                 </button>
               ))}
-              <button
-                type="button"
-                data-testid="btn-quick-react-more"
-                aria-label="More reactions"
-                aria-expanded={Boolean(pickerPos)}
-                onClick={handleOpenExtendedPicker}
-                style={{
-                  width: '24px',
-                  height: '24px',
-                  borderRadius: '50%',
-                  border: 'none',
-                  backgroundColor: 'rgba(255, 255, 255, 0.08)',
-                  color: 'var(--tg-text-secondary, #8FA2B7)',
-                  fontSize: '11px',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                  padding: 0,
-                }}
-              >
-                ▼
-              </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Viewport-Clamped 8x4 = 32 Emoji Extended Reaction Picker */}
+      {/* Viewport-Clamped 8x4 = 32 Emoji Reaction Picker (Trap #10: data-testid="reaction-picker") */}
       {pickerPos && (
         <div
           role="dialog"
           aria-label="Choose a reaction"
-          data-testid="extended-reaction-picker"
+          data-testid="reaction-picker"
           onClick={(e) => e.stopPropagation()}
           style={{
             position: 'fixed',
@@ -867,9 +843,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             top: `${pickerPos.y}px`,
             padding: '8px',
             borderRadius: '12px',
-            backgroundColor: 'var(--tg-bg-surface, #17212B)',
-            border: '1px solid var(--tg-border, #242F3D)',
-            boxShadow: '0 14px 36px rgba(0, 0, 0, 0.5)',
+            backgroundColor: 'var(--tg-bg-elevated)',
+            border: '1px solid var(--tg-hairline-border)',
+            boxShadow: 'inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-lg)',
             zIndex: 1350,
             display: 'grid',
             gridTemplateColumns: 'repeat(8, 34px)',
@@ -881,7 +857,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               key={emoji}
               type="button"
               data-reaction-option={emoji}
-              aria-label={`React ${emoji}`}
+              aria-label={`Emoji ${emoji}`}
               onClick={(e) => {
                 e.stopPropagation();
                 setPickerPos(null);
@@ -892,15 +868,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 width: '34px',
                 height: '34px',
                 borderRadius: '8px',
-                border: 'none',
-                backgroundColor: 'rgba(255, 255, 255, 0.04)',
+                backgroundColor: 'transparent',
                 fontSize: '19px',
                 lineHeight: 1,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                cursor: 'pointer',
-                padding: 0,
               }}
             >
               {emoji}
@@ -912,24 +885,16 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       {/* Viewport-Clamped Message Context Menu */}
       {ctxMenuPos && (
         <div
+          id="message-context-menu"
           role="menu"
           data-testid="context-menu"
           aria-label="Message actions"
+          className="tg-context-menu"
           onClick={(e) => e.stopPropagation()}
           style={{
-            position: 'fixed',
             left: `${ctxMenuPos.x}px`,
             top: `${ctxMenuPos.y}px`,
-            width: '220px',
-            padding: '6px',
-            borderRadius: '10px',
-            backgroundColor: 'var(--tg-bg-surface, #17212B)',
-            border: '1px solid var(--tg-border, #242F3D)',
-            boxShadow: '0 14px 36px rgba(0, 0, 0, 0.5)',
-            zIndex: 1350,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '2px',
+            width: '226px',
           }}
         >
           <button
@@ -939,7 +904,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               setCtxMenuPos(null);
               handleReply();
             }}
-            style={ctxMenuItemStyle(false)}
+            className="tg-context-menu-item"
           >
             ↩ Reply · 回复
           </button>
@@ -953,7 +918,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 setCtxMenuPos(null);
                 handleReply(q);
               }}
-              style={ctxMenuItemStyle(false)}
+              className="tg-context-menu-item"
             >
               ❝ Quote · 引用选中文本
             </button>
@@ -967,9 +932,28 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 setCtxMenuPos(null);
                 setEditingMessage(message.chat_id, message);
               }}
-              style={ctxMenuItemStyle(false)}
+              className="tg-context-menu-item"
             >
               ✎ Edit · 编辑
+            </button>
+          )}
+
+          {/* Trap #12: Stop Poll menuitem for open polls */}
+          {isOpenPoll && message.content.type === 'Poll' && (
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="ctx-stop-poll"
+              onClick={() => {
+                const pollId = message.content.type === 'Poll' ? message.content.data.poll_id : 0;
+                setCtxMenuPos(null);
+                if (pollId) {
+                  void closePoll(message.chat_id, message.id, pollId);
+                }
+              }}
+              className="tg-context-menu-item"
+            >
+              ⏹ Stop Poll · 结束投票
             </button>
           )}
 
@@ -984,7 +968,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 !message.flags?.is_pinned,
               );
             }}
-            style={ctxMenuItemStyle(false)}
+            className="tg-context-menu-item"
           >
             📌 {message.flags?.is_pinned ? 'Unpin · 取消置顶' : 'Pin · 置顶'}
           </button>
@@ -1000,7 +984,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               });
               onRequestForward?.([message.id]);
             }}
-            style={ctxMenuItemStyle(false)}
+            className="tg-context-menu-item"
           >
             ↪ Forward · 转发
           </button>
@@ -1012,7 +996,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               setCtxMenuPos(null);
               toggleMessageSelection(message.id, true);
             }}
-            style={ctxMenuItemStyle(false)}
+            className="tg-context-menu-item"
           >
             ☑ Select · 多选
           </button>
@@ -1024,12 +1008,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               setCtxMenuPos(null);
               try {
                 await navigator.clipboard.writeText(plainBodyText);
-                pushToast('Message copied', 'success');
+                pushToast('Message copied', 'success', { scope: 'stage', chatId: message.chat_id });
               } catch {
                 pushToast('Clipboard unavailable', 'warning');
               }
             }}
-            style={ctxMenuItemStyle(false)}
+            className="tg-context-menu-item"
           >
             ⧉ Copy Text · 复制文本
           </button>
@@ -1043,7 +1027,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 setCtxMenuPos(null);
                 void handleOpenReactorList(pos.x, pos.y);
               }}
-              style={ctxMenuItemStyle(false)}
+              className="tg-context-menu-item"
             >
               ❤️ Reactions ({visibleReactions.reduce((s, r) => s + r.count, 0)})
             </button>
@@ -1060,7 +1044,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 void deleteMessages(message.chat_id, [message.id], true);
               }
             }}
-            style={ctxMenuItemStyle(true)}
+            className="tg-context-menu-item is-danger"
           >
             🗑 Delete · 删除
           </button>
@@ -1083,9 +1067,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             overflowY: 'auto',
             padding: '12px',
             borderRadius: '12px',
-            backgroundColor: 'var(--tg-bg-surface, #17212B)',
-            border: '1px solid var(--tg-border, #242F3D)',
-            boxShadow: '0 14px 36px rgba(0, 0, 0, 0.5)',
+            backgroundColor: 'var(--tg-bg-elevated)',
+            border: '1px solid var(--tg-hairline-border)',
+            boxShadow: 'inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-lg)',
             zIndex: 1360,
           }}
         >
@@ -1102,13 +1086,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               type="button"
               aria-label="Close reactions"
               onClick={() => setReactorModalPos(null)}
-              style={{
-                border: 'none',
-                background: 'transparent',
-                color: 'var(--tg-text-secondary, #8FA2B7)',
-                cursor: 'pointer',
-                fontSize: '14px',
-              }}
+              className="tg-icon-btn"
+              style={{ width: '24px', height: '24px', fontSize: '13px' }}
             >
               ✕
             </button>
@@ -1124,10 +1103,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 const peer = peersById[uid];
                 const fullName =
                   uid === myUserId
-                    ? `${currentUser?.firstName || 'Telegram'} ${currentUser?.lastName || 'User'}`.trim()
+                    ? `${currentUser?.firstName || 'You'} ${currentUser?.lastName || ''}`.trim()
                     : peer
                       ? `${peer.firstName}${peer.lastName ? ` ${peer.lastName}` : ''}`
-                      : `Telegram User #${uid}`;
+                      : `User #${uid}`;
                 return (
                   <div
                     key={`${detail.emoji}-${uid}-${idx}`}
@@ -1139,7 +1118,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                       gap: '8px',
                       padding: '4px 6px',
                       borderRadius: '8px',
-                      backgroundColor: 'rgba(255, 255, 255, 0.04)',
+                      backgroundColor: 'var(--tg-bg-hover)',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
@@ -1151,7 +1130,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                           height: '28px',
                           borderRadius: '50%',
                           backgroundColor:
-                            SENDER_NAME_COLORS[peerAvatarColorIndex(uid)] ?? '#3390EC',
+                            SENDER_NAME_COLORS[peerAvatarColorIndex(uid)] ?? '#0A84FF',
                           color: '#FFFFFF',
                           fontSize: '12px',
                           fontWeight: 700,
@@ -1188,17 +1167,3 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     </div>
   );
 };
-
-function ctxMenuItemStyle(danger: boolean): React.CSSProperties {
-  return {
-    width: '100%',
-    textAlign: 'left',
-    padding: '7px 10px',
-    borderRadius: '6px',
-    border: 'none',
-    backgroundColor: 'transparent',
-    color: danger ? '#E15B64' : 'var(--tg-text-primary, #F5F5F5)',
-    fontSize: '13px',
-    cursor: 'pointer',
-  };
-}

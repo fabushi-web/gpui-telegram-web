@@ -1,5 +1,9 @@
-/* Barrel stylesheet importing the complete GPUI Telegram Web design system */
+/* Barrel stylesheet importing the modular Fabushi Web v1.6.11 design system */
 @import "./reset.css";
 @import "./tokens.css";
 @import "./layout.css";
-@import "./components.css";
+@import "./auth.css";
+@import "./left.css";
+@import "./middle.css";
+@import "./right-settings-modals.css";
+@import "./ai-miniapps.css";

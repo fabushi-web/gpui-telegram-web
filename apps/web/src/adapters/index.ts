@@ -6,14 +6,10 @@ import type {
   UserProfile,
 } from '@gpui-telegram/protocol';
 import { HttpWsServerAdapter } from './httpWsServerAdapter';
-import { LocalSandboxAdapter } from './localSandboxAdapter';
-import { MtprotoAdapter } from './mtprotoAdapter';
 
 export * from './indexedDbCache';
 export * from './broadcastSync';
 export * from './httpWsServerAdapter';
-export * from './localSandboxAdapter';
-export * from './mtprotoAdapter';
 
 export type ExtendedTelegramAdapter = TelegramClientPort &
   BrowserControlClientPort & {
@@ -27,37 +23,17 @@ export type ExtendedTelegramAdapter = TelegramClientPort &
   };
 
 const sharedServerAdapter = new HttpWsServerAdapter();
-const sharedSandboxAdapter = new LocalSandboxAdapter();
-const sharedMtprotoAdapter = new MtprotoAdapter(sharedServerAdapter, sharedSandboxAdapter);
-
-let activeAdapterMode: AdapterMode = 'server';
 
 export function getServerAdapter(): HttpWsServerAdapter {
   return sharedServerAdapter;
 }
 
-export function getSandboxAdapter(): LocalSandboxAdapter {
-  return sharedSandboxAdapter;
-}
-
-export function getMtprotoAdapter(): MtprotoAdapter {
-  return sharedMtprotoAdapter;
-}
-
-export function getClientAdapter(mode: AdapterMode = activeAdapterMode): ExtendedTelegramAdapter {
-  switch (mode) {
-    case 'sandbox':
-      return sharedSandboxAdapter;
-    case 'mtproto':
-      return sharedMtprotoAdapter;
-    case 'server':
-    default:
-      return sharedServerAdapter;
-  }
+export function getClientAdapter(_mode?: AdapterMode): ExtendedTelegramAdapter {
+  return sharedServerAdapter;
 }
 
 export async function switchClientAdapterMode(
-  nextMode: AdapterMode,
+  _nextMode: AdapterMode,
   options?: {
     serverUrl?: string;
     token?: string | null;
@@ -65,11 +41,6 @@ export async function switchClientAdapterMode(
     userId?: number | string;
   },
 ): Promise<ExtendedTelegramAdapter> {
-  if (nextMode !== activeAdapterMode) {
-    await getClientAdapter(activeAdapterMode).disconnect().catch(() => undefined);
-    activeAdapterMode = nextMode;
-  }
-
   if (options) {
     sharedServerAdapter.configure({
       serverUrl: options.serverUrl,
@@ -78,10 +49,9 @@ export async function switchClientAdapterMode(
       userId: options.userId !== undefined ? Number(options.userId) : undefined,
     });
   }
-
-  return getClientAdapter(activeAdapterMode);
+  return sharedServerAdapter;
 }
 
 export function getActiveAdapterMode(): AdapterMode {
-  return activeAdapterMode;
+  return 'server';
 }

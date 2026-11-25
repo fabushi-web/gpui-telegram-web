@@ -1,4 +1,5 @@
 export { ContactsModal, type ContactsModalProps } from './ContactsModal';
+export { CreateBotModal, type CreateBotModalProps } from './CreateBotModal';
 export { CreateChannelModal, type CreateChannelModalProps } from './CreateChannelModal';
 export { CreateGroupModal, type CreateGroupModalProps } from './CreateGroupModal';
 export { CreateInvoiceModal, type CreateInvoiceModalProps } from './CreateInvoiceModal';

@@ -1,6 +1,6 @@
 /* ==========================================================================
-   GPUI Telegram Web — CSS Reset & Base Utilities (reset.css)
-   Zero horizontal overflow, crisp typography, thin scrollbars, word-wrap safety.
+   Fabushi Web v1.6.11 — CSS Reset, Base Utilities & Shared Primitives (reset.css)
+   Zero horizontal overflow, crisp typography, thin scrollbars, shared .tg-* controls.
    ========================================================================== */
 
 *,
@@ -107,7 +107,7 @@ samp {
   font-family: var(--tg-font-mono);
 }
 
-/* Focus visibility — crisp sky-blue ring (never default browser purple) */
+/* Focus visibility — crisp Apple Blue ring (never default browser purple) */
 :focus-visible {
   outline: 2px solid var(--tg-accent);
   outline-offset: 1px;
@@ -164,4 +164,257 @@ textarea:focus-visible {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Shared Primitive Controls (.tg-btn*, .tg-icon-btn, .tg-input, .tg-switch,
+   .tg-slider, .tg-avatar*, .tg-badge*, .tg-surface-card)
+   Preserved 100% compatible for M4B & M5 components
+   -------------------------------------------------------------------------- */
+.tg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: var(--tg-radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+  transition: background-color var(--tg-duration-fast) ease,
+    color var(--tg-duration-fast) ease,
+    border-color var(--tg-duration-fast) ease,
+    transform 80ms ease;
+}
+
+.tg-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.tg-btn--primary {
+  background-color: var(--tg-accent);
+  color: var(--tg-on-accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.tg-btn--primary:hover:not(:disabled) {
+  background-color: var(--tg-accent-hover);
+}
+
+.tg-btn--secondary {
+  background-color: var(--tg-bg-elevated);
+  color: var(--tg-text-primary);
+  border: 1px solid var(--tg-hairline-border);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top);
+}
+
+.tg-btn--secondary:hover:not(:disabled) {
+  background-color: var(--tg-bg-hover);
+}
+
+.tg-btn--ghost {
+  background: transparent;
+  color: var(--tg-accent);
+}
+
+.tg-btn--ghost:hover:not(:disabled) {
+  background-color: var(--tg-accent-soft);
+}
+
+.tg-btn--danger {
+  background-color: var(--tg-danger);
+  color: #FFFFFF;
+}
+
+.tg-btn--danger-soft {
+  background-color: var(--tg-danger-soft);
+  color: var(--tg-danger);
+}
+
+.tg-icon-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tg-text-secondary);
+  flex-shrink: 0;
+  transition: background-color var(--tg-duration-fast) ease,
+    color var(--tg-duration-fast) ease;
+}
+
+.tg-icon-btn:hover:not(:disabled) {
+  background-color: var(--tg-bg-hover);
+  color: var(--tg-text-primary);
+}
+
+.tg-icon-btn.is-active {
+  background-color: var(--tg-accent-soft);
+  color: var(--tg-accent);
+}
+
+.tg-input,
+.tg-select,
+.tg-textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--tg-radius-sm);
+  border: 1px solid var(--tg-hairline-border);
+  background-color: var(--tg-bg-input);
+  color: var(--tg-text-primary);
+  font-size: 14px;
+  transition: border-color var(--tg-duration-fast) ease,
+    background-color var(--tg-duration-fast) ease;
+}
+
+.tg-input:focus,
+.tg-select:focus,
+.tg-textarea:focus {
+  border-color: var(--tg-accent);
+}
+
+.tg-search-pill {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--tg-radius-pill);
+  background-color: var(--tg-bg-input);
+  border: 1px solid var(--tg-hairline-border);
+  transition: border-color var(--tg-duration-fast) ease,
+    background-color var(--tg-duration-fast) ease;
+}
+
+.tg-search-pill:focus-within {
+  border-color: var(--tg-accent);
+  background-color: var(--tg-bg-elevated);
+}
+
+.tg-search-pill input {
+  flex: 1 1 auto;
+  border: none;
+  background: transparent;
+  color: var(--tg-text-primary);
+  font-size: 13.5px;
+}
+
+.tg-switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: var(--tg-radius-pill);
+  background-color: var(--tg-muted-badge);
+  transition: background-color var(--tg-duration-fast) ease;
+  flex-shrink: 0;
+}
+
+.tg-switch[aria-checked="true"],
+.tg-switch.is-checked {
+  background-color: var(--tg-accent);
+}
+
+.tg-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-color: #FFFFFF;
+  transition: transform var(--tg-duration-fast) var(--tg-ease-out);
+}
+
+.tg-switch[aria-checked="true"] .tg-switch-thumb,
+.tg-switch.is-checked .tg-switch-thumb {
+  transform: translateX(18px);
+}
+
+input[type="range"].tg-slider {
+  width: 100%;
+  accent-color: var(--tg-accent);
+  cursor: pointer;
+}
+
+/* Avatars (7 Deterministic Non-Purple Peer Colors) & Badges */
+.tg-avatar {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: #FFFFFF;
+  background-color: var(--tg-avatar-6);
+  flex-shrink: 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+.tg-avatar--sm {
+  width: 32px;
+  height: 32px;
+  font-size: 12px;
+}
+
+.tg-avatar--lg {
+  width: 64px;
+  height: 64px;
+  font-size: 22px;
+}
+
+.tg-avatar[data-color-index="0"] { background-color: var(--tg-avatar-0); }
+.tg-avatar[data-color-index="1"] { background-color: var(--tg-avatar-1); }
+.tg-avatar[data-color-index="2"] { background-color: var(--tg-avatar-2); }
+.tg-avatar[data-color-index="3"] { background-color: var(--tg-avatar-3); }
+.tg-avatar[data-color-index="4"] { background-color: var(--tg-avatar-4); }
+.tg-avatar[data-color-index="5"] { background-color: var(--tg-avatar-5); }
+.tg-avatar[data-color-index="6"] { background-color: var(--tg-avatar-6); }
+
+.tg-online-dot {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background-color: var(--tg-success);
+  border: 2px solid var(--tg-bg-sidebar);
+}
+
+.tg-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--tg-radius-pill);
+  background-color: var(--tg-unread-badge);
+  color: #FFFFFF;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.tg-badge--muted {
+  background-color: var(--tg-muted-badge);
+}
+
+.tg-badge--secret {
+  background-color: var(--tg-secret-soft);
+  color: var(--tg-secret);
+}
+
+.tg-surface-card {
+  padding: 16px;
+  border-radius: var(--tg-radius-md);
+  background-color: var(--tg-bg-elevated);
+  border: 1px solid var(--tg-hairline-border);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top);
 }

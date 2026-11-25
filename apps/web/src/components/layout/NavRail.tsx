@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { DOM_IDS } from '@gpui-telegram/protocol';
 import { t } from '../../i18n';
+import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore, type NavDestinationId } from '../../store/useUiStore';
@@ -27,8 +28,10 @@ export const NavRail: React.FC<NavRailProps> = ({ className }) => {
   const setActiveNavDest = useUiStore((s) => s.setActiveNavDest);
   const openSettings = useUiStore((s) => s.openSettings);
   const closeSettings = useUiStore((s) => s.closeSettings);
+  const pushToast = useUiStore((s) => s.pushToast);
 
   const chatsById = useChatStore((s) => s.chatsById);
+  const activeChatId = useChatStore((s) => s.activeChatId);
 
   const totalUnread = useMemo(() => {
     let sum = 0;
@@ -144,6 +147,19 @@ export const NavRail: React.FC<NavRailProps> = ({ className }) => {
     setActiveNavDest(dest);
   };
 
+  const handleLaunchFabushiMiniApp = (): void => {
+    if (isSettingsOpen) {
+      closeSettings();
+    }
+    void useAiWorkspaceStore
+      .getState()
+      .launchMiniApp('FabushiBot', 'fabushi-globe', activeChatId ?? undefined)
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        pushToast(msg || 'Failed to launch Fabushi Mini App', 'error');
+      });
+  };
+
   return (
     <nav
       id={DOM_IDS.NAV_RAIL}
@@ -213,6 +229,31 @@ export const NavRail: React.FC<NavRailProps> = ({ className }) => {
             </button>
           );
         })}
+
+        {/* Permanently visible Fabushi 3D MiniApp launch button (even on empty workspaces) */}
+        <button
+          id="nav-miniapp-fabushi"
+          data-testid="nav-miniapp-fabushi"
+          data-miniapp-short-name="fabushi-globe"
+          type="button"
+          aria-label={
+            language === 'zh-CN'
+              ? '法布施小程序 · Fabushi Mini App'
+              : 'Fabushi Mini App · 法布施小程序'
+          }
+          title={language === 'zh-CN' ? '全球法布施 3D 小程序' : 'Fabushi 3D Mini App'}
+          onClick={handleLaunchFabushiMiniApp}
+          className="tg-nav-rail-item tg-nav-rail-fabushi"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 3c2.8 2.6 4.2 5.6 4.2 9s-1.4 6.4-4.2 9c-2.8-2.6-4.2-5.6-4.2-9s1.4-6.4 4.2-9z" />
+            <path d="M3.5 12h17" />
+          </svg>
+          <span style={{ lineHeight: 1 }}>
+            {language === 'zh-CN' ? '法布施' : 'Fabushi'}
+          </span>
+        </button>
       </div>
 
       <div className="tg-nav-rail-group">

@@ -156,6 +156,7 @@ export const BurgerMenuDrawer: React.FC<BurgerMenuDrawerProps> = ({
                   <span style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
                     <span
                       className="tg-avatar tg-avatar--sm"
+                      data-avatar="true"
                       data-color-index={String(acc.user.colorIndex)}
                       style={{ width: '26px', height: '26px', fontSize: '11px' }}
                     >
@@ -282,6 +283,17 @@ export const BurgerMenuDrawer: React.FC<BurgerMenuDrawerProps> = ({
           >
             <span aria-hidden="true">📢</span>
             <span>{t('menu.newChannel', language)}</span>
+          </button>
+
+          <button
+            id="menu-item-create-bot"
+            type="button"
+            role="menuitem"
+            onClick={() => openModal('create_bot')}
+            className="tg-context-menu-item"
+          >
+            <span aria-hidden="true">🤖</span>
+            <span>{language === 'zh-CN' ? '创建智能体 Bot' : 'Create Bot'}</span>
           </button>
 
           <button

@@ -55,7 +55,6 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
   const [isSubmittingRating, setIsSubmittingRating] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const mirrorCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Sync live runtime from webrtcManager into both local state & useUiStore (so #top-call-bar stays in sync too!)
   useEffect(() => {
@@ -102,7 +101,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
     }
   }, [activeCall.isOpen, chat?.chatId, chat?.isGroup, chat?.isSupergroup, loadChatAdminData]);
 
-  // Bind MediaStream to <video>
+  // Bind genuine WebRTC MediaStream to <video> (zero synthetic <canvas>!)
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl || !liveRuntime) return;
@@ -112,45 +111,13 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
         videoEl.srcObject = stream;
         void videoEl.play().catch(() => undefined);
       } catch {
-        // Fallback canvas handles headless rendering cleanly
+        // Ignore autoplay rejection; mediaError alert surfaces status honestly
       }
     }
   }, [
     liveRuntime,
     liveRuntime?.remoteStream,
     liveRuntime?.localStream,
-    liveRuntime?.isVideoEnabled,
-    liveRuntime?.isScreenSharing,
-    activeCall.isMinimized,
-  ]);
-
-  // Mirror synthetic canvas into visible <canvas> when camera or screen share uses headless synthetic stream
-  useEffect(() => {
-    const destCanvas = mirrorCanvasRef.current;
-    const srcCanvas = liveRuntime?.fallbackCanvas;
-    const showVideoStage = Boolean(
-      liveRuntime && (liveRuntime.isVideo || liveRuntime.isVideoEnabled || liveRuntime.isScreenSharing),
-    );
-    if (!destCanvas || !srcCanvas || !showVideoStage || activeCall.isMinimized) {
-      return;
-    }
-
-    let rafId = 0;
-    const ctx = destCanvas.getContext('2d');
-    const renderMirror = () => {
-      if (ctx && srcCanvas.width > 0 && srcCanvas.height > 0) {
-        ctx.drawImage(srcCanvas, 0, 0, destCanvas.width, destCanvas.height);
-      }
-      rafId = requestAnimationFrame(renderMirror);
-    };
-    renderMirror();
-
-    return () => {
-      if (rafId) cancelAnimationFrame(rafId);
-    };
-  }, [
-    liveRuntime?.fallbackCanvas,
-    liveRuntime?.isVideo,
     liveRuntime?.isVideoEnabled,
     liveRuntime?.isScreenSharing,
     activeCall.isMinimized,
@@ -464,7 +431,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
               </div>
             )}
 
-            {/* Video / Screen Share Stream Viewport */}
+            {/* Video / Screen Share Stream Viewport (STRICTLY ZERO synthetic <canvas>!) */}
             {showVideoViewport ? (
               <div
                 data-testid="call-video-stage"
@@ -474,9 +441,12 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
                   height: 'min(360px, 48dvh)',
                   borderRadius: '16px',
                   overflow: 'hidden',
-                  background: '#17212B',
-                  border: '1px solid #2B5278',
-                  boxShadow: '0 12px 32px rgba(0, 0, 0, 0.45)',
+                  background: 'var(--tg-bg-surface)',
+                  border: '1px solid var(--tg-hairline-border)',
+                  boxShadow: 'var(--tg-shadow-md)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
                 }}
               >
                 <video
@@ -488,33 +458,39 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
                     width: '100%',
                     height: '100%',
                     objectFit: 'cover',
-                    display: liveRuntime.fallbackCanvas ? 'none' : 'block',
+                    display:
+                      liveRuntime.remoteStream || liveRuntime.localStream
+                        ? 'block'
+                        : 'none',
                   }}
                 />
-                {liveRuntime.fallbackCanvas && (
-                  <canvas
-                    ref={mirrorCanvasRef}
-                    width={640}
-                    height={360}
+                {!liveRuntime.remoteStream && !liveRuntime.localStream && (
+                  <div
+                    data-testid="call-video-unavailable"
                     style={{
-                      width: '100%',
-                      height: '100%',
-                      objectFit: 'cover',
-                      display: 'block',
+                      padding: '20px',
+                      textAlign: 'center',
+                      color: 'var(--tg-text-secondary)',
+                      fontSize: '13.5px',
                     }}
-                  />
+                  >
+                    {liveRuntime.mediaError ||
+                      (isZh
+                        ? '摄像头或屏幕流不可用 · 等待真实媒体轨道'
+                        : 'Camera / screen stream unavailable · awaiting media track')}
+                  </div>
                 )}
               </div>
             ) : (
               !isGroupCall && (
                 <div
+                  data-avatar="true"
                   className="tg-avatar tg-avatar--lg"
                   data-color-index={peerAvatarColorIndex(liveRuntime.peerUserId || 1)}
                   style={{
                     width: '108px',
                     height: '108px',
                     fontSize: '34px',
-                    boxShadow: '0 0 0 10px rgba(51, 144, 236, 0.16)',
                   }}
                 >
                   {peerDisplayName.slice(0, 2).toUpperCase()}

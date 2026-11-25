@@ -25,6 +25,22 @@ export default defineConfig({
         target: 'http://127.0.0.1:4173',
         changeOrigin: true,
       },
+      '/oauth': {
+        target: 'http://127.0.0.1:4173',
+        changeOrigin: true,
+      },
+      '/mcp': {
+        target: 'http://127.0.0.1:4173',
+        changeOrigin: true,
+      },
+      '/.well-known': {
+        target: 'http://127.0.0.1:4173',
+        changeOrigin: true,
+      },
+      '/bot': {
+        target: 'http://127.0.0.1:4173',
+        changeOrigin: true,
+      },
     },
   },
   build: {

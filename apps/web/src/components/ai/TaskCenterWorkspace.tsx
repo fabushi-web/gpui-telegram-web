@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { DOM_IDS, type TaskFsmState, type TaskItemDto } from '@gpui-telegram/protocol';
 import { describeCronExpression, useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useChatStore } from '../../store/useChatStore';
@@ -62,80 +62,50 @@ function validateFieldToken(token: string, min: number, max: number): boolean {
 }
 
 export function validateFiveFieldCron(rawExpr: string): CronValidationResult {
-  const trimmed = rawExpr.trim();
-  if (!trimmed) {
-    return {
-      valid: true,
-      nextRunPreview: 'Manual Trigger · 手动按需执行 (未设置 Cron)',
-    };
+  const expr = rawExpr.trim();
+  if (!expr) {
+    return { valid: true, nextRunPreview: 'Manual / immediate trigger · 手动或立即触发' };
   }
-  const fields = trimmed.split(/\s+/);
+  const fields = expr.split(/\s+/);
   if (fields.length !== 5) {
     return {
       valid: false,
-      error: `Invalid 5-field cron: expected 5 fields (min hour dom mon dow), got ${fields.length} · 请输入标准 5 段 Cron 表达式`,
+      error: `Expected 5 cron fields (min hour dom mon dow), received ${fields.length}`,
     };
   }
   const bounds: Array<[number, number, string]> = [
-    [0, 59, 'minute (0-59)'],
-    [0, 23, 'hour (0-23)'],
-    [1, 31, 'day-of-month (1-31)'],
-    [1, 12, 'month (1-12)'],
-    [0, 7, 'day-of-week (0-7)'],
+    [0, 59, 'minute'],
+    [0, 23, 'hour'],
+    [1, 31, 'day-of-month'],
+    [1, 12, 'month'],
+    [0, 7, 'day-of-week'],
   ];
-  for (let i = 0; i < 5; i += 1) {
-    const [min, max, label] = bounds[i];
+  for (let i = 0; i < 5; i++) {
+    const [min, max, name] = bounds[i];
     if (!validateFieldToken(fields[i], min, max)) {
-      return {
-        valid: false,
-        error: `Invalid cron ${label}: "${fields[i]}" · 字段超出范围`,
-      };
+      return { valid: false, error: `Invalid ${name} field "${fields[i]}" (${min}..${max})` };
     }
   }
-
-  const now = Date.now();
-  const [minField, hourField] = fields;
-  let offsetMs = 60_000;
-  if (minField.startsWith('*/')) {
-    const step = Math.max(1, Number(minField.slice(2)) || 15);
-    offsetMs = step * 60_000;
-  } else if (hourField.startsWith('*/')) {
-    const step = Math.max(1, Number(hourField.slice(2)) || 1);
-    offsetMs = step * 3_600_000;
-  } else if (/^\d+$/.test(minField) && /^\d+$/.test(hourField)) {
-    const target = new Date(now);
-    target.setSeconds(0, 0);
-    target.setHours(Number(hourField), Number(minField));
-    if (target.getTime() <= now) {
-      target.setDate(target.getDate() + 1);
-    }
-    offsetMs = target.getTime() - now;
-  }
-  const nextDate = new Date(now + offsetMs);
   return {
     valid: true,
-    nextRunPreview: `${describeCronExpression(trimmed)} · Next Run: ${nextDate.toLocaleString()}`,
+    nextRunPreview: describeCronExpression(expr),
   };
 }
 
-function getStateBadgeStyle(state: TaskFsmState): { bg: string; color: string } {
-  switch (state) {
-    case 'running':
-      return { bg: 'var(--tg-info-soft)', color: 'var(--tg-info)' };
-    case 'completed':
-      return { bg: 'var(--tg-success-soft)', color: 'var(--tg-success)' };
-    case 'waiting_approval':
-    case 'paused':
-      return { bg: 'var(--tg-warning-soft)', color: 'var(--tg-warning)' };
-    case 'failed':
-    case 'cancelled':
-      return { bg: 'var(--tg-danger-soft)', color: 'var(--tg-danger)' };
-    default:
-      return { bg: 'var(--tg-accent-soft)', color: 'var(--tg-accent)' };
-  }
-}
+const STATE_BADGE_CLASS: Record<TaskFsmState, string> = {
+  draft: '',
+  queued: 'tg-ai-badge--info',
+  running: 'tg-ai-badge--accent',
+  waiting_approval: 'tg-ai-badge--warning',
+  paused: '',
+  completed: 'tg-ai-badge--success',
+  failed: 'tg-ai-badge--danger',
+  cancelled: '',
+};
 
-export function TaskCenterWorkspace({ onClose }: TaskCenterWorkspaceProps = {}): React.JSX.Element {
+export function TaskCenterWorkspace({
+  onClose,
+}: TaskCenterWorkspaceProps = {}): React.JSX.Element {
   const tasks = useAiWorkspaceStore((s) => s.tasks);
   const loadTasks = useAiWorkspaceStore((s) => s.loadTasks);
   const createTask = useAiWorkspaceStore((s) => s.createTask);
@@ -146,12 +116,13 @@ export function TaskCenterWorkspace({ onClose }: TaskCenterWorkspaceProps = {}):
   const setActiveNavDest = useUiStore((s) => s.setActiveNavDest);
   const pushToast = useUiStore((s) => s.pushToast);
 
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
   const [activeFilter, setActiveFilter] = useState<FilterPillId>('all');
+  const [showCreateForm, setShowCreateForm] = useState(true);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [cronExpr, setCronExpr] = useState('');
   const [creating, setCreating] = useState(false);
-  const [expandedLogIds, setExpandedLogIds] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     void loadTasks().catch(() => undefined);
@@ -164,15 +135,22 @@ export function TaskCenterWorkspace({ onClose }: TaskCenterWorkspaceProps = {}):
     return tasks.filter((t) => t.state === activeFilter);
   }, [tasks, activeFilter]);
 
-  const handleCreateTask = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleOpenCreateForm = () => {
+    setShowCreateForm(true);
+    window.setTimeout(() => {
+      titleInputRef.current?.focus();
+    }, 0);
+  };
+
+  const handleCreateTask = async (ev: React.FormEvent) => {
+    ev.preventDefault();
     const cleanTitle = title.trim();
     if (!cleanTitle) {
-      pushToast('Please enter a task title · 请输入任务标题', 'warning');
+      pushToast('Task title is required · 请填写任务标题', 'warning');
       return;
     }
     if (!cronValidation.valid) {
-      pushToast(cronValidation.error || 'Invalid cron expression', 'error');
+      pushToast(cronValidation.error ?? 'Invalid cron expression', 'error');
       return;
     }
     setCreating(true);
@@ -186,7 +164,7 @@ export function TaskCenterWorkspace({ onClose }: TaskCenterWorkspaceProps = {}):
       setTitle('');
       setDescription('');
       setCronExpr('');
-      pushToast('Task created · 任务创建成功', 'success');
+      pushToast(`Created task "${cleanTitle}"`, 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -197,316 +175,253 @@ export function TaskCenterWorkspace({ onClose }: TaskCenterWorkspaceProps = {}):
   const handleTransition = async (task: TaskItemDto, nextState: TaskFsmState) => {
     try {
       await updateTask(task.task_id, { state: nextState });
+      pushToast(`Task "${task.title}" → ${nextState}`, 'info');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const handleDelete = async (task: TaskItemDto) => {
+    try {
+      await deleteTask(task.task_id);
+      pushToast(`Deleted task "${task.title}"`, 'info');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : String(err), 'error');
     }
   };
 
   return (
-    <div id={DOM_IDS.TASK_CENTER_WORKSPACE}>
-      {/* Workspace Header */}
-      <div className="tg-workspace-header">
-        <div>
-          <div style={{ fontSize: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span>📋 Global Task Center &amp; Cron Scheduler · 全局任务状态机与定时中心</span>
-            <span
-              style={{
-                fontSize: '11.5px',
-                padding: '2px 8px',
-                borderRadius: '999px',
-                backgroundColor: 'var(--tg-accent-soft)',
-                color: 'var(--tg-accent)',
-              }}
+    <section id={DOM_IDS.TASK_CENTER_WORKSPACE} className="tg-ai-workspace">
+      <header className="tg-ai-workspace__header">
+        <div className="tg-ai-workspace__title-group">
+          <h2 className="tg-ai-workspace__title">📋 Global Task Center · 全局任务中心</h2>
+          <span className="tg-ai-workspace__subtitle">
+            7-State FSM orchestration & 5-field cron schedules backed by SQLite WAL
+          </span>
+        </div>
+        <div className="tg-ai-workspace__actions">
+          <button
+            type="button"
+            className="tg-btn tg-btn--primary"
+            onClick={handleOpenCreateForm}
+          >
+            + New Task · 新建任务
+          </button>
+          <button
+            type="button"
+            className="tg-btn tg-btn--ghost"
+            onClick={() => void loadTasks()}
+          >
+            ↻ Refresh · 刷新
+          </button>
+          <button
+            type="button"
+            className="tg-btn tg-btn--ghost"
+            onClick={() => (onClose ? onClose() : setActiveNavDest('chats'))}
+          >
+            ← Chats · 返回
+          </button>
+        </div>
+      </header>
+
+      <div className="tg-ai-workspace__body">
+        {/* Create Task Form */}
+        {showCreateForm && (
+          <section className="tg-ai-card">
+            <h3 className="tg-ai-card__title">✨ Create Real Task · 创建任务</h3>
+            <form
+              onSubmit={(e) => void handleCreateTask(e)}
+              style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
             >
-              {tasks.length} Tasks
-            </span>
-          </div>
-          <div style={{ fontSize: '12px', color: 'var(--tg-text-secondary)' }}>
-            7-State Deterministic FSM (Queued · Running · Waiting Approval · Paused · Completed · Failed · Cancelled) + 5-Field Cron
-          </div>
+              <div className="tg-ai-field-grid">
+                <label className="tg-ai-field">
+                  <span>Task Title · 任务标题</span>
+                  <input
+                    ref={titleInputRef}
+                    type="text"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="Enter task title · 输入任务标题"
+                    aria-label="Task Title 任务标题"
+                    required
+                  />
+                </label>
+
+                <label className="tg-ai-field">
+                  <span>5-Field Cron (Optional) · 定时表达式</span>
+                  <input
+                    type="text"
+                    value={cronExpr}
+                    onChange={(e) => setCronExpr(e.target.value)}
+                    placeholder="e.g. 0 9 * * *"
+                    aria-label="Cron Expression"
+                  />
+                </label>
+              </div>
+
+              <label className="tg-ai-field">
+                <span>Description · 任务描述</span>
+                <textarea
+                  rows={2}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Optional instructions or checklist notes"
+                />
+              </label>
+
+              <div className="tg-ai-row tg-ai-row--between">
+                <span
+                  className="tg-ai-workspace__subtitle"
+                  style={{ color: cronValidation.valid ? 'var(--tg-text-secondary)' : 'var(--tg-danger)' }}
+                >
+                  {cronValidation.valid
+                    ? cronValidation.nextRunPreview
+                    : cronValidation.error}
+                </span>
+                <button
+                  type="submit"
+                  className="tg-btn tg-btn--primary"
+                  disabled={creating || !cronValidation.valid}
+                >
+                  {creating ? 'Creating…' : 'Confirm & Create · 确认创建'}
+                </button>
+              </div>
+            </form>
+          </section>
+        )}
+
+        {/* State Filter Pills */}
+        <div className="tg-ai-row" role="tablist" aria-label="Task State Filter">
+          {FSM_FILTER_PILLS.map((pill) => {
+            const count =
+              pill.id === 'all'
+                ? tasks.length
+                : tasks.filter((t) => t.state === pill.id).length;
+            return (
+              <button
+                key={pill.id}
+                type="button"
+                role="tab"
+                aria-selected={activeFilter === pill.id}
+                className={`tg-hermes-tab ${
+                  activeFilter === pill.id ? 'tg-hermes-tab--active' : ''
+                }`}
+                onClick={() => setActiveFilter(pill.id)}
+              >
+                {pill.label} ({count})
+              </button>
+            );
+          })}
         </div>
 
-        <button
-          type="button"
-          className="tg-btn tg-btn--secondary"
-          onClick={() => {
-            setActiveNavDest('chats');
-            onClose?.();
-          }}
-        >
-          ← Chats · 返回聊天
-        </button>
-      </div>
-
-      {/* 7-State FSM Filter Pills */}
-      <div className="tg-workspace-tabs" role="tablist" aria-label="Task FSM State Filters">
-        {FSM_FILTER_PILLS.map((pill) => {
-          const isSelected = activeFilter === pill.id;
-          const count =
-            pill.id === 'all' ? tasks.length : tasks.filter((t) => t.state === pill.id).length;
-          return (
-            <button
-              key={pill.id}
-              type="button"
-              role="tab"
-              aria-selected={isSelected}
-              className={`tg-workspace-tab${isSelected ? ' is-active' : ''}`}
-              onClick={() => setActiveFilter(pill.id)}
-            >
-              {pill.label} ({count})
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="tg-workspace-content">
-        {/* Create Task & 5-Field Cron Form (First text input in workspace is Title!) */}
-        <form
-          onSubmit={(e) => void handleCreateTask(e)}
-          className="tg-surface-card"
-          style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
-        >
-          <div style={{ fontSize: '14.5px', fontWeight: 600 }}>
-            + Create Task or Scheduled Cron Job · 新建后台任务或定时调度
+        {/* Truthful Task Cards */}
+        {filteredTasks.length === 0 ? (
+          <div className="tg-ai-empty">
+            No tasks found in this state. Create a new task above to begin tracking real execution progress. · 当前筛选下暂无任务。
           </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px' }}>
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="Task Title 任务标题"
-              placeholder="Task title · 任务标题 (e.g. Daily Sync Audit)"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="Task Description 任务描述"
-              placeholder="Description · 任务描述说明 (optional)"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-            <input
-              type="text"
-              className="tg-input"
-              aria-label="5-Field Cron Expression 定时表达式"
-              placeholder="*/15 * * * * (5-field cron schedule)"
-              value={cronExpr}
-              onChange={(e) => setCronExpr(e.target.value)}
-            />
-          </div>
-
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '12px',
-              flexWrap: 'wrap',
-            }}
-          >
-            <div
-              role={cronValidation.valid ? 'status' : 'alert'}
-              style={{
-                fontSize: '12px',
-                color: cronValidation.valid ? 'var(--tg-text-secondary)' : 'var(--tg-danger)',
-              }}
-            >
-              {cronValidation.valid ? cronValidation.nextRunPreview : cronValidation.error}
-            </div>
-
-            <button
-              type="submit"
-              className="tg-btn tg-btn--primary"
-              disabled={creating || !cronValidation.valid}
-            >
-              {creating ? 'Creating...' : 'Create Task / Schedule Cron · 创建任务'}
-            </button>
-          </div>
-        </form>
-
-        {/* Task Cards */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {filteredTasks.length === 0 ? (
-            <div className="tg-surface-card" style={{ color: 'var(--tg-text-secondary)', fontSize: '13px' }}>
-              No tasks in this state filter · 当前筛选状态下暂无任务
-            </div>
-          ) : (
-            filteredTasks.map((task) => {
-              const badge = getStateBadgeStyle(task.state);
-              const logsOpen = Boolean(expandedLogIds[task.task_id]);
+        ) : (
+          <div className="tg-ai-grid">
+            {filteredTasks.map((task) => {
+              // STRICT ZERO-FAKE INVARIANT: Display authentic server progress (0% on new tasks, NEVER fake 25% floor!)
+              const pct = Math.max(
+                0,
+                Math.min(100, Number.isFinite(task.progress) ? task.progress : 0),
+              );
+              const logs = Array.isArray(task.logs) ? task.logs : [];
               return (
-                <div
-                  key={task.task_id}
-                  data-task-id={task.task_id}
-                  data-task-state={task.state}
-                  className="tg-surface-card"
-                  style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}
-                >
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      justifyContent: 'space-between',
-                      gap: '12px',
-                      flexWrap: 'wrap',
-                    }}
-                  >
-                    <div style={{ minWidth: 0, flex: '1 1 260px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                        <strong style={{ fontSize: '14.5px' }}>{task.title}</strong>
-                        <span
-                          style={{
-                            fontSize: '11.5px',
-                            padding: '2px 8px',
-                            borderRadius: '999px',
-                            backgroundColor: badge.bg,
-                            color: badge.color,
-                            fontWeight: 600,
-                          }}
-                        >
-                          {task.state}
-                        </span>
-                        {task.cron_expr && (
-                          <span
-                            style={{
-                              fontSize: '11.5px',
-                              padding: '2px 8px',
-                              borderRadius: '999px',
-                              backgroundColor: 'var(--tg-bg-elevated)',
-                              border: '1px solid var(--tg-border)',
-                            }}
-                          >
-                            ⏱️ <code>{task.cron_expr}</code> · {describeCronExpression(task.cron_expr)}
-                          </span>
-                        )}
-                      </div>
-
-                      {task.description && (
-                        <div style={{ fontSize: '12.5px', color: 'var(--tg-text-secondary)', marginTop: '4px' }}>
-                          {task.description}
-                        </div>
-                      )}
-
-                      {task.next_run_ms ? (
-                        <div style={{ fontSize: '11.5px', color: 'var(--tg-text-muted)', marginTop: '4px' }}>
-                          Next Scheduled Run · 下次执行: {new Date(task.next_run_ms).toLocaleString()}
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {/* FSM Action Controls */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                      {task.state !== 'running' && task.state !== 'completed' && (
-                        <button
-                          type="button"
-                          className="tg-btn tg-btn--secondary"
-                          style={{ padding: '5px 10px', fontSize: '12px' }}
-                          onClick={() => void handleTransition(task, 'running')}
-                        >
-                          ▶ Start · 开始
-                        </button>
-                      )}
-                      {task.state === 'running' && (
-                        <button
-                          type="button"
-                          className="tg-btn tg-btn--secondary"
-                          style={{ padding: '5px 10px', fontSize: '12px' }}
-                          onClick={() => void handleTransition(task, 'paused')}
-                        >
-                          ⏸ Pause · 暂停
-                        </button>
-                      )}
-                      {task.state !== 'completed' && (
-                        <button
-                          type="button"
-                          className="tg-btn tg-btn--secondary"
-                          style={{ padding: '5px 10px', fontSize: '12px' }}
-                          onClick={() => void handleTransition(task, 'completed')}
-                        >
-                          ✓ Complete · 完成
-                        </button>
-                      )}
-                      {task.state !== 'cancelled' && task.state !== 'completed' && (
-                        <button
-                          type="button"
-                          className="tg-btn tg-btn--secondary"
-                          style={{ padding: '5px 10px', fontSize: '12px' }}
-                          onClick={() => void handleTransition(task, 'cancelled')}
-                        >
-                          Cancel · 取消
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="tg-btn tg-btn--secondary"
-                        style={{ padding: '5px 10px', fontSize: '12px' }}
-                        onClick={() =>
-                          setExpandedLogIds((prev) => ({
-                            ...prev,
-                            [task.task_id]: !prev[task.task_id],
-                          }))
-                        }
-                      >
-                        {logsOpen ? 'Hide Logs' : `Logs (${task.logs?.length ?? 0})`}
-                      </button>
-                      <button
-                        type="button"
-                        className="tg-btn tg-btn--danger-soft"
-                        style={{ padding: '5px 10px', fontSize: '12px' }}
-                        onClick={() => void deleteTask(task.task_id)}
-                      >
-                        Delete · 删除
-                      </button>
-                    </div>
+                <article key={task.task_id} className="tg-ai-card">
+                  <div className="tg-ai-card__header">
+                    <strong>{task.title}</strong>
+                    <span className={`tg-ai-badge ${STATE_BADGE_CLASS[task.state] ?? ''}`}>
+                      {task.state}
+                    </span>
                   </div>
 
-                  {/* Progress Bar */}
+                  {task.description && (
+                    <div className="tg-ai-workspace__subtitle">{task.description}</div>
+                  )}
+
+                  <div className="tg-ai-row tg-ai-row--between" style={{ fontSize: 12 }}>
+                    <span>Schedule: {describeCronExpression(task.cron_expr)}</span>
+                    <strong>{pct}%</strong>
+                  </div>
+
                   <div
                     style={{
-                      height: '5px',
-                      borderRadius: '999px',
-                      backgroundColor: 'var(--tg-bg-elevated)',
+                      width: '100%',
+                      height: 6,
+                      borderRadius: 999,
+                      background: 'var(--tg-bg-elevated)',
                       overflow: 'hidden',
                     }}
                   >
                     <div
                       style={{
+                        width: `${pct}%`,
                         height: '100%',
-                        width: `${Math.max(0, Math.min(100, task.progress || (task.state === 'completed' ? 100 : 25)))}%`,
-                        backgroundColor:
-                          task.state === 'completed' ? 'var(--tg-success)' : 'var(--tg-accent)',
-                        transition: 'width 200ms ease',
+                        background: 'var(--tg-accent)',
+                        transition: 'width 160ms ease',
                       }}
                     />
                   </div>
 
-                  {/* Expandable Execution Logs */}
-                  {logsOpen && (
-                    <pre
-                      style={{
-                        margin: 0,
-                        padding: '10px',
-                        borderRadius: '8px',
-                        backgroundColor: '#0E1621',
-                        border: '1px solid var(--tg-border)',
-                        color: 'var(--tg-text-secondary)',
-                        fontSize: '12px',
-                        whiteSpace: 'pre-wrap',
-                      }}
+                  <div className="tg-ai-code-block" style={{ maxHeight: 110, overflowY: 'auto' }}>
+                    {logs.length === 0
+                      ? 'No execution logs yet · 暂无执行日志'
+                      : logs.join('\n')}
+                  </div>
+
+                  <div className="tg-ai-row">
+                    {task.state !== 'running' && task.state !== 'completed' && (
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--secondary"
+                        onClick={() => void handleTransition(task, 'running')}
+                      >
+                        ▶ Run
+                      </button>
+                    )}
+                    {task.state === 'running' && (
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--secondary"
+                        onClick={() => void handleTransition(task, 'paused')}
+                      >
+                        ⏸ Pause
+                      </button>
+                    )}
+                    {task.state !== 'completed' && (
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--secondary"
+                        onClick={() => void handleTransition(task, 'completed')}
+                      >
+                        ✓ Complete
+                      </button>
+                    )}
+                    {task.state !== 'cancelled' && task.state !== 'completed' && (
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--ghost"
+                        onClick={() => void handleTransition(task, 'cancelled')}
+                      >
+                        Cancel
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="tg-btn tg-btn--danger"
+                      onClick={() => void handleDelete(task)}
                     >
-                      {(task.logs?.length ?? 0) > 0
-                        ? task.logs.join('\n')
-                        : `[${new Date(task.created_at_ms).toISOString()}] Task ${task.task_id} initialized in state "${task.state}".`}
-                    </pre>
-                  )}
-                </div>
+                      Delete
+                    </button>
+                  </div>
+                </article>
               );
-            })
-          )}
-        </div>
+            })}
+          </div>
+        )}
       </div>
-    </div>
+    </section>
   );
 }

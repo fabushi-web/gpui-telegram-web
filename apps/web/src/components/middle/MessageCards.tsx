@@ -103,11 +103,8 @@ function decode100VoiceBars(
   }
 
   if (decoded.length === 0) {
-    return Array.from({ length: TELEGRAM_WAVEFORM_BARS }, (_, idx) => {
-      const wave = Math.sin((idx + seedId) * 0.37) * 0.5 + 0.5;
-      const env = Math.sin((idx / TELEGRAM_WAVEFORM_BARS) * Math.PI);
-      return Math.max(3, Math.min(31, Math.round((0.25 + wave * 0.75) * env * 30)));
-    });
+    // Neutral flat low-amplitude track when server provided no waveform metadata
+    return Array.from({ length: TELEGRAM_WAVEFORM_BARS }, () => 4);
   }
 
   if (decoded.length === TELEGRAM_WAVEFORM_BARS) {
@@ -126,7 +123,15 @@ function decode100VoiceBars(
 
 async function triggerBrowserFileDownload(url: string, fileName: string): Promise<void> {
   try {
-    const res = await fetch(url);
+    const token = useAuthStore.getState().token;
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} (${res.statusText || 'download failed'})`);
+    }
     const blob = await res.blob();
     const objUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -137,16 +142,54 @@ async function triggerBrowserFileDownload(url: string, fileName: string): Promis
     a.click();
     document.body.removeChild(a);
     window.setTimeout(() => URL.revokeObjectURL(objUrl), 10_000);
-  } catch {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : 'Network error';
+    useUiStore
+      .getState()
+      .pushToast(`File download failed · 文件下载失败 (${detail})`, 'error');
   }
 }
+
+export const ProviderErrorCard: React.FC<{ messageText: string }> = ({ messageText }) => {
+  const setActiveNavDest = useUiStore((s) => s.setActiveNavDest);
+  const closeSettings = useUiStore((s) => s.closeSettings);
+  const setActiveStudioTab = useAiWorkspaceStore((s) => s.setActiveStudioTab);
+
+  const handleConfigureProvider = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    closeSettings();
+    setActiveStudioTab('magpie');
+    setActiveNavDest('hermes');
+  };
+
+  return (
+    <div
+      data-testid="provider-error-card"
+      data-error-code="PROVIDER_ERROR"
+      role="alert"
+      className="tg-provider-error-card"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, fontSize: '13px', color: 'var(--tg-danger)' }}>
+        <span>⚠</span>
+        <span>AI Provider Not Configured · 未配置模型供应商 (PROVIDER_ERROR)</span>
+      </div>
+      <div style={{ fontSize: '12.5px', lineHeight: 1.45, color: 'var(--tg-text-primary)', whiteSpace: 'pre-wrap' }}>
+        {messageText}
+      </div>
+      <div>
+        <button
+          type="button"
+          data-testid="btn-configure-ai-provider"
+          onClick={handleConfigureProvider}
+          className="tg-btn tg-btn--primary"
+          style={{ padding: '6px 12px', fontSize: '12.5px' }}
+        >
+          ⚙ Configure AI Provider · 配置模型供应商
+        </button>
+      </div>
+    </div>
+  );
+};
 
 // ============================================================================
 // Hermes Streaming Reasoning Bubble
@@ -154,6 +197,9 @@ async function triggerBrowserFileDownload(url: string, fileName: string): Promis
 
 export const ThinkingBubble: React.FC<{ turn: StreamingHermesTurn }> = ({ turn }) => {
   const [expanded, setExpanded] = useState<boolean>(true);
+  const isProviderError = Boolean(
+    turn.error && /provider_not_configured|provider_error|no\s+.*provider|unconfigured/i.test(turn.error),
+  );
 
   return (
     <div
@@ -164,10 +210,10 @@ export const ThinkingBubble: React.FC<{ turn: StreamingHermesTurn }> = ({ turn }
         maxWidth: 'min(480px, 86%)',
         minWidth: '220px',
         padding: '10px 14px',
-        borderRadius: '14px 14px 14px 4px',
-        backgroundColor: 'var(--tg-bubble-in, #182533)',
-        border: '1px solid rgba(51, 144, 236, 0.32)',
-        color: 'var(--tg-text-primary, #F5F5F5)',
+        borderRadius: '18px 18px 18px 6px',
+        backgroundColor: 'var(--tg-bubble-in)',
+        border: '1px solid var(--tg-hairline-border)',
+        color: 'var(--tg-text-primary)',
         boxShadow: 'var(--tg-shadow-sm)',
       }}
     >
@@ -184,7 +230,7 @@ export const ThinkingBubble: React.FC<{ turn: StreamingHermesTurn }> = ({ turn }
           style={{
             fontSize: '12px',
             fontWeight: 600,
-            color: 'var(--tg-accent, #3390EC)',
+            color: 'var(--tg-accent)',
           }}
         >
           {turn.isStreaming
@@ -197,9 +243,9 @@ export const ThinkingBubble: React.FC<{ turn: StreamingHermesTurn }> = ({ turn }
           style={{
             padding: '2px 7px',
             borderRadius: '5px',
-            border: '1px solid rgba(255,255,255,0.14)',
+            border: '1px solid var(--tg-hairline-border)',
             backgroundColor: 'transparent',
-            color: 'var(--tg-text-secondary, #8FA2B7)',
+            color: 'var(--tg-text-secondary)',
             fontSize: '11px',
             cursor: 'pointer',
           }}
@@ -214,10 +260,10 @@ export const ThinkingBubble: React.FC<{ turn: StreamingHermesTurn }> = ({ turn }
             <div
               style={{
                 fontSize: '12px',
-                color: 'var(--tg-text-secondary, #8FA2B7)',
+                color: 'var(--tg-text-secondary)',
                 padding: '6px 8px',
                 borderRadius: '6px',
-                backgroundColor: 'rgba(0, 0, 0, 0.2)',
+                backgroundColor: 'var(--tg-bubble-code-bg)',
                 whiteSpace: 'pre-wrap',
                 marginBottom: turn.outputText ? '8px' : 0,
               }}
@@ -234,15 +280,34 @@ export const ThinkingBubble: React.FC<{ turn: StreamingHermesTurn }> = ({ turn }
                   style={{
                     padding: '2px 7px',
                     borderRadius: '999px',
-                    backgroundColor: 'rgba(0, 201, 114, 0.14)',
-                    color: '#00C972',
+                    backgroundColor: tc.ok === false ? 'var(--tg-danger-soft)' : 'var(--tg-success-soft)',
+                    color: tc.ok === false ? 'var(--tg-danger)' : 'var(--tg-success)',
                     fontSize: '11px',
-                    fontFamily: 'var(--tg-font-mono, monospace)',
+                    fontFamily: 'var(--tg-font-mono)',
                   }}
                 >
                   ⚙ {tc.name} {tc.ok === false ? '✕' : tc.ok ? '✓' : '…'}
                 </span>
               ))}
+            </div>
+          )}
+
+          {isProviderError && turn.error && (
+            <ProviderErrorCard messageText={turn.error} />
+          )}
+
+          {turn.error && !isProviderError && (
+            <div
+              role="alert"
+              style={{
+                padding: '8px 10px',
+                borderRadius: '8px',
+                backgroundColor: 'var(--tg-danger-soft)',
+                color: 'var(--tg-danger)',
+                fontSize: '12.5px',
+              }}
+            >
+              {turn.error}
             </div>
           )}
 
@@ -1365,15 +1430,24 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
 
   const renderContentBody = (): React.ReactNode => {
     switch (c.type) {
-      case 'Text':
+      case 'Text': {
+        const textBody = message.text ?? c.data.text;
+        const isProviderError =
+          /provider_not_configured|\bPROVIDER_ERROR\b|未配置.*模型供应商/i.test(
+            textBody,
+          );
+        if (isProviderError) {
+          return <ProviderErrorCard messageText={textBody} />;
+        }
         return (
           <RichEntities
-            text={message.text ?? c.data.text}
+            text={textBody}
             entities={message.entities ?? c.data.entities}
             webPage={message.web_page}
             chatId={message.chat_id}
           />
         );
+      }
 
       case 'Photo':
         return (
@@ -2200,7 +2274,8 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
   };
 
   const inlineRows = message.inline_keyboard ?? [];
-  const chatUsername = chatsById[message.chat_id]?.username || 'storebot';
+  const chatUsername = chatsById[message.chat_id]?.username ?? '';
+  const openModal = useUiStore((s) => s.openModal);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -2213,8 +2288,8 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
             alignSelf: 'flex-start',
             padding: '1px 7px',
             borderRadius: '999px',
-            backgroundColor: 'rgba(229, 160, 48, 0.18)',
-            color: '#E5A030',
+            backgroundColor: 'var(--tg-warning-soft)',
+            color: 'var(--tg-warning)',
             fontSize: '11px',
             fontWeight: 600,
           }}
@@ -2241,50 +2316,79 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
                 gap: '4px',
               }}
             >
-              {row.map((btn, bIdx) => (
-                <button
-                  key={bIdx}
-                  type="button"
-                  data-testid="inline-keyboard-btn"
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    if (btn.web_app_url) {
-                      setMiniAppModalOpen(true);
-                      await launchMiniApp(
-                        chatUsername,
-                        'app',
+              {row.map((btn, bIdx) => {
+                const cb = btn.callback_data ?? '';
+                const isCodingDeny = cb.startsWith('coding:approve:') && cb.endsWith(':deny');
+                const isCodingAllow =
+                  cb.startsWith('coding:approve:') && !cb.endsWith(':deny');
+                const btnBorder = isCodingDeny
+                  ? '1px solid var(--tg-danger)'
+                  : isCodingAllow
+                    ? '1px solid var(--tg-success)'
+                    : '1px solid var(--tg-hairline-border)';
+                const btnBg = isCodingDeny
+                  ? 'var(--tg-danger-soft)'
+                  : isCodingAllow
+                    ? 'var(--tg-success-soft)'
+                    : 'var(--tg-accent-soft)';
+                const btnColor = isCodingDeny
+                  ? 'var(--tg-danger)'
+                  : isCodingAllow
+                    ? 'var(--tg-success)'
+                    : 'var(--tg-accent)';
+
+                return (
+                  <button
+                    key={bIdx}
+                    type="button"
+                    data-testid="inline-keyboard-btn"
+                    data-callback-data={btn.callback_data}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (btn.web_app_url) {
+                        if (chatUsername) {
+                          setMiniAppModalOpen(true);
+                          await launchMiniApp(
+                            chatUsername,
+                            'app',
+                            message.chat_id,
+                          ).catch(() => {
+                            openModal('miniapp_catalog', { chatId: message.chat_id });
+                          });
+                        } else {
+                          openModal('miniapp_catalog', { chatId: message.chat_id });
+                        }
+                        return;
+                      }
+                      if (btn.url && isSafeEntityUrl(btn.url)) {
+                        window.open(btn.url, '_blank', 'noopener,noreferrer');
+                        return;
+                      }
+                      const answer = await clickInlineKeyboardButton(
                         message.chat_id,
-                      ).catch(() => undefined);
-                      return;
-                    }
-                    if (btn.url && isSafeEntityUrl(btn.url)) {
-                      window.open(btn.url, '_blank', 'noopener,noreferrer');
-                      return;
-                    }
-                    const answer = await clickInlineKeyboardButton(
-                      message.chat_id,
-                      message.id,
-                      btn.callback_data || btn.text,
-                    );
-                    if (answer) {
-                      pushToast(answer, 'info');
-                    }
-                  }}
-                  style={{
-                    flex: '1 1 0',
-                    padding: '6px 10px',
-                    borderRadius: '7px',
-                    border: '1px solid rgba(51, 144, 236, 0.35)',
-                    backgroundColor: 'rgba(51, 144, 236, 0.14)',
-                    color: '#7CC2FF',
-                    fontSize: '12.5px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {btn.web_app_url ? `↗ ${btn.text}` : btn.text}
-                </button>
-              ))}
+                        message.id,
+                        btn.callback_data || btn.text,
+                      );
+                      if (answer) {
+                        pushToast(answer, 'info');
+                      }
+                    }}
+                    style={{
+                      flex: '1 1 0',
+                      padding: '6px 10px',
+                      borderRadius: '8px',
+                      border: btnBorder,
+                      backgroundColor: btnBg,
+                      color: btnColor,
+                      fontSize: '12.5px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {btn.web_app_url ? `↗ ${btn.text}` : btn.text}
+                  </button>
+                );
+              })}
             </div>
           ))}
         </div>

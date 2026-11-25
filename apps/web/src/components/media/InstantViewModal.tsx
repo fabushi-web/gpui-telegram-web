@@ -50,13 +50,13 @@ function decodeBasicHtmlEntities(raw: string): string {
  * Pure XSS-safe parser turning structured Instant View text/HTML into clean React blocks
  * without ever calling dangerouslySetInnerHTML.
  */
-function parseInstantViewBlocks(rawContent: string, title: string, url: string): ParsedReaderBlock[] {
+function parseInstantViewBlocks(rawContent: string, _title: string, _url: string): ParsedReaderBlock[] {
   const normalized = (rawContent || '').trim();
   if (!normalized) {
     return [
       {
         kind: 'p',
-        text: `Instant View article summary for ${title || url}. Zero-distraction reading mode rendered locally with adjustable typography and color themes.`,
+        text: 'No Instant View article content was returned for this URL.',
       },
     ];
   }
