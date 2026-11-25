@@ -1,46 +1,66 @@
-# gpui-telegram-web
+# Fabushi Web (`v1.6.11`)
 
-Complete standalone web edition of [`bhrum/gpui-telegram`](https://github.com/bhrum/gpui-telegram) (`v1.2.0`), engineered with a clean hexagonal TypeScript monorepo architecture (`packages/protocol`, `apps/server`, `apps/web`).
+Standalone full-stack TypeScript web edition aligned **100% with desktop [`bhrumom/gpui-telegram`](https://github.com/bhrumom/gpui-telegram) `v1.6.11`**, engineered with a clean hexagonal monorepo (`packages/protocol`, `apps/server`, `apps/web`) and **strictly zero fake, mock, or demo data in production runtime**.
 
-It delivers **100% standalone parity with Telegram Web (Web A / Web K) and `gpui-telegram` desktop** with **zero dependency on the native Rust/GPUI desktop binary**, while simultaneously exposing a bidirectional **Desktop-to-Browser Control Bridge (`F17` + MCP JSON-RPC 2.0)** so `gpui-telegram` desktop clients and AI agents can remotely inspect and control live web tabs or isolated Headless Chromium sessions.
+Every unauthenticated, empty-workspace, zero-provider, disconnected, and error state behaves faithfully to desktop Fabushi `v1.6.11`, backed by real SQLite WAL persistence (`node:sqlite`), real WebSocket `/api/v1/ws` + monotonic `pts` synchronization, real WebCrypto Split-Key V2 & E2EE Vaulting, real per-user ChaCha20-Poly1305 AI provider isolation, fresh `v1.6.11` Fabushi 3D WASM + WebMCP Mini Apps, Official OAuth 2.1 Remote MCP (`/mcp`), UU-Parity Remote Assist, and Built-in Interactive Chromium CDP Browser + Script Distillation + Automation Script App Store.
 
 ---
 
-## Highlights & Feature Matrix (`F1`–`F17`)
+## Highlights & Feature Matrix (`v1.6.11`)
 
-- **3 Standalone Runtime Modes (Zero Native Binary Dependency)**:
-  - **`server` (Default Full-Stack Mode)**: Node.js 24 (`node:http` + `node:sqlite` WAL + `ws` + SSE) + React 19 SPA with real multi-client sync, WebRTC signaling, chunked media streaming, E2EE key directory, AI workspaces, and Browser Control Bridge.
-  - **`sandbox` (100% Browser-Standalone Offline Mode)**: Runs entirely inside the browser via `LocalSandboxAdapter` + `BroadcastChannel` multi-tab sync with zero backend server required (`?mode=sandbox`).
-  - **`mtproto` (Telegram DC Mode)**: Pluggable `TelegramClientPort` adapter for direct MTProto transport configuration (`?mode=mtproto`).
-- **Telegram Web (Web A / Web K) Complete UX (`F1`–`F15`)**:
-  - **7 Authentication Flows & Local Security (`F1`)**: Phone + OTP, QR Code login, Cloud 2FA (`scrypt`), Sign-Up, Passkey/WebAuthn, Demo Account Switcher (`Alice`, `Bob`, `Carol`, `Dave`), Bot Token login, Alipay OAuth simulation, and local AES-GCM Passcode Lock (`Ctrl+L`).
-  - **Responsive 3-Column Shell, 4 Themes & Bilingual i18n (`F2`)**: Desktop 3-column / Tablet 2-column / Mobile single-column layout, `Night`, `Day`, `Tinted`, and `Classic` themes (**100% Vanilla CSS, strictly zero purple/violet hues on dark themes**), custom accent picker, message density, and instant `zh-CN` / `en-US` switching.
-  - **Per-Chat Monotonic `pts` WebSocket Sync (`F3`)**: `/api/v1/ws` real-time push, `PtsStateMachine` gap detection, `/api/v1/sync/getDifference` recovery, `client_nonce` idempotency, typing/upload/record action indicators, and multi-tab `BroadcastChannel` state sync.
-  - **Stories, Folders, Archive & Forum Topics (`F4`)**: 24h Stories ring & viewer/composer, up to 10 Chat Folders, collapsible Archived Chats, Saved Messages, and Supergroup Forum Topics split-view.
-  - **CJK Full-Text Search & Rich Timeline (`F5`–`F13`)**: 1-char CJK (`中文`) + Latin prefix global/in-chat search, `@tanstack/react-virtual` virtualized timeline, grouped albums, UTF-16 `MessageEntity` formatting & spoilers, fenced code blocks with copy, Instant View reader, 3-state CJK `ImeSafetyFsm` composer, scheduled/silent messages, forward/reply/edit/delete/pin, animated reactions, SHA-256 chunked media upload + HTTP `206 Partial Content` streaming, Lightbox & Canvas media editor, 100-bar 5-bit voice notes & circular video notes with transcription, Polls/Quizzes, collaborative Todo checklists, and Stars/TON invoices.
-  - **Right Context Inspector, 25-Page Settings, WebRTC Calls & E2EE Secret Chats (`F14`–`F15`)**: Shared media/files/links/voice tabs, group/channel admin permissions & stats, JSON/HTML chat history export, 1-on-1 WebRTC P2P voice/video/screen-share calls with loopback verification, and WebCrypto E2EE Secret Chats (`ECDH P-256 + HKDF-SHA256 + AES-256-GCM`) with 4-emoji safety fingerprint verification.
-- **`gpui-telegram` Native Ecosystem Capabilities (`F16`)**:
-  - Conversational `@BotFather` (`777001`), `window.Telegram.WebApp` Mini Apps (`全球法布施` WebAssembly + 3D Canvas Globe + Zen Room, and `TaskBoard`), **Hermes 6-Tab AI Studio** (61 `/slash` commands + SSE `ThinkingBubble`), **Magpie Multi-Provider LLM Gateway** (PII masking + token ledger), **Global Task Center & 5-Field Cron Scheduler**, **MCP Tools Permission Dock**, **Full-Duplex Talk Mode Orb**, **Remote Computer Workbench** (`<10ms` emergency takeover), **Tailnet Mesh Overlay**, and **Stars/TON Wallet**.
-- **Desktop-to-Browser Control Bridge (`F17`)**:
-  - Live Web Tab Agent (`window.__GPUI_TELEGRAM_BROWSER_BRIDGE__`) + WebSocket reverse RPC (`/api/v1/browser/ws`) + REST controller API (`/api/v1/browser/*`) + Server-managed Headless Chromium CDP Studio (`/api/v1/browser/headless/*` with deterministic `http_dom_fallback`) + standard **Model Context Protocol JSON-RPC 2.0** endpoint (`POST /api/v1/mcp/rpc`).
+- **Zero Fake Data & Single Real Production Runtime (`A01`)**:
+  - Single production transport (`HttpWsServerAdapter`) backed by `node:http` + `node:sqlite` WAL + `ws` + SSE (zero client-side fake adapters, zero pre-seeded accounts/chats/messages, zero unverified wallet minting, zero fabricated AI/MCP/Tailnet/canvas/voice stubs).
+  - Clean new accounts start truthfully empty (`chats: []`, `0` Stars / `0` TON, `0` configured AI providers, `0` browser targets).
+  - Real authentication flows: Password / Split-Key V2 (`Argon2id` + HKDF verifier), Phone OTP, Email OTP + Cloud 2FA enforcement, QR Pairing (`/pair/create`, `/pair/status`, `/pair/accept`), real WebAuthn COSE Passkeys, Alipay OAuth, and local AES-GCM Passcode Lock (`Ctrl+Shift+L`).
+- **Apple Messages macOS & Muse UI/UX Redesign (`A02`)**:
+  - Four 100% Vanilla CSS themes (`Night`, `Tinted`, `Day`, `Classic`) with strict zero-purple-on-dark invariant, 4-step dark elevation ladder, zero dark drop shadows, 180° vertical blue outgoing bubbles, and 9-hue bot tinting.
+  - Centered `76px` translucent Apple Messages contact header, `288px` collapsible sidebar with flicker-free Apple 3×3 Pinned Chats Grid (`#sidebar-pinned-chats-grid`), Apple Capsule Composer (`max-w: 740px`) with 3-state CJK `ImeSafetyFsm`, 2-layer non-overlapping toasts (`#stage-toast-pill` & `#window-toast-banner`), 2-pane Apple System Settings offset past `#nav-rail`, and live bilingual `en-US` / `zh-CN` switching.
+- **Core Messaging, Media, WebRTC Calls & E2EE Secret Chats (`A03`–`A07`)**:
+  - Per-chat monotonic `pts` WebSocket sync (`PtsPush`/`Ack`), `client_nonce` idempotency, 1-char CJK + Latin full-text search, Stories, Chat Folders, Forum Topics, UTF-16 `MessageEntity` formatting, chunked SHA-256 media upload + HTTP `206 Partial Content` streaming, Lightbox & Canvas media editor, 100-bar 5-bit voice & video notes, Polls/Quizzes, collaborative Todo checklists, payment/redeem-gated Stars Wallet (`402 payment_required`), real JSON/HTML chat exports, WebRTC P2P voice/video/screen-share calls with TURN credentials, and WebCrypto E2EE Secret Chats (`ECDH P-256 + HKDF-SHA256 + AES-256-GCM`).
+- **Split-Key V2 Zero-Knowledge Auth, E2EE User Vault & X25519 Device Trust Ring (`A08`)**:
+  - Anti-enumeration `GET /api/v1/auth/kdf-params`, Split-Key V2 registration, silent V1→V2 upgrade, and password rotation.
+  - Revisioned client-side AES-256-GCM E2EE Vault (`GET/PUT /api/v1/user-vault/envelope`, `GET/PUT/DELETE /api/v1/user-vault/items/:category/:itemKey` across `password`, `browser_cookie`, `ai_oauth` with optimistic `409` concurrency).
+  - X25519 Device Trust Ring (`device-sync/{request,pending,:id/approve,:id/deny,:id/status}`) with deterministic 6-digit `NNN-NNN` verification codes and atomic one-time ciphertext consumption.
+- **Per-User ChaCha20-Poly1305 Magpie v1.6 Gateway & Live `models.dev` Catalog (`A09`)**:
+  - Strict tenant isolation: every user's AI provider credentials and client-synced subscriptions are encrypted at rest via HKDF + ChaCha20-Poly1305 (`enc:v1:<b64>`) with redacted readbacks.
+  - Live 2-tier `models.dev` catalog (`GET /api/v1/fabushi/magpie/models/catalog`), OpenAI/Anthropic/Gemini/Responses gateway (`/api/v1/magpie/v1/*`), routing groups CRUD, server-backed outbound PII privacy masking, and truthful fail-closed `503 provider_not_configured` inline `PROVIDER_ERROR` cards with `"Configure AI Provider"` CTA.
+- **Unified Fabushi / Hermes Runtime, Multi-Agent Group Protocol & Coding Agent Bots (`A10`–`A11`)**:
+  - Canonical `/api/v1/fabushi/*` agent runtime (persisted sessions, memory/soul, skills, 29 toolsets, cron jobs, kanban & security approvals) + Grok Bot pre-start `START` bar and inline `+` multi-select compose stage.
+  - Multi-Agent Group Protocol (`FloorControlQueue`, 5-hop `LoopBudget`, `SharedGroupWorkspace` revisioned KV).
+  - Native Coding Agent Bots supporting all 6 providers (`claude_code`, `codex`, `open_code`, `cursor_cli`, `antigravity`, `acp_custom`), real PATH probing (`POST /api/v1/coding-agents/probe`), 13 slash commands, 3 permission modes (`ask`, `auto_edit`, `full_access`), and WS host brokering.
+- **Decoupled Mini Apps, Fresh `v1.6.11` Fabushi 3D WASM, WebMCP & Floating PiP (`A12`)**:
+  - Authentic `v1.6.11` Rust-compiled `fabushi_miniapp.wasm` (837,676 bytes) + `hosted_bundle.html` with `navigator.modelContext` WebMCP tool registration, server-backed `CloudStorage`, and restore-in-place Floating PiP (`#miniapp-pip-overlay`) preserving WASM heap state across minimize/restore.
+- **UU-Parity Remote Assist, Real Remote Computer Control & Emergency Kill Switch (`A13`)**:
+  - Permanent 9-digit Assist ID, temporary rotating & custom 8–16 alphanumeric access codes with rate limiting, guest assist sessions (`/api/v1/remote/assist/*`), local computer agent polling (`/api/v1/computers/local/{register,poll}`), extended `RemoteComputerOp`, and un-clamped Emergency Kill Switch (`POST /api/v1/remote/sessions/disconnect-all`).
+- **Official OAuth 2.1 Remote MCP Server (`/mcp`, `A14`)**:
+  - RFC 9728 / RFC 8414 / RFC 7591 discovery (`/.well-known/*`, `/oauth/register`), mandatory PKCE S256 authorization flow, SSRF-hardened redirect/CIMD checks, rotating refresh token families, Streamable HTTP + SSE (`MCP-Protocol-Version: 2025-11-25`), 14 canonical scopes, and interactive Grants & Audit UI (`#oauth-mcp-grants-panel`).
+- **Built-in Interactive Browser, Script Distillation & Automation Script App Store (`A15`)**:
+  - Isolated Chromium CDP headless sessions (`/api/v1/browser/headless/*`), real PNG screenshots & semantic DOM refs, `BrowserControlMode` takeover controls, persisted desktop pairing & un-clamped emergency revoke, 4-tab Inspector (`Copilot`, `Recorder`, `Session`, `App Store`).
+  - **Script Distillation** (`POST /api/v1/browser/scripts/distill`) compiling `BrowserActionTrace` into parameterized secret-free `AutomationScriptApp` manifests with zero-LLM deterministic replay (`used_llm: false`).
+  - **Automation Script App Store** (`/api/v1/automation-apps*`) protected by a recursive **Defense-in-Depth `422 secret_leak_detected` scanner**, SHA-256 integrity digests, and idempotent install/uninstall/run telemetry.
+- **Truthful Talk Mode, Task Center & Auto-Update Relay (`A16`)**:
+  - Real WebAudio `MediaRecorder` microphone capture in `#talk-mode-orb` with honest permission and `503` pipeline errors (zero simulated text input).
+  - SQLite-persisted Task Center starting at truthful `0%` progress & empty logs with 5-field cron validation.
+  - `GET /api/v1/status` (`version: "1.6.11"` + `capabilities[]`) and `/api/v1/updates/latest-mac.json` relay.
 
 ---
 
 ## Monorepo Architecture
 
 ```text
-gpui-telegram-web/
+fabushi-web/
 ├── packages/
-│   └── protocol/       # @gpui-telegram/protocol — Shared DTOs, UTF-16 entities, CJK IME FSM,
-│                       # 5-bit waveform codec, WebCrypto E2EE, PTS sync FSM, DOM_IDS & BrowserControl types
+│   └── protocol/       # @gpui-telegram/protocol v1.6.11 — Shared DTOs, UTF-16 entities, CJK IME FSM,
+│                       # 5-bit waveform codec, E2EE, Split-Key V2 Vault, Automation Apps + Secret Scanner,
+│                       # Coding Agents, Remote Control, WebMCP, Official OAuth 2.1 MCP & DOM_IDS
 ├── apps/
-│   ├── server/         # @gpui-telegram/server — Node.js 24 HTTP + node:sqlite WAL + WS + SSE +
-│   │                   # Headless Chromium CDP controller + MCP JSON-RPC 2.0 host
-│   └── web/            # @gpui-telegram/web — Vite + React 19 + Zustand + @tanstack/react-virtual +
-│                       # 100% Vanilla CSS + Live Browser Control Agent
+│   ├── server/         # @gpui-telegram/server v1.6.11 — Node.js 22+ HTTP + node:sqlite WAL + WS + SSE +
+│   │                   # ChaCha20 AI Vault + Chromium CDP + Official OAuth 2.1 MCP + Reverse Proxy
+│   └── web/            # @gpui-telegram/web v1.6.11 — Vite + React 19 + Zustand 5 + @tanstack/react-virtual +
+│                       # 100% Vanilla CSS (Apple/Muse) + Fabushi 3D WASM + WebMCP SDK + sw.js v4
 ├── tests/
-│   └── unit/           # Vitest unit, protocol, ecosystem & F17 browser bridge integration suites
-└── e2e/                # Self-contained Playwright Chromium E2E verification suite (F1–F17)
+│   └── unit/           # Vitest protocol & server security/zero-fake-data unit & integration suites
+└── e2e/                # Opaque-box Playwright Chromium E2E suite (Tiers 1–4 + Tier 5 adversarial)
 ```
 
 ---
@@ -48,128 +68,76 @@ gpui-telegram-web/
 ## Quick Start
 
 ### Prerequisites
-- **Node.js `>= 22.13.0`** (uses built-in `node:sqlite` — zero native C++ addon compilation required)
+- **Node.js `>= 22.13.0`** (uses built-in `node:sqlite` — zero native C++ addon builds required)
 - **npm `>= 10`**
+- Optional: **Chromium / Google Chrome** (auto-detected for Built-in Headless Browser CDP sessions)
 
-### Install, Build & Launch (Clean Production Mode — Zero Fake Data)
+### Install, Build & Run Standalone Production Server
 
 ```bash
 npm install
 npm run build
 SESSION_SECRET=$(openssl rand -hex 32) \
-PORT=4173 HOST=0.0.0.0 DATA_DIR=./data npm start
+PORT=4173 HOST=127.0.0.1 DATA_DIR=./data npm start
 ```
 
-Open `http://127.0.0.1:4173` in your browser:
-- **Production Mode (Default)**: Clean SQLite database with zero mock users/chats/wallets, real ISO/IEC 18004 QR codes, real Alipay OAuth (`api.ombhrum.com`), real 833KB Rust-compiled Fabushi 3D WASM Mini App, and real Magpie multi-provider LLM routing.
-- **Reverse Proxy Mode (Pair with Rust `gpui_telegram_server`)**:
-  ```bash
-  UPSTREAM_SERVER_URL=http://34.46.77.133:8080 \
-  PORT=4173 HOST=0.0.0.0 npm start
-  ```
-  Serves the Web SPA + static Fabushi WASM bundle while transparently proxying `/api/*` (HTTP, SSE, HTTP 206 Range) and WebSockets (`/api/v1/ws`, `/api/v1/browser/ws`) to your live Rust backend.
-- **Developer Sandbox Mode (Opt-In Only)**: Append `?mode=sandbox` or `?dev=1` locally (disabled by default in production).
+Open `http://127.0.0.1:4173` in your browser and register a real account (or sign in via Split-Key V2 / Phone / Email / QR / Passkey).
+
+### Reverse Proxy Mode (Pair with Native Rust `gpui_telegram_server`)
+
+```bash
+UPSTREAM_SERVER_URL=https://your-upstream-fabushi-server.example.com \
+PORT=4173 HOST=0.0.0.0 npm start
+```
+
+Serves the compiled Fabushi Web SPA while transparently proxying `/api/*`, `/v1/*`, `/.well-known/*`, `/oauth/*`, `/mcp`, `/miniapps/*`, `/bot*/*`, `/js/*`, and WebSocket upgrades (`/api/v1/ws`, `/api/v1/browser/ws`, `/api/v1/tailnet/derp`) to your upstream backend.
+
+### Key Environment Variables
+
+| Variable | Description |
+|---|---|
+| `PORT` / `HOST` | Bind port & interface (default `4173` / `0.0.0.0`) |
+| `DATA_DIR` | Persistent directory for SQLite WAL database, uploaded media, and `models.dev` cache |
+| `GPUI_MASTER_SECRET` / `SESSION_SECRET` | 32-byte master secret for session signing & HKDF key derivation |
+| `FABUSHI_PROVIDER_MASTER_KEY` | Optional dedicated master key for per-user ChaCha20-Poly1305 AI provider vault |
+| `TURN_SECRET` | HMAC secret for WebRTC TURN credential minting (`/api/v1/calls/turn-credentials`) |
+| `UPSTREAM_SERVER_URL` | Optional upstream Rust `gpui_telegram_server` URL for reverse-proxy mode |
+| `CHROME_EXECUTABLE` / `CHROMIUM_PATH` | Optional explicit Chromium binary path for CDP headless browser sessions |
+| `VITE_BASE_PATH` | Vite asset base path (`./` for portable self-hosted builds, `/fabushi-web/` for GitHub Pages) |
 
 ---
 
-## Desktop-to-Browser Control Bridge (`F17`) — Integration Guide for `gpui-telegram` Desktop & MCP Clients
+## Official OAuth 2.1 MCP (`/mcp`) & Desktop Integration
 
-`gpui-telegram-web` allows native `gpui-telegram` desktop clients, CLI scripts, and MCP-compatible AI agents to inspect and control browser sessions securely.
+Connect MCP-compatible AI clients (Claude Desktop, Cursor, Antigravity, or Fabushi Desktop):
 
-### 1. Pair a Desktop Controller (Capability Token)
-
-1. Open **Browser Control Workspace** (`#nav-dest-browser` in the left navigation rail) in the web app to generate a 6-character pairing code, **or** request one via API with an authenticated user bearer token:
-   ```bash
-   curl -X POST http://127.0.0.1:4173/api/v1/browser/pair/request \
-     -H "Authorization: Bearer <USER_SESSION_TOKEN>" \
-     -H "Content-Type: application/json" \
-     -d '{"client_name":"gpui-telegram-desktop","Scopes":["snapshot","act","navigate","headless"]}'
-   ```
-2. Exchange the `pair_code` from the desktop client for a scoped `X-Desktop-Browser-Token`:
-   ```bash
-   curl -X POST http://127.0.0.1:4173/api/v1/browser/pair/exchange \
-     -H "Content-Type: application/json" \
-     -d '{"pair_code":"<6_CHAR_CODE>","desktop_name":"gpui-telegram macOS/Linux Desktop"}'
-   ```
-3. **Emergency `<10ms` Revoke**: Clicking `#btn-browser-revoke-all` in the web UI or calling `POST /api/v1/browser/revoke-all` immediately invalidates all desktop capability tokens and terminates active control leases.
-
-### 2. Inspect & Drive Live Paired Web Tabs
-
-```bash
-# List connected live web tabs & headless sessions for this user
-curl http://127.0.0.1:4173/api/v1/browser/targets \
-  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>"
-
-# Capture Accessibility / DOM snapshot with deterministic element refs (e1, e2, ...)
-curl -X POST http://127.0.0.1:4173/api/v1/browser/tabs/<TARGET_ID>/command \
-  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"snapshot"}'
-
-# Execute UI or semantic Telegram actions (click, fill, press, navigate, app_action, screenshot)
-curl -X POST http://127.0.0.1:4173/api/v1/browser/tabs/<TARGET_ID>/command \
-  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"app_action","app_action":"send_chat_message","app_payload":{"chat_id":101,"text":"Sent remotely from gpui-telegram Desktop!"}}'
-```
-
-### 3. Drive Server-Managed Headless Chromium Sessions
-
-Desktop clients can also spawn isolated headless Chromium instances (`cdp_chromium` with automatic `http_dom_fallback` when no browser binary is installed):
-
-```bash
-# Open a headless browser session
-curl -X POST http://127.0.0.1:4173/api/v1/browser/headless/sessions \
-  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"http://127.0.0.1:4173","width":1280,"height":800}'
-
-# Snapshot, click, fill, evaluate, or capture PNG/SVG screenshots
-curl -X POST http://127.0.0.1:4173/api/v1/browser/headless/sessions/<SESSION_ID>/action \
-  -H "X-Desktop-Browser-Token: <DESKTOP_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"snapshot"}'
-```
-
-### 4. Connect via Model Context Protocol (MCP JSON-RPC 2.0)
-
-Point any MCP host (including `gpui-telegram` Hermes/MCP runtime, Claude Desktop, or Cursor) at:
-- **Manifest**: `GET /api/v1/mcp/manifest`
-- **JSON-RPC 2.0 Endpoint**: `POST /api/v1/mcp/rpc` (`initialize`, `ping`, `tools/list`, `tools/call`)
-- **Exposed Browser Tools**: `browser_list_targets`, `browser_tab_command`, `browser_snapshot`, `browser_act`, `browser_open_headless`, `browser_headless_open`, `browser_headless_action`, `browser_headless_screenshot`, `browser_headless_close`.
+1. Discover metadata via `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-authorization-server`.
+2. Register dynamically via `POST /oauth/register` (loopback HTTP, HTTPS, or desktop deep-link redirect URIs only) and complete PKCE S256 authorization at `/oauth/authorize`.
+3. Connect to `POST / GET / DELETE /mcp` with `Authorization: Bearer <access_token>` and `MCP-Protocol-Version: 2025-11-25`.
+4. Audit every tool invocation or revoke any client grant family immediately in **MCP Dock → Official OAuth 2.1 Grants (`#oauth-mcp-grants-panel`)** or terminate all active sessions via **Remote Assist → Emergency Kill Switch**.
 
 ---
 
-## Production Deployment (`ombhrum.com`)
+## Deployment
 
-1. **Docker & Docker Compose (Recommended — Full-Stack or Reverse Proxy to Rust `gpui_telegram_server`)**:
-   ```bash
-   cp .env.example .env
-   # Set SESSION_SECRET (and optionally UPSTREAM_SERVER_URL=http://<rust-server>:8080)
-   docker compose up -d --build
-   ```
-   Persists SQLite WAL databases and content-addressed media in the `gpui_telegram_data` volume (`/data`) with built-in `/api/v1/health` healthcheck and `SEED_DEMO_DATA=0` / `ALLOW_DEMO_AUTH=0`.
-2. **HTTPS Edge Reverse Proxy (`web.ombhrum.com`)**:
-   - **Caddy (Auto-HTTPS)**: `caddy run --config deploy/Caddyfile`
-   - **Nginx**: copy `deploy/nginx.ombhrum.conf` to `/etc/nginx/sites-enabled/` (includes WebSocket upgrades, unbuffered SSE, HTTP 206 Range, and `application/wasm` MIME type).
-3. **Static Hosting / GitHub Pages (connects to `https://api.ombhrum.com`)**:
-   - Build & publish via `VITE_DEFAULT_SERVER_URL=https://api.ombhrum.com npm run deploy:pages`.
-4. **Cloud PaaS Blueprints**:
-   - **Render**: `render.yaml` (persistent disk `/data` + Docker healthcheck).
-   - **Railway**: `railway.json` (`Dockerfile` builder + `/api/v1/health`).
-   - **Fly.io**: `fly.toml` (`fly volumes create gpui_telegram_data --size 2 && fly deploy`).
+- **Docker / Docker Compose**: `docker compose up --build` (uses included `Dockerfile`, `docker-compose.yml`, and `deploy/Caddyfile` / `deploy/nginx.ombhrum.conf`).
+- **PaaS**: Ready-to-use manifests included for Fly.io (`fly.toml`), Railway (`railway.json`), and Render (`render.yaml`).
+- **GitHub Pages (Static SPA)**: Automatically deployed via `.github/workflows/ci-deploy.yml` with `VITE_BASE_PATH=/fabushi-web/`. Static hosts connect cleanly to any user-configured Fabushi backend URL (e.g., `https://web.ombhrum.com`).
 
 ---
 
 ## Verification & Testing
 
 ```bash
-# 1. Strict TypeScript check across protocol, server, and web
+# 1. Monorepo TypeScript strict check
 npm run typecheck
 
-# 2. Production bundle build
+# 2. Full production build (protocol -> server -> web)
 npm run build
 
-# 3. Vitest unit, protocol, production-mode & browser bridge integration suites
+# 3. Unit & server integration test suites (Vitest)
 npm run test:unit
+
+# 4. Opaque-box Playwright E2E test suites (Tiers 1–4)
+npm run test:e2e
 ```
