@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { shouldCompressContentType } from './utils/http.js';
 
 const MIME_BY_EXT: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -41,8 +43,17 @@ export function serveStaticSpa(
     return false;
   }
 
-  // Never SPA-fallback unknown API routes
-  if (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) {
+  // Never SPA-fallback unknown API, OAuth, MCP, or Bot API routes
+  if (
+    pathname.startsWith('/api/') ||
+    pathname.startsWith('/v1/') ||
+    pathname.startsWith('/.well-known/') ||
+    pathname.startsWith('/oauth/') ||
+    pathname === '/mcp' ||
+    pathname.startsWith('/mcp/') ||
+    pathname.startsWith('/bot/') ||
+    /^\/bot[^/]+\//.test(pathname)
+  ) {
     return false;
   }
 
@@ -77,16 +88,29 @@ export function serveStaticSpa(
     const ext = path.extname(candidatePath).toLowerCase();
     const mime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
     const stat = fs.statSync(candidatePath);
+    const acceptsGzip = /\bgzip\b/i.test(String(req.headers['accept-encoding'] ?? ''));
+    const useGzip =
+      req.method === 'GET' &&
+      acceptsGzip &&
+      stat.size >= 1024 &&
+      shouldCompressContentType(mime);
 
     res.statusCode = 200;
     res.setHeader('Content-Type', mime);
-    res.setHeader('Content-Length', stat.size);
     if (pathname.startsWith('/assets/')) {
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     } else {
       res.setHeader('Cache-Control', 'no-cache');
     }
 
+    if (useGzip) {
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      fs.createReadStream(candidatePath).pipe(zlib.createGzip()).pipe(res);
+      return true;
+    }
+
+    res.setHeader('Content-Length', stat.size);
     if (req.method === 'HEAD') {
       res.end();
       return true;

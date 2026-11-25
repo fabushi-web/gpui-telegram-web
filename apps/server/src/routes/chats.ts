@@ -12,15 +12,20 @@ import {
   type InviteLinkDto,
   type WireDraftDto,
 } from '@gpui-telegram/protocol';
-import { ensureUserBootstrapResources } from './auth.js';
+import { ensureSavedMessagesChat } from './auth.js';
 import {
+  ensureChatAdminAccess,
   ensureChatMembership,
+  ensureChatReadAccess,
   getChatDetailDto,
   getUserProfileDto,
   hydrateMessageRow,
   mapUserRowToDto,
+  parseOptionalNonNegativeInt,
+  parseOptionalPositiveInt,
   purgeExpiredTtlMessages,
   refreshChatLastMessage,
+  validateSendAsPeerId,
 } from '../db/queries.js';
 import {
   ApiError,
@@ -31,6 +36,124 @@ import {
   type RequestContext,
 } from '../utils/http.js';
 import type { RealtimeGatewayHub } from '../ws/hub.js';
+
+function containsCjk(text: string): boolean {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (
+      (cp >= 0x4e00 && cp <= 0x9fff) ||
+      (cp >= 0x3400 && cp <= 0x4dbf) ||
+      (cp >= 0x3040 && cp <= 0x30ff) ||
+      (cp >= 0xac00 && cp <= 0xd7af)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function truncateTitleChars(raw: string, maxChars = 72): string {
+  const chars = Array.from(raw.trim());
+  if (chars.length <= maxChars) return chars.join('');
+  const sliced = chars
+    .slice(0, maxChars - 1)
+    .join('')
+    .replace(/[\s,、&·]+$/u, '');
+  return `${sliced}…`;
+}
+
+function autoGenerateGroupTitleFromMembers(
+  db: DatabaseSync,
+  creatorId: number,
+  memberIds: number[],
+): string {
+  const names: string[] = [];
+  const seenLower = new Set<string>();
+  const pushName = (uid: number): void => {
+    const u = getUserProfileDto(db, uid);
+    const display = u
+      ? [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || u.username || `User ${uid}`
+      : `User ${uid}`;
+    const key = display.toLowerCase();
+    if (!seenLower.has(key)) {
+      seenLower.add(key);
+      names.push(display);
+    }
+  };
+
+  for (const uid of memberIds) {
+    pushName(uid);
+  }
+  if (names.length === 1) {
+    pushName(creatorId);
+  }
+  if (names.length === 0) {
+    return 'Group Chat';
+  }
+  const sep = names.some(containsCjk) ? '、' : ', ';
+  return truncateTitleChars(names.join(sep), 72);
+}
+
+const ALLOWED_MEMBER_ROLES = new Set(['owner', 'admin', 'member', 'restricted', 'banned']);
+
+function readOptionalTrimmedString(
+  val: unknown,
+  errorCode: string,
+  message: string,
+): string {
+  if (val === undefined || val === null) {
+    return '';
+  }
+  if (typeof val !== 'string') {
+    throw new ApiError(400, errorCode, message);
+  }
+  return val.trim();
+}
+
+function parseOptionalPositiveIntArray(
+  val: unknown,
+  errorCode: string,
+  message: string,
+): number[] | undefined {
+  if (val === undefined || val === null) {
+    return undefined;
+  }
+  if (!Array.isArray(val)) {
+    throw new ApiError(400, errorCode, message);
+  }
+  const out: number[] = [];
+  for (const item of val) {
+    if (
+      typeof item !== 'number' ||
+      !Number.isInteger(item) ||
+      item < 1 ||
+      item > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new ApiError(400, errorCode, message);
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+function validateChatUsername(raw: unknown): string {
+  if (typeof raw !== 'string') {
+    throw new ApiError(
+      400,
+      'invalid_username',
+      'Username must be 3–32 alphanumeric/underscore characters',
+    );
+  }
+  const clean = raw.trim().replace(/^@/, '');
+  if (!/^[A-Za-z0-9_]{3,32}$/.test(clean)) {
+    throw new ApiError(
+      400,
+      'invalid_username',
+      'Username must be 3–32 alphanumeric/underscore characters',
+    );
+  }
+  return clean;
+}
 
 function getNextChatId(db: DatabaseSync): number {
   const row = db.prepare(`SELECT COALESCE(MAX(chat_id), 500) AS mx FROM chats`).get() as { mx: number };
@@ -47,9 +170,6 @@ export function registerChatAndSocialRoutes(
     const auth = requireAuth(db, ctx);
     const archivedFilter = ctx.query.get('archived');
     const folderFilter = ctx.query.get('folder_id');
-
-    // Ensure demo/new users always have Saved Messages
-    ensureUserBootstrapResources(db, auth.userId);
 
     const memberRows = db
       .prepare(
@@ -110,13 +230,13 @@ export function registerChatAndSocialRoutes(
       .map((uid) => getUserProfileDto(db, uid))
       .filter(Boolean);
 
-    sendJson(ctx.res, 200, { chats, users });
+    sendJson(ctx.res, 200, { chats, users, total: chats.length });
   });
 
-  // 2. Saved Messages (idempotent)
+  // 2. Saved Messages (explicit, idempotent)
   router.post('/api/v1/chats/saved', (ctx) => {
     const auth = requireAuth(db, ctx);
-    const savedChatId = ensureUserBootstrapResources(db, auth.userId);
+    const savedChatId = ensureSavedMessagesChat(db, auth.userId);
     const detail = getChatDetailDto(db, savedChatId, auth.userId)!;
     sendJson(ctx.res, 200, detail);
   });
@@ -125,11 +245,18 @@ export function registerChatAndSocialRoutes(
   router.post('/api/v1/secret-chats', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      peer_user_id?: number;
-      ttl_seconds?: number;
+      peer_user_id?: unknown;
+      ttl_seconds?: unknown;
     }>(ctx.req);
 
-    const peerUserId = Number(body.peer_user_id);
+    const peerUserId = parseOptionalPositiveInt(
+      body.peer_user_id,
+      'invalid_peer_user_id',
+      'peer_user_id must be a positive integer',
+    );
+    if (peerUserId === undefined) {
+      throw new ApiError(400, 'invalid_peer_user_id', 'peer_user_id is required');
+    }
     const peerUser = getUserProfileDto(db, peerUserId);
     if (!peerUser) {
       throw new ApiError(404, 'peer_not_found', 'Target user for secret chat not found');
@@ -137,7 +264,12 @@ export function registerChatAndSocialRoutes(
 
     const now = Date.now();
     const chatId = getNextChatId(db);
-    const ttlSeconds = Math.max(0, Math.trunc(Number(body.ttl_seconds ?? 30)));
+    const ttlSeconds =
+      parseOptionalNonNegativeInt(
+        body.ttl_seconds,
+        'invalid_ttl',
+        'ttl_seconds must be a non-negative integer',
+      ) ?? 30;
     const hash = crypto.createHash('sha256').update(`secret:${auth.userId}:${peerUserId}:${chatId}`).digest();
     const emojiFp = [0, 1, 2, 3].map((i) => E2EE_SAFETY_EMOJIS[hash[i]! % 32]!);
     const title = `🔒 ${[peerUser.first_name, peerUser.last_name].filter(Boolean).join(' ')}`;
@@ -162,42 +294,130 @@ export function registerChatAndSocialRoutes(
     });
   });
 
-  // 4. Create Chat (Private DM, Group, Supergroup/Forum, Channel)
-  router.post('/api/v1/chats', async (ctx) => {
+  // 4. Create Chat (Private DM, Group, Supergroup/Forum, Channel, Bot DM, Saved)
+  const handleCreateChat = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      title?: string;
-      chat_type?: number | string;
-      peer_user_id?: number;
-      username?: string;
-      about?: string;
+      title?: unknown;
+      chat_type?: unknown;
+      kind?: unknown;
+      peer_user_id?: unknown;
+      user_id?: unknown;
+      username?: unknown;
+      about?: unknown;
       is_forum?: boolean;
-      member_ids?: number[];
+      member_ids?: unknown;
+      member_usernames?: unknown;
+      client_nonce?: unknown;
     }>(ctx.req);
 
-    const rawType = body.chat_type ?? 1;
-    if (rawType === 5 || rawType === 'saved') {
-      const savedChatId = ensureUserBootstrapResources(db, auth.userId);
+    if (
+      body.client_nonce !== undefined &&
+      body.client_nonce !== null &&
+      typeof body.client_nonce !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_nonce', 'client_nonce must be a string');
+    }
+    const clientNonce =
+      typeof body.client_nonce === 'string' && body.client_nonce.trim()
+        ? body.client_nonce.trim()
+        : undefined;
+
+    if (clientNonce) {
+      const existingNonce = db
+        .prepare(
+          `SELECT chat_id FROM chat_create_nonces WHERE creator_user_id = ? AND client_nonce = ?`,
+        )
+        .get(auth.userId, clientNonce) as { chat_id: number } | undefined;
+      if (existingNonce) {
+        const existingChatId = Number(existingNonce.chat_id);
+        const existingMem = db
+          .prepare(
+            `SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ? AND role != 'banned'`,
+          )
+          .get(existingChatId, auth.userId);
+        const existingDetail = existingMem ? getChatDetailDto(db, existingChatId, auth.userId) : null;
+        if (existingDetail) {
+          sendJson(ctx.res, 201, existingDetail);
+          return;
+        }
+        db.prepare(
+          `DELETE FROM chat_create_nonces WHERE creator_user_id = ? AND client_nonce = ?`,
+        ).run(auth.userId, clientNonce);
+      }
+    }
+
+    if (
+      body.chat_type !== undefined &&
+      body.chat_type !== null &&
+      typeof body.chat_type !== 'number' &&
+      typeof body.chat_type !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_chat_type', 'chat_type must be a number or string');
+    }
+    if (body.kind !== undefined && body.kind !== null && typeof body.kind !== 'string') {
+      throw new ApiError(400, 'invalid_chat_type', 'kind must be a string');
+    }
+
+    const peerIdRaw = parseOptionalPositiveInt(
+      body.peer_user_id ?? body.user_id,
+      'invalid_peer_user_id',
+      'peer_user_id must be a positive integer',
+    );
+    const rawType =
+      body.chat_type ??
+      body.kind ??
+      (peerIdRaw !== undefined ? (peerIdRaw === auth.userId ? 5 : 0) : 1);
+    const normalizedTypeStr = typeof rawType === 'string' ? rawType.trim().toLowerCase() : rawType;
+    let chatType =
+      normalizedTypeStr === 5 || normalizedTypeStr === 'saved' || normalizedTypeStr === 'saved_messages'
+        ? 5
+        : normalizedTypeStr === 'private' ||
+            normalizedTypeStr === 'direct' ||
+            normalizedTypeStr === 'dm' ||
+            normalizedTypeStr === 'bot' ||
+            normalizedTypeStr === 0
+          ? 0
+          : normalizedTypeStr === 'channel' || normalizedTypeStr === 3
+            ? 3
+            : normalizedTypeStr === 'supergroup' || normalizedTypeStr === 2 || body.is_forum
+              ? 2
+              : normalizedTypeStr === 'secret' || normalizedTypeStr === 4
+                ? 4
+                : 1;
+    if (chatType === 0 && peerIdRaw !== undefined && Number(peerIdRaw) === auth.userId) {
+      chatType = 5;
+    }
+
+    if (body.username !== undefined && body.username !== null && ![1, 2, 3].includes(chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Only groups and channels can have a public username',
+      );
+    }
+
+    const now = Date.now();
+    const recordCreateNonce = (chatId: number): void => {
+      if (!clientNonce) return;
+      db.prepare(`
+        INSERT OR REPLACE INTO chat_create_nonces (creator_user_id, client_nonce, chat_id, created_at_ms)
+        VALUES (?, ?, ?, ?)
+      `).run(auth.userId, clientNonce, chatId, now);
+    };
+
+    if (chatType === 5) {
+      const savedChatId = ensureSavedMessagesChat(db, auth.userId);
+      recordCreateNonce(savedChatId);
       sendJson(ctx.res, 200, getChatDetailDto(db, savedChatId, auth.userId));
       return;
     }
-    const chatType =
-      rawType === 'private' || rawType === 0
-        ? 0
-        : rawType === 'channel' || rawType === 3
-          ? 3
-          : rawType === 'supergroup' || rawType === 2 || body.is_forum
-            ? 2
-            : rawType === 'secret' || rawType === 4
-              ? 4
-              : 1;
 
-    const now = Date.now();
-
-    if (chatType === 0 && body.peer_user_id) {
-      const peerId = Number(body.peer_user_id);
+    if (chatType === 0 && peerIdRaw !== undefined) {
+      const peerId = Number(peerIdRaw);
       if (peerId === auth.userId) {
-        const savedId = ensureUserBootstrapResources(db, auth.userId);
+        const savedId = ensureSavedMessagesChat(db, auth.userId);
+        recordCreateNonce(savedId);
         sendJson(ctx.res, 200, getChatDetailDto(db, savedId, auth.userId));
         return;
       }
@@ -212,6 +432,7 @@ export function registerChatAndSocialRoutes(
         .get(auth.userId, peerId) as { chat_id: number } | undefined;
 
       if (existingDm) {
+        recordCreateNonce(Number(existingDm.chat_id));
         sendJson(ctx.res, 200, getChatDetailDto(db, Number(existingDm.chat_id), auth.userId));
         return;
       }
@@ -223,32 +444,116 @@ export function registerChatAndSocialRoutes(
 
       const chatId = getNextChatId(db);
       const kind = peer.is_bot ? 'bot' : 'private';
-      const title = [peer.first_name, peer.last_name].filter(Boolean).join(' ');
+      const title = [peer.first_name, peer.last_name].filter(Boolean).join(' ') || peer.username || `User ${peerId}`;
       db.prepare(`
         INSERT INTO chats (
           chat_id, title, kind, chat_type, creator_id, peer_user_id, username, about,
           is_forum, is_verified, pts, next_msg_id, last_message_id, last_message_date_ms, created_at_ms
-        ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, 0, ?, 0, 1, 0, ?, ?)
-      `).run(chatId, title, kind, auth.userId, peerId, peer.username ?? null, peer.bio ?? null, peer.is_verified ? 1 : 0, now, now);
+        ) VALUES (?, ?, ?, 0, ?, ?, NULL, ?, 0, ?, 0, 1, 0, ?, ?)
+      `).run(
+        chatId,
+        title,
+        kind,
+        auth.userId,
+        peerId,
+        peer.bio ?? null,
+        peer.is_verified ? 1 : 0,
+        now,
+        now,
+      );
 
-      db.prepare(`INSERT INTO chat_members (chat_id, user_id, role, joined_at_ms) VALUES (?, ?, 'member', ?)`).run(chatId, auth.userId, now);
-      db.prepare(`INSERT INTO chat_members (chat_id, user_id, role, joined_at_ms) VALUES (?, ?, 'member', ?)`).run(chatId, peerId, now);
+      db.prepare(`INSERT INTO chat_members (chat_id, user_id, role, joined_at_ms) VALUES (?, ?, 'member', ?)`).run(
+        chatId,
+        auth.userId,
+        now,
+      );
+      db.prepare(`INSERT INTO chat_members (chat_id, user_id, role, joined_at_ms) VALUES (?, ?, 'member', ?)`).run(
+        chatId,
+        peerId,
+        now,
+      );
+      recordCreateNonce(chatId);
       sendJson(ctx.res, 201, getChatDetailDto(db, chatId, auth.userId));
       return;
     }
 
-    const title = (body.title ?? '').trim();
-    if (!title) {
-      throw new ApiError(400, 'missing_title', 'Group or channel title cannot be empty');
+    // Resolve and deduplicate group/channel member IDs from `member_ids` and `member_usernames`
+    const resolvedMemberIds: number[] = [];
+    const seenMembers = new Set<number>([auth.userId]);
+    const parsedMemberIds = parseOptionalPositiveIntArray(
+      body.member_ids,
+      'invalid_members',
+      'member_ids must be an array of positive integers',
+    );
+    for (const uid of parsedMemberIds ?? []) {
+      if (!seenMembers.has(uid)) {
+        seenMembers.add(uid);
+        resolvedMemberIds.push(uid);
+      }
+    }
+    if (body.member_usernames !== undefined && body.member_usernames !== null) {
+      if (!Array.isArray(body.member_usernames)) {
+        throw new ApiError(
+          400,
+          'invalid_members',
+          'member_usernames must be an array of strings',
+        );
+      }
+      for (const rawUname of body.member_usernames) {
+        if (typeof rawUname !== 'string') {
+          throw new ApiError(400, 'invalid_members', 'Each member username must be a string');
+        }
+        const clean = rawUname.trim().replace(/^@/, '');
+        if (!clean) continue;
+        const uRow = db
+          .prepare(`SELECT user_id FROM users WHERE LOWER(username) = LOWER(?)`)
+          .get(clean) as { user_id: number } | undefined;
+        if (uRow) {
+          const uid = Number(uRow.user_id);
+          if (!seenMembers.has(uid)) {
+            seenMembers.add(uid);
+            resolvedMemberIds.push(uid);
+          }
+        }
+      }
     }
 
-    if (body.username) {
+    // Validate optional title or auto-generate CJK/Latin group title when omitted
+    if (body.title !== undefined && body.title !== null && typeof body.title !== 'string') {
+      throw new ApiError(400, 'invalid_title', 'Chat title must be a string');
+    }
+    let title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (Array.from(title).length > 255) {
+      throw new ApiError(400, 'invalid_title', 'Chat title cannot exceed 255 characters');
+    }
+    if (!title) {
+      if ((chatType === 1 || chatType === 2) && resolvedMemberIds.length > 0) {
+        title = autoGenerateGroupTitleFromMembers(db, auth.userId, resolvedMemberIds);
+      } else {
+        throw new ApiError(400, 'invalid_title', 'Group or channel title cannot be empty');
+      }
+    }
+
+    let cleanUsername: string | null = null;
+    if (body.username !== undefined && body.username !== null) {
+      if (![1, 2, 3].includes(chatType)) {
+        throw new ApiError(
+          400,
+          'invalid_chat_type',
+          'Only groups and channels can have a public username',
+        );
+      }
+      cleanUsername = validateChatUsername(body.username);
       const dup = db
         .prepare(`SELECT chat_id FROM chats WHERE LOWER(username) = LOWER(?)`)
-        .get(body.username.trim());
+        .get(cleanUsername);
       if (dup) {
         throw new ApiError(409, 'username_taken', 'Chat username is already taken');
       }
+    }
+
+    if (body.about !== undefined && body.about !== null && typeof body.about !== 'string') {
+      throw new ApiError(400, 'invalid_about', 'Chat about description must be a string');
     }
 
     const chatId = getNextChatId(db);
@@ -266,8 +571,8 @@ export function registerChatAndSocialRoutes(
       kind,
       chatType,
       auth.userId,
-      body.username?.trim() ?? null,
-      body.about?.trim() ?? null,
+      cleanUsername,
+      typeof body.about === 'string' ? body.about.trim() : null,
       isForum ? 1 : 0,
       now,
       `${kind === 'channel' ? 'Channel' : 'Group'} created`,
@@ -279,14 +584,11 @@ export function registerChatAndSocialRoutes(
       VALUES (?, ?, 'owner', 255, 0, ?)
     `).run(chatId, auth.userId, now);
 
-    for (const memberId of body.member_ids ?? []) {
-      const uid = Number(memberId);
-      if (uid !== auth.userId) {
-        db.prepare(`
-          INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, admin_rights, banned_rights, joined_at_ms)
-          VALUES (?, ?, 'member', 0, 0, ?)
-        `).run(chatId, uid, now);
-      }
+    for (const uid of resolvedMemberIds) {
+      db.prepare(`
+        INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, admin_rights, banned_rights, joined_at_ms)
+        VALUES (?, ?, 'member', 0, 0, ?)
+      `).run(chatId, uid, now);
     }
 
     if (isForum) {
@@ -297,78 +599,128 @@ export function registerChatAndSocialRoutes(
       `).run(chatId, auth.userId, now);
     }
 
+    recordCreateNonce(chatId);
+
     const detail = getChatDetailDto(db, chatId, auth.userId)!;
-    for (const memberId of body.member_ids ?? []) {
-      const uid = Number(memberId);
-      if (uid !== auth.userId) {
-        const peerDetail = getChatDetailDto(db, chatId, uid);
-        if (peerDetail) {
-          hub.sendToUser(uid, {
-            type: 'Update',
-            payload: { type: 'ChatUpdated', data: peerDetail },
-          });
-        }
+    for (const uid of resolvedMemberIds) {
+      const peerDetail = getChatDetailDto(db, chatId, uid);
+      if (peerDetail) {
+        hub.sendToUser(uid, {
+          type: 'Update',
+          payload: { type: 'ChatUpdated', data: peerDetail },
+        });
       }
     }
     sendJson(ctx.res, 201, detail);
-  });
+  };
+  router.post('/api/v1/chats', handleCreateChat);
+  router.post('/api/v1/chats/create', handleCreateChat);
 
-  // 5. Single Chat Inspect, Patch, Delete/Leave, Settings, Draft, TTL, Clear History, Send-As
+  // 5. Single Chat Inspect, Join Public Chat, Patch, Delete/Leave, Settings, Draft, TTL, Clear History, Send-As
   router.get('/api/v1/chats/:chatId', (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatReadAccess(db, chatId, auth.userId);
     const detail = getChatDetailDto(db, chatId, auth.userId);
     if (!detail) throw new ApiError(404, 'chat_not_found', 'Chat not found');
     sendJson(ctx.res, 200, detail);
   });
 
-  const requireGroupAdminIfApplicable = (chatId: number, userId: number): void => {
-    const chatMeta = db
-      .prepare(`SELECT chat_type FROM chats WHERE chat_id = ?`)
-      .get(chatId) as { chat_type: number } | undefined;
-    if (chatMeta && [1, 2, 3].includes(Number(chatMeta.chat_type))) {
-      const mem = db
-        .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
-        .get(chatId, userId) as { role: string } | undefined;
-      if (!mem || (mem.role !== 'owner' && mem.role !== 'admin')) {
-        throw new ApiError(403, 'admin_required', 'Only chat owners or admins can perform this action');
-      }
+  router.post('/api/v1/chats/:chatId/join', (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId);
+    const chat = db
+      .prepare(`SELECT chat_id, chat_type, username FROM chats WHERE chat_id = ?`)
+      .get(chatId) as { chat_id: number; chat_type: number; username: string | null } | undefined;
+    if (!chat) {
+      throw new ApiError(404, 'chat_not_found', `Chat ${chatId} not found`);
     }
-  };
+    const existingMem = db
+      .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
+      .get(chatId, auth.userId) as { role: string } | undefined;
+    if (existingMem?.role === 'banned') {
+      throw new ApiError(403, 'banned_in_chat', 'You are banned from this chat');
+    }
+    const hasPublicUsername = Boolean(chat.username && String(chat.username).trim().length > 0);
+    if (!existingMem && (!hasPublicUsername || ![1, 2, 3].includes(Number(chat.chat_type)))) {
+      throw new ApiError(403, 'forbidden', 'Cannot join a private chat without an invite link');
+    }
+    db.prepare(`
+      INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, admin_rights, banned_rights, joined_at_ms)
+      VALUES (?, ?, 'member', 0, 0, ?)
+    `).run(chatId, auth.userId, Date.now());
+    sendJson(ctx.res, 200, getChatDetailDto(db, chatId, auth.userId));
+  });
 
   const handleUpdateChatMeta = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
-    requireGroupAdminIfApplicable(chatId, auth.userId);
+    const access = ensureChatAdminAccess(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Only groups and channels support metadata updates',
+      );
+    }
     const body = await readJsonBody<{
-      title?: string;
-      about?: string;
-      username?: string;
-      photo_file_id?: string;
-      slow_mode_seconds?: number;
+      title?: unknown;
+      about?: unknown;
+      username?: unknown;
+      photo_file_id?: unknown;
+      slow_mode_seconds?: unknown;
       is_forum?: boolean;
     }>(ctx.req);
 
     if (body.title !== undefined) {
-      if (!body.title.trim()) throw new ApiError(400, 'invalid_title', 'Title cannot be empty');
+      if (typeof body.title !== 'string' || !body.title.trim()) {
+        throw new ApiError(400, 'invalid_title', 'Title cannot be empty');
+      }
       db.prepare(`UPDATE chats SET title = ? WHERE chat_id = ?`).run(body.title.trim(), chatId);
     }
     if (body.about !== undefined) {
-      db.prepare(`UPDATE chats SET about = ? WHERE chat_id = ?`).run(body.about, chatId);
-    }
-    if (body.username !== undefined) {
-      db.prepare(`UPDATE chats SET username = ? WHERE chat_id = ?`).run(body.username.trim() || null, chatId);
-    }
-    if (body.photo_file_id !== undefined) {
-      db.prepare(`UPDATE chats SET photo_file_id = ? WHERE chat_id = ?`).run(body.photo_file_id, chatId);
-    }
-    if (body.slow_mode_seconds !== undefined) {
-      db.prepare(`UPDATE chats SET slow_mode_seconds = ? WHERE chat_id = ?`).run(
-        Math.max(0, Number(body.slow_mode_seconds)),
+      if (body.about !== null && typeof body.about !== 'string') {
+        throw new ApiError(400, 'invalid_about', 'Chat about description must be a string or null');
+      }
+      db.prepare(`UPDATE chats SET about = ? WHERE chat_id = ?`).run(
+        body.about === null ? null : body.about,
         chatId,
       );
+    }
+    if (body.username !== undefined) {
+      if (body.username === null) {
+        db.prepare(`UPDATE chats SET username = NULL WHERE chat_id = ?`).run(chatId);
+      } else {
+        const cleanU = validateChatUsername(body.username);
+        const dup = db
+          .prepare(`SELECT chat_id FROM chats WHERE LOWER(username) = LOWER(?) AND chat_id != ?`)
+          .get(cleanU, chatId);
+        if (dup) {
+          throw new ApiError(409, 'username_taken', 'Chat username is already taken');
+        }
+        db.prepare(`UPDATE chats SET username = ? WHERE chat_id = ?`).run(cleanU, chatId);
+      }
+    }
+    if (body.photo_file_id !== undefined) {
+      if (body.photo_file_id !== null && typeof body.photo_file_id !== 'string') {
+        throw new ApiError(
+          400,
+          'invalid_photo_file_id',
+          'photo_file_id must be a string or null',
+        );
+      }
+      db.prepare(`UPDATE chats SET photo_file_id = ? WHERE chat_id = ?`).run(
+        body.photo_file_id === null ? null : body.photo_file_id,
+        chatId,
+      );
+    }
+    if (body.slow_mode_seconds !== undefined && body.slow_mode_seconds !== null) {
+      const slowSecs = parseOptionalNonNegativeInt(
+        body.slow_mode_seconds,
+        'invalid_slow_mode',
+        'slow_mode_seconds must be a non-negative integer',
+      )!;
+      db.prepare(`UPDATE chats SET slow_mode_seconds = ? WHERE chat_id = ?`).run(slowSecs, chatId);
     }
     if (body.is_forum !== undefined) {
       db.prepare(`UPDATE chats SET is_forum = ? WHERE chat_id = ?`).run(body.is_forum ? 1 : 0, chatId);
@@ -384,8 +736,21 @@ export function registerChatAndSocialRoutes(
   const handleLeaveOrDeleteChat = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    db.prepare(`DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?`).run(chatId, auth.userId);
-    db.prepare(`DELETE FROM user_chat_settings WHERE chat_id = ? AND user_id = ?`).run(chatId, auth.userId);
+    const memRow = db
+      .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
+      .get(chatId, auth.userId) as { role: string } | undefined;
+    if (memRow?.role === 'banned') {
+      throw new ApiError(403, 'banned_in_chat', 'Banned users cannot leave this chat');
+    }
+    db.prepare(`DELETE FROM chat_members WHERE chat_id = ? AND user_id = ? AND role != 'banned'`).run(
+      chatId,
+      auth.userId,
+    );
+    db.prepare(`DELETE FROM user_chat_settings WHERE chat_id = ? AND user_id = ?`).run(
+      chatId,
+      auth.userId,
+    );
+    hub.unsubscribeUserFromChat(auth.userId, chatId);
     sendJson(ctx.res, 200, { ok: true });
   };
   router.delete('/api/v1/chats/:chatId', handleLeaveOrDeleteChat);
@@ -399,11 +764,34 @@ export function registerChatAndSocialRoutes(
       is_pinned?: boolean;
       is_archived?: boolean;
       is_muted?: boolean;
-      mute_until_ms?: number | null;
+      mute_until_ms?: unknown;
+      muted_until_ms?: unknown;
       unread_mark?: boolean;
-      folder_id?: number | null;
-      draft_text?: string | null;
+      folder_id?: unknown;
+      draft_text?: unknown;
     }>(ctx.req);
+
+    const validatedMuteUntilMs = parseOptionalNonNegativeInt(
+      body.mute_until_ms ?? body.muted_until_ms,
+      'invalid_muted_until',
+      'muted_until_ms must be a non-negative integer',
+    );
+    const hasFolderId = body.folder_id !== undefined;
+    const validatedFolderId =
+      hasFolderId && body.folder_id !== null
+        ? parseOptionalNonNegativeInt(
+            body.folder_id,
+            'invalid_folder_id',
+            'folder_id must be a non-negative integer or null',
+          )!
+        : null;
+    if (
+      body.draft_text !== undefined &&
+      body.draft_text !== null &&
+      typeof body.draft_text !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_draft', 'draft_text must be a string or null');
+    }
 
     db.prepare(`INSERT OR IGNORE INTO user_chat_settings (user_id, chat_id) VALUES (?, ?)`).run(
       auth.userId,
@@ -424,13 +812,21 @@ export function registerChatAndSocialRoutes(
         chatId,
       );
     }
-    if (body.is_muted !== undefined) {
-      db.prepare(`UPDATE user_chat_settings SET is_muted = ?, mute_until_ms = ? WHERE user_id = ? AND chat_id = ?`).run(
-        body.is_muted ? 1 : 0,
-        body.mute_until_ms ?? null,
-        auth.userId,
-        chatId,
-      );
+    if (body.is_muted !== undefined || body.mute_until_ms !== undefined || body.muted_until_ms !== undefined) {
+      if (body.is_muted !== undefined) {
+        db.prepare(`UPDATE user_chat_settings SET is_muted = ?, mute_until_ms = ? WHERE user_id = ? AND chat_id = ?`).run(
+          body.is_muted ? 1 : 0,
+          validatedMuteUntilMs ?? null,
+          auth.userId,
+          chatId,
+        );
+      } else {
+        db.prepare(`UPDATE user_chat_settings SET mute_until_ms = ? WHERE user_id = ? AND chat_id = ?`).run(
+          validatedMuteUntilMs ?? null,
+          auth.userId,
+          chatId,
+        );
+      }
     }
     if (body.unread_mark !== undefined) {
       db.prepare(`UPDATE user_chat_settings SET unread_mark = ? WHERE user_id = ? AND chat_id = ?`).run(
@@ -439,16 +835,16 @@ export function registerChatAndSocialRoutes(
         chatId,
       );
     }
-    if (body.folder_id !== undefined) {
+    if (hasFolderId) {
       db.prepare(`UPDATE user_chat_settings SET folder_id = ? WHERE user_id = ? AND chat_id = ?`).run(
-        body.folder_id,
+        validatedFolderId,
         auth.userId,
         chatId,
       );
     }
     if (body.draft_text !== undefined) {
       const draftObj: WireDraftDto | null =
-        body.draft_text && body.draft_text.length > 0
+        typeof body.draft_text === 'string' && body.draft_text.length > 0
           ? { chat_id: chatId, text: body.draft_text, entities: [], date_ms: Date.now() }
           : null;
       db.prepare(`UPDATE user_chat_settings SET draft_json = ? WHERE user_id = ? AND chat_id = ?`).run(
@@ -487,10 +883,25 @@ export function registerChatAndSocialRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ muted?: boolean; is_muted?: boolean; mute_until_ms?: number | null }>(ctx.req);
+    const body = await readJsonBody<{
+      muted?: boolean;
+      is_muted?: boolean;
+      mute_until_ms?: unknown;
+      muted_until_ms?: unknown;
+    }>(ctx.req);
+    const muteUntilMs = parseOptionalNonNegativeInt(
+      body.mute_until_ms ?? body.muted_until_ms,
+      'invalid_muted_until',
+      'muted_until_ms must be a non-negative integer',
+    );
     const muted = body.muted ?? body.is_muted ?? true;
     db.prepare(`INSERT OR IGNORE INTO user_chat_settings (user_id, chat_id) VALUES (?, ?)`).run(auth.userId, chatId);
-    db.prepare(`UPDATE user_chat_settings SET is_muted = ?, mute_until_ms = ? WHERE user_id = ? AND chat_id = ?`).run(muted ? 1 : 0, body.mute_until_ms ?? null, auth.userId, chatId);
+    db.prepare(`UPDATE user_chat_settings SET is_muted = ?, mute_until_ms = ? WHERE user_id = ? AND chat_id = ?`).run(
+      muted ? 1 : 0,
+      muteUntilMs ?? null,
+      auth.userId,
+      chatId,
+    );
     sendJson(ctx.res, 200, getChatDetailDto(db, chatId, auth.userId));
   });
 
@@ -498,6 +909,7 @@ export function registerChatAndSocialRoutes(
   router.get('/api/v1/chats/:chatId/draft', (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
+    ensureChatReadAccess(db, chatId, auth.userId);
     const detail = getChatDetailDto(db, chatId, auth.userId);
     sendJson(ctx.res, 200, { draft: detail?.draft ?? null });
   });
@@ -507,21 +919,42 @@ export function registerChatAndSocialRoutes(
     const chatId = Number(ctx.params.chatId);
     ensureChatMembership(db, chatId, auth.userId);
     const body = await readJsonBody<{
-      text?: string;
-      reply_to_msg_id?: number;
-      quote_text?: string;
-      topic_id?: number;
+      text?: unknown;
+      reply_to_msg_id?: unknown;
+      quote_text?: unknown;
+      topic_id?: unknown;
     }>(ctx.req);
 
-    const text = body.text ?? '';
+    if (body.text !== undefined && body.text !== null && typeof body.text !== 'string') {
+      throw new ApiError(400, 'invalid_draft', 'Draft text must be a string');
+    }
+    if (
+      body.quote_text !== undefined &&
+      body.quote_text !== null &&
+      typeof body.quote_text !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_quote_text', 'quote_text must be a string');
+    }
+    const replyToMsgId = parseOptionalPositiveInt(
+      body.reply_to_msg_id,
+      'invalid_reply_to',
+      'reply_to_msg_id must be a positive integer',
+    );
+    const topicId = parseOptionalPositiveInt(
+      body.topic_id,
+      'invalid_topic_id',
+      'topic_id must be a positive integer',
+    );
+
+    const text = typeof body.text === 'string' ? body.text : '';
     const draft: WireDraftDto | null = text
       ? {
           chat_id: chatId,
           text,
           entities: [],
-          reply_to_msg_id: body.reply_to_msg_id,
-          quote_text: body.quote_text,
-          topic_id: body.topic_id,
+          reply_to_msg_id: replyToMsgId,
+          quote_text: typeof body.quote_text === 'string' ? body.quote_text : undefined,
+          topic_id: topicId,
           date_ms: Date.now(),
         }
       : null;
@@ -540,7 +973,7 @@ export function registerChatAndSocialRoutes(
       type: 'Update',
       payload: {
         type: 'DraftUpdated',
-        data: { chat_id: chatId, topic_id: body.topic_id ?? null, draft },
+        data: { chat_id: chatId, topic_id: topicId ?? null, draft },
       },
     });
     sendJson(ctx.res, 200, { ok: true, draft });
@@ -560,9 +993,14 @@ export function registerChatAndSocialRoutes(
   const handleSetChatTtl = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ ttl_seconds?: number }>(ctx.req);
-    const ttlSeconds = Math.max(0, Math.trunc(Number(body.ttl_seconds ?? 0)));
+    ensureChatAdminAccess(db, chatId, auth.userId);
+    const body = await readJsonBody<{ ttl_seconds?: unknown }>(ctx.req);
+    const ttlSeconds =
+      parseOptionalNonNegativeInt(
+        body.ttl_seconds,
+        'invalid_ttl',
+        'ttl_seconds must be a non-negative integer',
+      ) ?? 0;
     db.prepare(`UPDATE chats SET ttl_seconds = ? WHERE chat_id = ?`).run(ttlSeconds, chatId);
     const purged = purgeExpiredTtlMessages(db, chatId);
     sendJson(ctx.res, 200, { ok: true, ttl_seconds: ttlSeconds, purged_count: purged.length });
@@ -576,7 +1014,7 @@ export function registerChatAndSocialRoutes(
     ensureChatMembership(db, chatId, auth.userId);
     const body = await readJsonBody<{ for_everyone?: boolean }>(ctx.req);
     if (body.for_everyone) {
-      requireGroupAdminIfApplicable(chatId, auth.userId);
+      ensureChatAdminAccess(db, chatId, auth.userId);
       db.prepare(
         `UPDATE messages
          SET deleted_for_everyone = 1,
@@ -605,10 +1043,17 @@ export function registerChatAndSocialRoutes(
   router.get('/api/v1/chats/:chatId/send_as', (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
+    ensureChatMembership(db, chatId, auth.userId);
     const me = getUserProfileDto(db, auth.userId);
     const ownedChannels = db
-      .prepare(`SELECT chat_id, title, username FROM chats WHERE creator_id = ? AND chat_type = 3`)
-      .all(auth.userId) as Array<{ chat_id: number; title: string; username: string | null }>;
+      .prepare(
+        `SELECT DISTINCT c.chat_id, c.title, c.username
+         FROM chats c
+         LEFT JOIN chat_members m ON m.chat_id = c.chat_id AND m.user_id = ?
+         WHERE c.chat_type = 3
+           AND (c.creator_id = ? OR m.role IN ('owner', 'admin'))`,
+      )
+      .all(auth.userId, auth.userId) as Array<{ chat_id: number; title: string; username: string | null }>;
     const detail = getChatDetailDto(db, chatId, auth.userId);
     sendJson(ctx.res, 200, {
       selected_peer_id: detail?.send_as_peer_id ?? auth.userId,
@@ -622,8 +1067,9 @@ export function registerChatAndSocialRoutes(
   router.put('/api/v1/chats/:chatId/send_as', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    const body = await readJsonBody<{ send_as_peer_id?: number }>(ctx.req);
-    const peerId = Number(body.send_as_peer_id ?? auth.userId);
+    ensureChatMembership(db, chatId, auth.userId);
+    const body = await readJsonBody<{ send_as_peer_id?: unknown }>(ctx.req);
+    const peerId = validateSendAsPeerId(db, auth.userId, body.send_as_peer_id) ?? auth.userId;
     db.prepare(`
       INSERT INTO user_chat_settings (user_id, chat_id, send_as_peer_id)
       VALUES (?, ?, ?)
@@ -644,11 +1090,44 @@ export function registerChatAndSocialRoutes(
 
   const handleUpsertFolder = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
-    const body = await readJsonBody<Partial<ChatFolderDto> & { title?: string }>(ctx.req);
-    const title = (body.title ?? '').trim();
+    const body = await readJsonBody<Record<string, unknown>>(ctx.req);
+    if (body.title !== undefined && body.title !== null && typeof body.title !== 'string') {
+      throw new ApiError(400, 'invalid_folder_title', 'Folder title must be a string');
+    }
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
     if (!title) {
       throw new ApiError(400, 'invalid_folder_title', 'Folder title is required');
     }
+    const rawIcon = body.emoticon ?? body.icon;
+    if (rawIcon !== undefined && rawIcon !== null && typeof rawIcon !== 'string') {
+      throw new ApiError(400, 'invalid_folder_icon', 'Folder icon must be a string');
+    }
+    const emoticon = typeof rawIcon === 'string' && rawIcon.trim() ? rawIcon.trim() : '📁';
+
+    const includeChats =
+      parseOptionalPositiveIntArray(
+        body.include_chats ?? body.included_chat_ids,
+        'invalid_folder_chats',
+        'included_chat_ids must be an array of positive integers',
+      ) ?? [];
+    const excludeChats =
+      parseOptionalPositiveIntArray(
+        body.exclude_chats ?? body.excluded_chat_ids,
+        'invalid_folder_chats',
+        'excluded_chat_ids must be an array of positive integers',
+      ) ?? [];
+    const pinnedChats =
+      parseOptionalPositiveIntArray(
+        body.pinned_chats ?? body.pinned_chat_ids,
+        'invalid_folder_chats',
+        'pinned_chats must be an array of positive integers',
+      ) ?? [];
+
+    const sortOrderInput = parseOptionalNonNegativeInt(
+      body.sort_order,
+      'invalid_sort_order',
+      'sort_order must be a non-negative integer',
+    );
 
     let numericId = Number(ctx.params.folderId ?? body.id ?? body.folder_id);
     if (!Number.isFinite(numericId) || numericId <= 0) {
@@ -660,14 +1139,17 @@ export function registerChatAndSocialRoutes(
 
     const dto: ChatFolderDto = {
       id: numericId,
-      folder_id: String(body.folder_id ?? numericId),
+      folder_id:
+        typeof body.folder_id === 'string' || typeof body.folder_id === 'number'
+          ? String(body.folder_id)
+          : String(numericId),
       title,
-      emoticon: body.emoticon ?? body.icon ?? '📁',
-      include_chats: body.include_chats ?? body.included_chat_ids ?? [],
-      included_chat_ids: body.included_chat_ids ?? body.include_chats ?? [],
-      exclude_chats: body.exclude_chats ?? body.excluded_chat_ids ?? [],
-      excluded_chat_ids: body.excluded_chat_ids ?? body.exclude_chats ?? [],
-      pinned_chats: body.pinned_chats ?? body.pinned_chat_ids ?? [],
+      emoticon,
+      include_chats: includeChats,
+      included_chat_ids: includeChats,
+      exclude_chats: excludeChats,
+      excluded_chat_ids: excludeChats,
+      pinned_chats: pinnedChats,
       include_contacts: Boolean(body.include_contacts),
       include_non_contacts: Boolean(body.include_non_contacts),
       include_groups: Boolean(body.include_groups),
@@ -675,8 +1157,8 @@ export function registerChatAndSocialRoutes(
       include_bots: Boolean(body.include_bots),
       exclude_muted: Boolean(body.exclude_muted),
       exclude_read: Boolean(body.exclude_read),
-      exclude_archived: body.exclude_archived ?? true,
-      sort_order: Number(body.sort_order ?? numericId),
+      exclude_archived: body.exclude_archived !== undefined ? Boolean(body.exclude_archived) : true,
+      sort_order: sortOrderInput ?? numericId,
     };
 
     db.prepare(`
@@ -707,11 +1189,11 @@ export function registerChatAndSocialRoutes(
     sendJson(ctx.res, 200, { ok: true });
   });
 
-  // 7. Supergroup Forum Topics CRUD
+  // 7. Supergroup Forum Topics CRUD (non-admin create/update/close/delete strictly 403)
   router.get('/api/v1/chats/:chatId/topics', (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatReadAccess(db, chatId, auth.userId);
     const rows = db
       .prepare(`SELECT * FROM forum_topics WHERE chat_id = ? ORDER BY is_pinned DESC, topic_id ASC`)
       .all(chatId) as Array<Record<string, unknown>>;
@@ -736,32 +1218,49 @@ export function registerChatAndSocialRoutes(
   router.post('/api/v1/chats/:chatId/topics', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ title?: string; icon_color?: number; icon_emoji?: string }>(ctx.req);
-    const title = (body.title ?? '').trim();
+    ensureChatAdminAccess(db, chatId, auth.userId);
+    const body = await readJsonBody<{ title?: unknown; icon_color?: unknown; icon_emoji?: unknown }>(ctx.req);
+    if (body.title !== undefined && body.title !== null && typeof body.title !== 'string') {
+      throw new ApiError(400, 'invalid_topic_title', 'Forum topic title must be a string');
+    }
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
     if (!title) {
       throw new ApiError(400, 'invalid_topic_title', 'Forum topic title is required');
     }
+    if (
+      body.icon_emoji !== undefined &&
+      body.icon_emoji !== null &&
+      typeof body.icon_emoji !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_topic_emoji', 'icon_emoji must be a string');
+    }
+    const iconEmoji =
+      typeof body.icon_emoji === 'string' && body.icon_emoji.trim() ? body.icon_emoji : '💬';
+    const iconColor =
+      parseOptionalNonNegativeInt(
+        body.icon_color,
+        'invalid_icon_color',
+        'icon_color must be a non-negative integer',
+      ) ?? 0x3390ec;
 
     const mx = db
       .prepare(`SELECT COALESCE(MAX(topic_id), 1) AS mx FROM forum_topics WHERE chat_id = ?`)
       .get(chatId) as { mx: number };
     const topicId = Number(mx.mx) + 1;
     const now = Date.now();
-    const iconColor = Number(body.icon_color ?? 0x3390ec);
 
     db.prepare(`
       INSERT INTO forum_topics (
         chat_id, topic_id, title, icon_color, icon_emoji, creator_id, is_pinned, is_closed, is_hidden, created_at_ms
       ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
-    `).run(chatId, topicId, title, iconColor, body.icon_emoji ?? '💬', auth.userId, now);
+    `).run(chatId, topicId, title, iconColor, iconEmoji, auth.userId, now);
 
     const dto: ForumTopicDto = {
       chat_id: chatId,
       topic_id: topicId,
       title,
       icon_color: iconColor,
-      icon_emoji: body.icon_emoji ?? '💬',
+      icon_emoji: iconEmoji,
       creator_id: auth.userId,
       is_pinned: false,
       is_closed: false,
@@ -777,15 +1276,20 @@ export function registerChatAndSocialRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const topicId = Number(ctx.params.topicId);
-    ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ title?: string; is_closed?: boolean; is_pinned?: boolean }>(ctx.req);
+    ensureChatAdminAccess(db, chatId, auth.userId);
+    const body = await readJsonBody<{ title?: unknown; is_closed?: boolean; is_pinned?: boolean }>(ctx.req);
 
-    if (body.title !== undefined && body.title.trim()) {
-      db.prepare(`UPDATE forum_topics SET title = ? WHERE chat_id = ? AND topic_id = ?`).run(
-        body.title.trim(),
-        chatId,
-        topicId,
-      );
+    if (body.title !== undefined && body.title !== null) {
+      if (typeof body.title !== 'string') {
+        throw new ApiError(400, 'invalid_topic_title', 'Forum topic title must be a string');
+      }
+      if (body.title.trim()) {
+        db.prepare(`UPDATE forum_topics SET title = ? WHERE chat_id = ? AND topic_id = ?`).run(
+          body.title.trim(),
+          chatId,
+          topicId,
+        );
+      }
     }
     if (body.is_closed !== undefined) {
       db.prepare(`UPDATE forum_topics SET is_closed = ? WHERE chat_id = ? AND topic_id = ?`).run(
@@ -830,7 +1334,7 @@ export function registerChatAndSocialRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const topicId = Number(ctx.params.topicId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatAdminAccess(db, chatId, auth.userId);
     if (topicId === 1) {
       throw new ApiError(400, 'cannot_delete_general', 'Cannot delete #General forum topic');
     }
@@ -839,7 +1343,7 @@ export function registerChatAndSocialRoutes(
     sendJson(ctx.res, 200, { ok: true });
   });
 
-  // 8. Contacts & `@username` Resolution
+  // 8. Contacts & `@username` Resolution (Zero phantom user fabrication)
   router.get('/api/v1/contacts', (ctx) => {
     const auth = requireAuth(db, ctx);
     const rows = db
@@ -857,51 +1361,49 @@ export function registerChatAndSocialRoutes(
       first_name: String(r.contact_first_name ?? r.first_name),
       last_name: (r.contact_last_name as string | null) ?? (r.last_name as string | null) ?? undefined,
     }));
-    sendJson(ctx.res, 200, { contacts });
+    sendJson(ctx.res, 200, { contacts, total: contacts.length });
   });
 
-  router.post('/api/v1/contacts', async (ctx) => {
+  const handleAddContact = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      user_id?: number;
-      username?: string;
-      phone?: string;
-      first_name?: string;
-      last_name?: string;
+      user_id?: unknown;
+      username?: unknown;
+      phone?: unknown;
+      first_name?: unknown;
+      last_name?: unknown;
     }>(ctx.req);
 
+    const parsedContactUserId = parseOptionalPositiveInt(
+      body.user_id,
+      'invalid_user_id',
+      'user_id must be a positive integer',
+    );
     let targetRow: Record<string, unknown> | undefined;
-    if (body.user_id) {
-      targetRow = db.prepare(`SELECT * FROM users WHERE user_id = ?`).get(Number(body.user_id)) as Record<string, unknown> | undefined;
-    } else if (body.username) {
-      const clean = body.username.trim().replace(/^@/, '');
-      targetRow = db.prepare(`SELECT * FROM users WHERE LOWER(username) = LOWER(?)`).get(clean) as Record<string, unknown> | undefined;
-    } else if (body.phone) {
-      targetRow = db.prepare(`SELECT * FROM users WHERE phone = ?`).get(body.phone.trim()) as Record<string, unknown> | undefined;
-    }
-
-    if (!targetRow && !body.user_id && (body.phone || body.username || body.first_name)) {
-      const mx = db
-        .prepare(`SELECT COALESCE(MAX(user_id), 2000) AS mx FROM users WHERE user_id < 700000`)
-        .get() as { mx: number };
-      const newUserId = Math.max(2001, Number(mx.mx) + 1);
-      const cleanUsername = body.username ? body.username.trim().replace(/^@+/, '') : null;
-      const cleanPhone = body.phone ? body.phone.trim() : null;
-      const newFirst =
-        body.first_name?.trim() || cleanUsername || cleanPhone || `Contact ${newUserId}`;
-      const newLast = body.last_name?.trim() || null;
-      const now = Date.now();
-
-      db.prepare(`
-        INSERT INTO users (
-          user_id, username, phone, first_name, last_name, is_bot, is_verified, is_premium,
-          status, last_seen_ms, created_at_ms
-        ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, 'offline', ?, ?)
-      `).run(newUserId, cleanUsername, cleanPhone, newFirst, newLast, now, now);
-
+    if (parsedContactUserId !== undefined) {
       targetRow = db
         .prepare(`SELECT * FROM users WHERE user_id = ?`)
-        .get(newUserId) as Record<string, unknown> | undefined;
+        .get(parsedContactUserId) as Record<string, unknown> | undefined;
+    } else if (body.username !== undefined && body.username !== null) {
+      if (typeof body.username !== 'string') {
+        throw new ApiError(400, 'invalid_username', 'Contact username must be a string');
+      }
+      const clean = body.username.trim().replace(/^@/, '');
+      if (clean) {
+        targetRow = db
+          .prepare(`SELECT * FROM users WHERE LOWER(username) = LOWER(?)`)
+          .get(clean) as Record<string, unknown> | undefined;
+      }
+    } else if (body.phone !== undefined && body.phone !== null) {
+      if (typeof body.phone !== 'string') {
+        throw new ApiError(400, 'invalid_phone', 'Contact phone must be a string');
+      }
+      const cleanPhone = body.phone.trim();
+      if (cleanPhone) {
+        targetRow = db
+          .prepare(`SELECT * FROM users WHERE phone = ?`)
+          .get(cleanPhone) as Record<string, unknown> | undefined;
+      }
     }
 
     if (!targetRow) {
@@ -909,8 +1411,23 @@ export function registerChatAndSocialRoutes(
     }
 
     const contactUserId = Number(targetRow.user_id);
-    const firstName = body.first_name?.trim() || String(targetRow.first_name);
-    const lastName = body.last_name?.trim() ?? (targetRow.last_name as string | null);
+    if (contactUserId === auth.userId) {
+      throw new ApiError(400, 'cannot_add_self', 'Cannot add yourself as a contact');
+    }
+
+    if (body.first_name !== undefined && body.first_name !== null && typeof body.first_name !== 'string') {
+      throw new ApiError(400, 'invalid_first_name', 'Contact first name must be a string');
+    }
+    if (body.last_name !== undefined && body.last_name !== null && typeof body.last_name !== 'string') {
+      throw new ApiError(400, 'invalid_last_name', 'Contact last name must be a string');
+    }
+    const firstName =
+      (typeof body.first_name === 'string' ? body.first_name.trim() : '') ||
+      String(targetRow.first_name);
+    const lastName =
+      typeof body.last_name === 'string'
+        ? body.last_name.trim()
+        : ((targetRow.last_name as string | null) ?? null);
 
     db.prepare(`
       INSERT OR REPLACE INTO user_contacts (owner_user_id, contact_user_id, first_name, last_name, created_at_ms)
@@ -922,7 +1439,9 @@ export function registerChatAndSocialRoutes(
       first_name: firstName,
       last_name: lastName ?? undefined,
     });
-  });
+  };
+  router.post('/api/v1/contacts', handleAddContact);
+  router.post('/api/v1/contacts/add', handleAddContact);
 
   router.delete('/api/v1/contacts/:contactId', (ctx) => {
     const auth = requireAuth(db, ctx);
@@ -953,7 +1472,7 @@ export function registerChatAndSocialRoutes(
     }
 
     const chatRow = db
-      .prepare(`SELECT chat_id FROM chats WHERE LOWER(username) = LOWER(?)`)
+      .prepare(`SELECT chat_id FROM chats WHERE LOWER(username) = LOWER(?) AND chat_type IN (1, 2, 3)`)
       .get(rawUsername) as { chat_id: number } | undefined;
     if (chatRow) {
       sendJson(ctx.res, 200, {
@@ -1001,21 +1520,62 @@ export function registerChatAndSocialRoutes(
   router.post('/api/v1/chats/:chatId/members', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ user_ids?: number[]; user_id?: number }>(ctx.req);
-    const ids = body.user_ids ?? (body.user_id ? [body.user_id] : []);
-    const added: number[] = [];
-    const now = Date.now();
-
-    for (const rawId of ids) {
-      const uid = Number(rawId);
+    const access = ensureChatMembership(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Members can only be added to groups, supergroups, or channels',
+      );
+    }
+    if (access.chatType === 3 && !access.isAdmin) {
+      throw new ApiError(403, 'admin_required', 'Only channel owners or admins can add members');
+    }
+    const body = await readJsonBody<{ user_ids?: unknown; user_id?: unknown }>(ctx.req);
+    const parsedUserIds = parseOptionalPositiveIntArray(
+      body.user_ids,
+      'invalid_user_ids',
+      'user_ids must be an array of positive integers',
+    );
+    const parsedSingleUserId = parseOptionalPositiveInt(
+      body.user_id,
+      'invalid_user_id',
+      'user_id must be a positive integer',
+    );
+    const ids = parsedUserIds ?? (parsedSingleUserId !== undefined ? [parsedSingleUserId] : []);
+    const candidateIds: number[] = [];
+    for (const uid of ids) {
       const u = getUserProfileDto(db, uid);
       if (!u) continue;
-      db.prepare(`
-        INSERT OR REPLACE INTO chat_members (chat_id, user_id, role, admin_rights, banned_rights, joined_at_ms)
-        VALUES (?, ?, 'member', 0, 0, ?)
-      `).run(chatId, uid, now);
-      added.push(uid);
+      const existing = db
+        .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
+        .get(chatId, uid) as { role: string } | undefined;
+      if (existing?.role === 'banned') {
+        throw new ApiError(
+          403,
+          'banned_in_chat',
+          `User ${uid} is banned in this chat; an admin must unban them first`,
+        );
+      }
+      if (existing) {
+        // Leave existing active member/admin/owner/restricted row untouched
+        continue;
+      }
+      candidateIds.push(uid);
+    }
+
+    const added: number[] = [];
+    const now = Date.now();
+    for (const uid of candidateIds) {
+      const res = db
+        .prepare(`
+          INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, admin_rights, banned_rights, joined_at_ms)
+          VALUES (?, ?, 'member', 0, 0, ?)
+        `)
+        .run(chatId, uid, now);
+      if (Number(res.changes) > 0) {
+        added.push(uid);
+      }
     }
     sendJson(ctx.res, 200, { ok: true, added });
   });
@@ -1024,38 +1584,94 @@ export function registerChatAndSocialRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const targetUserId = Number(ctx.params.userId);
-    ensureChatMembership(db, chatId, auth.userId);
-
-    const callerRoleRow = db
-      .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
-      .get(chatId, auth.userId) as { role: string } | undefined;
-    if (!callerRoleRow || (callerRoleRow.role !== 'owner' && callerRoleRow.role !== 'admin')) {
+    const access = ensureChatAdminAccess(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Member roles can only be modified in groups, supergroups, or channels',
+      );
+    }
+    if (!access.isAdmin) {
       throw new ApiError(403, 'admin_required', 'Only owners or admins can modify member roles');
     }
 
-    const targetRoleRow = db
-      .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
-      .get(chatId, targetUserId) as { role: string } | undefined;
-    if (targetRoleRow?.role === 'owner' && callerRoleRow.role !== 'owner') {
-      throw new ApiError(403, 'cannot_modify_owner', 'Admins cannot modify the chat owner');
-    }
-
     const body = await readJsonBody<{
-      role?: ChatMemberDto['role'];
-      custom_title?: string;
-      admin_rights?: number;
-      banned_rights?: number;
+      role?: unknown;
+      custom_title?: unknown;
+      admin_rights?: unknown;
+      banned_rights?: unknown;
     }>(ctx.req);
 
-    const role = body.role ?? 'member';
-    const adminRights = body.admin_rights ?? (role === 'admin' || role === 'owner' ? 127 : 0);
-    const bannedRights = body.banned_rights ?? (role === 'banned' ? 255 : 0);
+    if (
+      body.custom_title !== undefined &&
+      body.custom_title !== null &&
+      typeof body.custom_title !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_custom_title', 'custom_title must be a string or null');
+    }
+    const customTitle = typeof body.custom_title === 'string' ? body.custom_title : null;
+    const parsedAdminRights = parseOptionalNonNegativeInt(
+      body.admin_rights,
+      'invalid_admin_rights',
+      'admin_rights must be a non-negative integer',
+    );
+    const parsedBannedRights = parseOptionalNonNegativeInt(
+      body.banned_rights,
+      'invalid_banned_rights',
+      'banned_rights must be a non-negative integer',
+    );
 
-    db.prepare(`
-      UPDATE chat_members
-      SET role = ?, custom_title = COALESCE(?, custom_title), admin_rights = ?, banned_rights = ?
-      WHERE chat_id = ? AND user_id = ?
-    `).run(role, body.custom_title ?? null, adminRights, bannedRights, chatId, targetUserId);
+    const rawRole = body.role === undefined ? 'member' : body.role;
+    if (typeof rawRole !== 'string' || !ALLOWED_MEMBER_ROLES.has(rawRole)) {
+      throw new ApiError(
+        400,
+        'invalid_role',
+        'Role must be one of: owner, admin, member, restricted, banned',
+      );
+    }
+    const role = rawRole as ChatMemberDto['role'];
+
+    if (role === 'owner' && !access.isOwner) {
+      throw new ApiError(403, 'owner_required', 'Only the chat owner can assign the owner role');
+    }
+
+    const targetRoleRow = db
+      .prepare(`SELECT role, joined_at_ms FROM chat_members WHERE chat_id = ? AND user_id = ?`)
+      .get(chatId, targetUserId) as { role: string; joined_at_ms: number } | undefined;
+
+    if ((targetRoleRow?.role === 'owner' || targetUserId === access.creatorId) && !access.isOwner) {
+      throw new ApiError(403, 'owner_required', 'Admins cannot modify the chat owner');
+    }
+
+    const adminRights = parsedAdminRights ?? (role === 'owner' ? 255 : role === 'admin' ? 127 : 0);
+    const bannedRights = parsedBannedRights ?? (role === 'banned' ? 255 : 0);
+    const now = Date.now();
+
+    if (!targetRoleRow) {
+      if (role === 'banned') {
+        const targetUser = getUserProfileDto(db, targetUserId);
+        if (!targetUser) {
+          throw new ApiError(404, 'member_not_found', 'Target user not found');
+        }
+        db.prepare(`
+          INSERT INTO chat_members (chat_id, user_id, role, admin_rights, banned_rights, custom_title, joined_at_ms)
+          VALUES (?, ?, 'banned', 0, ?, ?, ?)
+        `).run(chatId, targetUserId, bannedRights, customTitle, now);
+      } else {
+        throw new ApiError(404, 'member_not_found', 'Target user is not a member of this chat');
+      }
+    } else {
+      db.prepare(`
+        UPDATE chat_members
+        SET role = ?, custom_title = COALESCE(?, custom_title), admin_rights = ?, banned_rights = ?
+        WHERE chat_id = ? AND user_id = ?
+      `).run(role, customTitle, adminRights, bannedRights, chatId, targetUserId);
+    }
+
+    if (role === 'banned') {
+      hub.unsubscribeUserFromChat(targetUserId, chatId);
+    }
 
     const u = getUserProfileDto(db, targetUserId);
     sendJson(ctx.res, 200, {
@@ -1066,8 +1682,8 @@ export function registerChatAndSocialRoutes(
       role,
       admin_rights: adminRights,
       banned_rights: bannedRights,
-      custom_title: body.custom_title,
-      joined_at_ms: Date.now(),
+      custom_title: customTitle ?? undefined,
+      joined_at_ms: targetRoleRow ? Number(targetRoleRow.joined_at_ms) : now,
     });
   };
   router.patch('/api/v1/chats/:chatId/members/:userId', handleUpdateMemberRole);
@@ -1077,24 +1693,47 @@ export function registerChatAndSocialRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const targetUserId = Number(ctx.params.userId);
-    ensureChatMembership(db, chatId, auth.userId);
 
-    if (targetUserId !== auth.userId) {
-      const callerRoleRow = db
+    if (targetUserId === auth.userId) {
+      const selfRow = db
         .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
         .get(chatId, auth.userId) as { role: string } | undefined;
-      if (!callerRoleRow || (callerRoleRow.role !== 'owner' && callerRoleRow.role !== 'admin')) {
-        throw new ApiError(403, 'admin_required', 'Only owners or admins can remove members');
+      if (selfRow?.role === 'banned') {
+        throw new ApiError(403, 'banned_in_chat', 'Banned users cannot leave this chat');
       }
-      const targetRoleRow = db
-        .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
-        .get(chatId, targetUserId) as { role: string } | undefined;
-      if (targetRoleRow?.role === 'owner') {
-        throw new ApiError(403, 'cannot_remove_owner', 'Cannot remove the chat owner');
-      }
+      ensureChatMembership(db, chatId, auth.userId);
+      db.prepare(`DELETE FROM chat_members WHERE chat_id = ? AND user_id = ? AND role != 'banned'`).run(
+        chatId,
+        auth.userId,
+      );
+      hub.unsubscribeUserFromChat(auth.userId, chatId);
+      sendJson(ctx.res, 200, { ok: true });
+      return;
+    }
+
+    const access = ensureChatAdminAccess(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Members can only be removed from groups, supergroups, or channels',
+      );
+    }
+    const targetRoleRow = db
+      .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
+      .get(chatId, targetUserId) as { role: string } | undefined;
+    if (!targetRoleRow) {
+      throw new ApiError(404, 'member_not_found', 'Target user is not a member of this chat');
+    }
+    if ((targetRoleRow.role === 'owner' || targetUserId === access.creatorId) && !access.isOwner) {
+      throw new ApiError(403, 'owner_required', 'Admins cannot remove the chat owner');
+    }
+    if (targetRoleRow.role === 'owner') {
+      throw new ApiError(403, 'owner_required', 'Cannot remove the chat owner');
     }
 
     db.prepare(`DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?`).run(chatId, targetUserId);
+    hub.unsubscribeUserFromChat(targetUserId, chatId);
     sendJson(ctx.res, 200, { ok: true });
   });
 
@@ -1102,7 +1741,14 @@ export function registerChatAndSocialRoutes(
   router.get('/api/v1/chats/:chatId/invites', (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    const access = ensureChatAdminAccess(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Invite links are only supported for groups and channels',
+      );
+    }
     const rows = db
       .prepare(`SELECT * FROM chat_invite_links WHERE chat_id = ? ORDER BY created_at_ms DESC`)
       .all(chatId) as Array<Record<string, unknown>>;
@@ -1127,19 +1773,49 @@ export function registerChatAndSocialRoutes(
   router.post('/api/v1/chats/:chatId/invites', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    const access = ensureChatAdminAccess(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Invite links are only supported for groups and channels',
+      );
+    }
     const body = await readJsonBody<{
-      title?: string;
-      usage_limit?: number;
-      expire_at_ms?: number;
-      expire_date_ms?: number;
+      title?: unknown;
+      usage_limit?: unknown;
+      expire_at_ms?: unknown;
+      expire_date_ms?: unknown;
+      expires_in_secs?: unknown;
       creates_join_request?: boolean;
     }>(ctx.req);
+
+    const inviteTitle = readOptionalTrimmedString(
+      body.title,
+      'invalid_invite_title',
+      'Invite title must be a string',
+    );
+    const usageLimit = parseOptionalPositiveInt(
+      body.usage_limit,
+      'invalid_usage_limit',
+      'usage_limit must be a positive integer',
+    );
+    const explicitExpireMs = parseOptionalPositiveInt(
+      body.expire_at_ms ?? body.expire_date_ms,
+      'invalid_expire_date',
+      'expire_date_ms must be a positive integer',
+    );
+    const expiresInSecs = parseOptionalPositiveInt(
+      body.expires_in_secs,
+      'invalid_expire_date',
+      'expires_in_secs must be a positive integer',
+    );
 
     const code = crypto.randomBytes(8).toString('base64url');
     const inviteId = `inv_${code}`;
     const now = Date.now();
-    const expireMs = body.expire_at_ms ?? body.expire_date_ms ?? null;
+    const expireMs =
+      explicitExpireMs ?? (expiresInSecs !== undefined ? now + expiresInSecs * 1000 : null);
 
     db.prepare(`
       INSERT INTO chat_invite_links (
@@ -1151,8 +1827,8 @@ export function registerChatAndSocialRoutes(
       inviteId,
       chatId,
       auth.userId,
-      body.title ?? null,
-      body.usage_limit ?? null,
+      inviteTitle || null,
+      usageLimit ?? null,
       expireMs,
       body.creates_join_request ? 1 : 0,
       now,
@@ -1164,8 +1840,8 @@ export function registerChatAndSocialRoutes(
       creator_id: auth.userId,
       code,
       link: `https://t.me/+${code}`,
-      title: body.title,
-      usage_limit: body.usage_limit ?? null,
+      title: inviteTitle || undefined,
+      usage_limit: usageLimit ?? null,
       usage_count: 0,
       expire_date_ms: expireMs,
       request_needed: Boolean(body.creates_join_request),
@@ -1178,7 +1854,14 @@ export function registerChatAndSocialRoutes(
   router.delete('/api/v1/chats/:chatId/invites/:code', (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    const access = ensureChatAdminAccess(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Invite links are only supported for groups and channels',
+      );
+    }
     db.prepare(`UPDATE chat_invite_links SET is_revoked = 1 WHERE chat_id = ? AND code = ?`).run(
       chatId,
       ctx.params.code!,
@@ -1190,8 +1873,16 @@ export function registerChatAndSocialRoutes(
     const auth = requireAuth(db, ctx);
     let rawCode = ctx.params.code ?? '';
     if (!rawCode) {
-      const body = await readJsonBody<{ invite_code?: string; code?: string; link?: string }>(ctx.req);
-      rawCode = (body.invite_code ?? body.code ?? body.link ?? '').trim();
+      const body = await readJsonBody<{
+        invite_code?: unknown;
+        code?: unknown;
+        link?: unknown;
+      }>(ctx.req);
+      const candidate = body.invite_code ?? body.code ?? body.link;
+      if (candidate !== undefined && candidate !== null && typeof candidate !== 'string') {
+        throw new ApiError(400, 'invalid_invite_code', 'Invite code must be a string');
+      }
+      rawCode = typeof candidate === 'string' ? candidate.trim() : '';
     }
     const code = rawCode.replace(/^https?:\/\/[^/]+\//i, '').replace(/^\+/, '').trim();
     if (!code) {
@@ -1214,6 +1905,22 @@ export function registerChatAndSocialRoutes(
     }
 
     const chatId = Number(inv.chat_id);
+    const chatRow = db
+      .prepare(`SELECT chat_type FROM chats WHERE chat_id = ?`)
+      .get(chatId) as { chat_type: number } | undefined;
+    if (!chatRow || ![1, 2, 3].includes(Number(chatRow.chat_type))) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Invite links are only supported for groups and channels',
+      );
+    }
+    const existingMem = db
+      .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
+      .get(chatId, auth.userId) as { role: string } | undefined;
+    if (existingMem?.role === 'banned') {
+      throw new ApiError(403, 'banned_in_chat', 'You are banned from this chat');
+    }
     db.prepare(`
       INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, admin_rights, banned_rights, joined_at_ms)
       VALUES (?, ?, 'member', 0, 0, ?)

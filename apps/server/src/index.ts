@@ -3,10 +3,11 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
+import type { ServerStatusResponse } from '@gpui-telegram/protocol';
 import { resolveServerConfig, type ServerConfig, type ServerConfigOverrides } from './config.js';
 import { createMessageAtomic } from './db/queries.js';
 import { openSqliteWalDatabase } from './db/schema.js';
-import { resetAndSeedDatabase, seedDatabaseIfEmpty } from './db/seed.js';
+import { resetDatabaseClean, seedDatabaseIfEmpty } from './db/seed.js';
 import { registerAuthAndUserRoutes } from './routes/auth.js';
 import {
   handleBotConversationTurn,
@@ -26,14 +27,30 @@ import {
   BrowserControlBridge,
   registerBrowserControlRoutes,
 } from './routes/browserControl.js';
+import {
+  extractRawRequestPath,
+  hasRawUpdateAssetTraversal,
+  RAW_DOT_SEGMENT_OR_TRAVERSAL_RE,
+  RAW_ENCODED_SLASH_RE,
+  registerUpdatesRoutes,
+  type UpdatesRouteOptions,
+} from './routes/updates.js';
+import { registerUserVaultRoutes } from './routes/userVault.js';
 import { registerWorkspaceTailnetAndWalletRoutes } from './routes/workspace.js';
-import { proxyHttpRequest, proxyWebSocketUpgrade, shouldProxyPathname } from './proxy.js';
+import {
+  proxyHttpRequest,
+  proxyWebSocketUpgrade,
+  shouldProxyPathname,
+  shouldProxyWebSocketPathname,
+} from './proxy.js';
 import { serveStaticSpa } from './staticHost.js';
 import {
   ApiError,
   HttpRouter,
+  markResponseAcceptsGzip,
   sendError,
   sendJson,
+  sendText,
   setCorsHeaders,
   type RequestContext,
 } from './utils/http.js';
@@ -49,14 +66,59 @@ export interface TelegramServerInstance {
   close(): Promise<void>;
 }
 
+export interface CreateServerOptions {
+  updates?: UpdatesRouteOptions;
+}
+
+const SERVER_STATUS_CAPABILITIES: readonly string[] = [
+  'auth',
+  'phone_otp',
+  'email_otp',
+  '2fa',
+  'qr_pair',
+  'passkey',
+  'chats',
+  'topics',
+  'folders',
+  'drafts',
+  'invites',
+  'pins',
+  'messaging_pts',
+  'reactions',
+  'polls',
+  'media_cas_206',
+  'stickers',
+  'gifs',
+  'stories',
+  'calls_webrtc',
+  'tantivy_search',
+  'statistics',
+  'export',
+  'wallet_stars',
+  'acp_durable',
+  'hermes_agent',
+  'hermes_gateway',
+  'openai_compat',
+  'acp_json_rpc',
+  'auto_update_relay',
+  'official_mcp_oauth21',
+  'remote_control',
+  'remote_assist',
+];
+
+const RFC9110_HOST_HEADER_RE = /^(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(:\d{1,5})?$/;
+
 export function createTelegramServer(
   overrides: ServerConfigOverrides = {},
+  options: CreateServerOptions = {},
 ): TelegramServerInstance {
   const config = resolveServerConfig(overrides);
   const db = openSqliteWalDatabase(config.dataDir);
-  seedDatabaseIfEmpty(db, { seedDemoData: config.seedDemoData });
+  seedDatabaseIfEmpty(db);
 
+  const shutdownAbort = new AbortController();
   const hub = new RealtimeGatewayHub(db);
+  hub.setShutdownSignal(shutdownAbort.signal);
   const browserBridge = new BrowserControlBridge(db);
   hub.setBrowserControlBridge(browserBridge);
 
@@ -80,7 +142,7 @@ export function createTelegramServer(
     },
   }) as RealtimeGatewayHub;
 
-  // Bot & @HermesAgent conversational message hook (triggered from both HTTP and WS SendMessage!)
+  // Bot & @HermesAgent conversational message hook (triggered from both HTTP and WS SendMessage)
   const runBotReplyNow = (chatId: number, senderId: number, text: string): void => {
     try {
       // 1. Check @BotFather / @FabushiBot / custom bots
@@ -108,22 +170,17 @@ export function createTelegramServer(
             senderId: 777000,
             text: slashRes.response_text,
           });
-        } else if (config.seedDemoData) {
-          // Preserve fast synchronous reply in automated test/sandbox mode
-          createMessageAtomic(db, deferredBotSink, {
-            chatId,
-            senderId: 777000,
-            text: `🤖 **Hermes AI**: Processed "${trimmed.slice(0, 160)}". Open **Hermes 6-Tab Studio** for full SSE reasoning & tool traces.`,
-          });
         } else {
-          // Real async LLM completion via user's Magpie provider or ombhrum.com AI gateway
+          // Real async LLM completion via user's configured Magpie provider or AI gateway
           void (async () => {
             try {
+              if (shutdownAbort.signal.aborted) return;
               const mem = getHermesMemoryState(db, senderId);
               const llmRes = await runConfiguredLlmCompletion(db, config, senderId, [
                 { role: 'system', content: mem.soul },
                 { role: 'user', content: trimmed },
               ]);
+              if (shutdownAbort.signal.aborted) return;
               const replyText =
                 llmRes.usedUpstream && llmRes.text
                   ? llmRes.text
@@ -148,38 +205,59 @@ export function createTelegramServer(
 
   const dispatchBotReplyIfApplicable = (chatId: number, senderId: number, text: string): void => {
     // Ignore messages authored by bots themselves to prevent infinite loops
-    if (senderId >= 777000) return;
+    try {
+      const senderRow = db
+        .prepare(`SELECT is_bot FROM users WHERE user_id = ?`)
+        .get(senderId) as { is_bot: number } | undefined;
+      if (senderRow?.is_bot) return;
+    } catch {
+      return;
+    }
     runBotReplyNow(chatId, senderId, text);
   };
 
   hub.setBotTriggerHook(dispatchBotReplyIfApplicable);
 
-  // Health, Readiness, Status, Version & Deterministic Test Reset
-  const handleHealth = (ctx: RequestContext): void => {
+  // Health, Readiness, Status (`v1.6.11`), Version & Clean Test Reset
+  router.get('/health', (ctx: RequestContext) => {
+    sendText(ctx.res, 200, 'OK');
+  });
+
+  const handleApiHealth = (ctx: RequestContext): void => {
     const dbOk = Boolean(db.prepare(`SELECT 1 AS ok`).get());
     sendJson(ctx.res, 200, {
       ok: dbOk,
-      status: 'ok',
-      server: 'gpui_telegram_server',
-      service: 'gpui-telegram-server',
-      version: '1.3.0',
-      mode: config.upstreamServerUrl ? 'proxy' : config.seedDemoData ? 'sandbox' : 'production',
+      status: dbOk ? 'ok' : 'error',
+      app: 'Fabushi Web',
+      server: 'fabushi-web',
+      service: 'fabushi-web-server',
+      version: config.appVersion,
+      mode: config.upstreamServerUrl ? 'proxy' : 'production',
       db: dbOk ? 'wal_ready' : 'error',
       uptime_secs: Math.floor((Date.now() - startedAtMs) / 1000),
       online_users: hub.getOnlineUsersCount(),
     });
   };
-  router.get('/api/v1/health', handleHealth);
-  router.get('/api/v1/status', handleHealth);
-  router.get('/api/v1/ready', handleHealth);
-  router.get('/healthz', handleHealth);
-  router.get('/health', handleHealth);
+  router.get('/api/v1/health', handleApiHealth);
+  router.get('/api/v1/ready', handleApiHealth);
+  router.get('/healthz', handleApiHealth);
+
+  router.get('/api/v1/status', (ctx: RequestContext) => {
+    const statusPayload: ServerStatusResponse & { ok: boolean } = {
+      ok: true,
+      server: 'fabushi-web',
+      status: 'ok',
+      version: config.appVersion,
+      capabilities: [...SERVER_STATUS_CAPABILITIES],
+    };
+    sendJson(ctx.res, 200, statusPayload);
+  });
 
   router.get('/api/v1/version', (ctx) => {
     sendJson(ctx.res, 200, {
       name: '@gpui-telegram/server',
-      server: 'gpui_telegram_server',
-      version: '1.3.0',
+      server: 'fabushi-web',
+      version: config.appVersion,
       node: process.version,
     });
   });
@@ -189,13 +267,13 @@ export function createTelegramServer(
       throw new ApiError(
         403,
         'test_reset_disabled',
-        'Deterministic reset requires ENABLE_TEST_RESET=1',
+        'Clean database reset requires ENABLE_TEST_RESET=1',
       );
     }
     const t0 = performance.now();
     browserBridge.resetFastSync();
     hub.disconnectAllSessions();
-    resetAndSeedDatabase(db, config.mediaDir, config.uploadsDir);
+    resetDatabaseClean(db, config.mediaDir, config.uploadsDir);
     const elapsedMs = Number((performance.now() - t0).toFixed(2));
     sendJson(ctx.res, 200, {
       ok: true,
@@ -206,9 +284,18 @@ export function createTelegramServer(
 
   // Register all domain route suites
   registerAuthAndUserRoutes(router, db, hub, config);
+  registerUserVaultRoutes(router, db, config);
   registerChatAndSocialRoutes(router, db, hub);
-  registerMessageAndSearchRoutes(router, db, hub, dispatchBotReplyIfApplicable, config);
+  registerMessageAndSearchRoutes(
+    router,
+    db,
+    hub,
+    dispatchBotReplyIfApplicable,
+    config,
+    shutdownAbort.signal,
+  );
   registerMediaStoriesE2eeAndCallRoutes(router, db, config, hub);
+  registerUpdatesRoutes(router, config, options.updates);
   registerBotsMiniAppsAndFabushiRoutes(router, db, hub, config);
   registerFabushiMiniAppRoutes(router, db, config, hub);
   registerHermesStudioRoutes(router, db, config, hub);
@@ -218,15 +305,7 @@ export function createTelegramServer(
 
   const httpServer = http.createServer(async (req, res) => {
     setCorsHeaders(res);
-    const allowHeaders = res.getHeader('Access-Control-Allow-Headers');
-    if (typeof allowHeaders === 'string') {
-      const extras = ['X-Desktop-Browser-Token', 'X-Telegram-Init-Data'].filter(
-        (h) => !allowHeaders.includes(h),
-      );
-      if (extras.length > 0) {
-        res.setHeader('Access-Control-Allow-Headers', `${allowHeaders}, ${extras.join(', ')}`);
-      }
-    }
+    markResponseAcceptsGzip(req, res);
     if (req.method === 'OPTIONS') {
       res.statusCode = 204;
       res.end();
@@ -234,7 +313,80 @@ export function createTelegramServer(
     }
 
     try {
-      const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+      // Raw URL traversal & dot-segment pre-check BEFORE `new URL(...)` collapses dot-segments!
+      const normalizedRawPath = extractRawRequestPath(req.url);
+      if (hasRawUpdateAssetTraversal(req.url)) {
+        sendError(res, 400, 'invalid_update_asset', 'Path traversal is not allowed in update asset path');
+        return;
+      }
+      if (
+        normalizedRawPath.startsWith('/api/v1/user-vault/') &&
+        (RAW_DOT_SEGMENT_OR_TRAVERSAL_RE.test(normalizedRawPath) ||
+          RAW_ENCODED_SLASH_RE.test(normalizedRawPath))
+      ) {
+        sendError(res, 400, 'invalid_item_key', 'Path traversal is not allowed in vault item key');
+        return;
+      }
+      if (
+        (normalizedRawPath.startsWith('/api/') || normalizedRawPath.startsWith('/v1/')) &&
+        RAW_DOT_SEGMENT_OR_TRAVERSAL_RE.test(normalizedRawPath)
+      ) {
+        sendError(
+          res,
+          400,
+          'invalid_path',
+          'Path traversal or dot-segments are not allowed in API paths',
+        );
+        return;
+      }
+
+      if (
+        req.headers.host !== undefined &&
+        (typeof req.headers.host !== 'string' || !RFC9110_HOST_HEADER_RE.test(req.headers.host))
+      ) {
+        sendError(res, 400, 'invalid_request_url', 'Malformed request URL or Host header');
+        return;
+      }
+
+      let reqUrl: URL;
+      try {
+        reqUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+      } catch {
+        sendError(res, 400, 'invalid_request_url', 'Malformed request URL or Host header');
+        return;
+      }
+
+      // Post-parse defense-in-depth for leading dot-segments/traversals (e.g., `/./api/...`, `/x/../api/...`)
+      if (
+        (reqUrl.pathname.startsWith('/api/v1/updates/') ||
+          reqUrl.pathname === '/api/v1/updates') &&
+        (RAW_DOT_SEGMENT_OR_TRAVERSAL_RE.test(normalizedRawPath) ||
+          RAW_ENCODED_SLASH_RE.test(normalizedRawPath))
+      ) {
+        sendError(res, 400, 'invalid_update_asset', 'Path traversal is not allowed in update asset path');
+        return;
+      }
+      if (
+        (reqUrl.pathname.startsWith('/api/v1/user-vault/') ||
+          reqUrl.pathname === '/api/v1/user-vault') &&
+        (RAW_DOT_SEGMENT_OR_TRAVERSAL_RE.test(normalizedRawPath) ||
+          RAW_ENCODED_SLASH_RE.test(normalizedRawPath))
+      ) {
+        sendError(res, 400, 'invalid_item_key', 'Path traversal is not allowed in vault item key');
+        return;
+      }
+      if (
+        (reqUrl.pathname.startsWith('/api/') || reqUrl.pathname.startsWith('/v1/')) &&
+        RAW_DOT_SEGMENT_OR_TRAVERSAL_RE.test(normalizedRawPath)
+      ) {
+        sendError(
+          res,
+          400,
+          'invalid_path',
+          'Path traversal or dot-segments are not allowed in API paths',
+        );
+        return;
+      }
 
       // Transparent reverse proxy to real upstream Rust `gpui_telegram_server` when UPSTREAM_SERVER_URL is set
       if (config.upstreamServerUrl && shouldProxyPathname(reqUrl.pathname)) {
@@ -278,7 +430,15 @@ export function createTelegramServer(
 
   if (config.upstreamServerUrl) {
     httpServer.on('upgrade', (req, socket, head) => {
-      proxyWebSocketUpgrade(config.upstreamServerUrl!, req, socket, head);
+      if (
+        shouldProxyWebSocketPathname(req.url ?? '/', {
+          proxyBrowserWs: config.proxyBrowserWs,
+        })
+      ) {
+        proxyWebSocketUpgrade(config.upstreamServerUrl!, req, socket, head);
+        return;
+      }
+      hub.handleUpgrade(req, socket, head);
     });
   } else {
     hub.attachToServer(httpServer);
@@ -320,6 +480,7 @@ export function createTelegramServer(
     async close() {
       if (isClosed) return;
       isClosed = true;
+      shutdownAbort.abort();
       await browserBridge.dispose();
       await hub.close();
       httpServer.closeAllConnections?.();
@@ -353,11 +514,11 @@ if (isDirectMain) {
     .start()
     .then((info) => {
       console.log(
-        `[gpui-telegram-server] Listening on ${info.baseUrl} (WS: ${info.wsUrl}, DATA_DIR: ${instance.config.dataDir})`,
+        `[fabushi-web-server] Listening on ${info.baseUrl} (WS: ${info.wsUrl}, DATA_DIR: ${instance.config.dataDir})`,
       );
     })
     .catch((err) => {
-      console.error('[gpui-telegram-server] Failed to start:', err);
+      console.error('[fabushi-web-server] Failed to start:', err);
       process.exit(1);
     });
 

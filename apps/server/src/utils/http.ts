@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
+import zlib from 'node:zlib';
 import { sha256Hex } from './crypto.js';
 
 export class ApiError extends Error {
@@ -32,6 +33,7 @@ export interface AuthSessionContext {
   userId: number;
   sessionId: string;
   rawToken: string;
+  tokenHash: string;
   username: string;
 }
 
@@ -131,6 +133,37 @@ export class HttpRouter {
   }
 }
 
+const responseAcceptsGzip = new WeakMap<ServerResponse, boolean>();
+
+export function shouldCompressContentType(contentType: string): boolean {
+  const mime = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  if (!mime) return false;
+  if (
+    mime === 'text/event-stream' ||
+    mime === 'application/octet-stream' ||
+    mime === 'application/wasm' ||
+    mime.startsWith('audio/') ||
+    mime.startsWith('video/')
+  ) {
+    return false;
+  }
+  if (mime.startsWith('image/')) {
+    return mime === 'image/svg+xml';
+  }
+  return (
+    mime === 'application/json' ||
+    mime === 'application/javascript' ||
+    mime === 'application/manifest+json' ||
+    mime === 'application/xhtml+xml' ||
+    mime.startsWith('text/')
+  );
+}
+
+export function markResponseAcceptsGzip(req: IncomingMessage, res: ServerResponse): void {
+  const acceptEncoding = String(req.headers['accept-encoding'] ?? '');
+  responseAcceptsGzip.set(res, /\bgzip\b/i.test(acceptEncoding));
+}
+
 export function setCorsHeaders(res: ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader(
@@ -139,21 +172,47 @@ export function setCorsHeaders(res: ServerResponse): void {
   );
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Telegram-Init-Data, X-Device-Id, X-File-Name, Idempotency-Key, Range',
+    'Content-Type, Authorization, X-Telegram-Init-Data, X-Device-Id, X-File-Name, Idempotency-Key, Range, X-Desktop-Browser-Token, Mcp-Session-Id, Mcp-Protocol-Version',
   );
   res.setHeader(
     'Access-Control-Expose-Headers',
-    'Content-Range, Accept-Ranges, Content-Length, Content-Disposition',
+    'Content-Range, Accept-Ranges, Content-Length, Content-Disposition, Mcp-Session-Id, Mcp-Protocol-Version, WWW-Authenticate',
   );
+}
+
+export function sendText(
+  res: ServerResponse,
+  status: number,
+  text: string,
+  contentType = 'text/plain; charset=utf-8',
+): void {
+  if (res.writableEnded) return;
+  const rawBuf = Buffer.from(text, 'utf8');
+  res.statusCode = status;
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Length', rawBuf.length);
+  res.end(rawBuf);
 }
 
 export function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   if (res.writableEnded) return;
-  const body = JSON.stringify(payload);
+  const rawBuf = Buffer.from(JSON.stringify(payload), 'utf8');
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Content-Length', Buffer.byteLength(body));
-  res.end(body);
+  if (
+    responseAcceptsGzip.get(res) &&
+    rawBuf.length >= 1024 &&
+    shouldCompressContentType('application/json')
+  ) {
+    const gz = zlib.gzipSync(rawBuf);
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Vary', 'Accept-Encoding');
+    res.setHeader('Content-Length', gz.length);
+    res.end(gz);
+    return;
+  }
+  res.setHeader('Content-Length', rawBuf.length);
+  res.end(rawBuf);
 }
 
 export function sendError(
@@ -192,11 +251,16 @@ export async function readJsonBody<T = Record<string, unknown>>(
   if (buf.length === 0) {
     return {} as T;
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(buf.toString('utf8')) as T;
+    parsed = JSON.parse(buf.toString('utf8'));
   } catch {
     throw new ApiError(400, 'invalid_json', 'Malformed JSON request body');
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ApiError(400, 'invalid_json', 'Request body must be a JSON object');
+  }
+  return parsed as T;
 }
 
 /**
@@ -293,6 +357,7 @@ export function authenticateToken(db: DatabaseSync, rawToken: string | null): Au
     userId: Number(row.user_id),
     sessionId: row.session_id,
     rawToken,
+    tokenHash,
     username: row.username ?? `user${row.user_id}`,
   };
 }
@@ -311,6 +376,8 @@ export function beginSseStream(res: ServerResponse): {
   sendRawData: (rawData: string) => void;
   end: () => void;
 } {
+  responseAcceptsGzip.set(res, false);
+  res.removeHeader('Content-Encoding');
   res.statusCode = 200;
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');

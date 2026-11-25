@@ -12,6 +12,7 @@ import {
 } from '@gpui-telegram/server';
 import { serveStaticSpa } from '../../../apps/server/src/staticHost.js';
 import { computeNextCronRunMs } from '../../../apps/server/src/utils/crypto.js';
+import { registerTestUser } from './_helpers.js';
 
 const TEST_TMP_ROOT = path.join(REPO_ROOT_DIR, '.test-tmp');
 
@@ -89,6 +90,9 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
       dataDir,
       webDistDir,
       enableTestReset: true,
+      seedDemoData: false,
+      allowDemoAuth: false,
+      exposeDevOtpCode: false,
     });
     const info = await server.start();
     baseUrl = info.baseUrl;
@@ -154,28 +158,47 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
 
   it('manages groups, forum topics, folders, contacts, @username lookup, invites, secret chats, and TTL expiry', async () => {
     await reqJson(baseUrl, 'POST', '/api/v1/test/reset');
-    const alice = (await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', undefined, { slot: 0 })).data.token;
-    const bob = (await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', undefined, { slot: 1 })).data.token;
-    const linwei = (await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', undefined, { slot: 2 })).data.token;
+    const aliceUser = await registerTestUser(baseUrl, 'alice_eco', { first_name: 'Alice' });
+    const bobUser = await registerTestUser(baseUrl, 'bob_eco', { first_name: 'Bob' });
+    const linweiUser = await registerTestUser(baseUrl, 'linwei_eco', { first_name: 'Lin Wei' });
+    const alice = aliceUser.token;
+    const bob = bobUser.token;
+    const linwei = linweiUser.token;
 
     // Create Supergroup Forum
     const forumRes = await reqJson(baseUrl, 'POST', '/api/v1/chats', alice, {
       title: 'Core Architecture Forum',
       chat_type: 2,
       is_forum: true,
-      member_ids: [1002],
+      member_ids: [bobUser.user_id],
     });
     expect(forumRes.status).toBe(201);
     expect(forumRes.data.is_forum).toBe(true);
     const forumId = forumRes.data.chat_id as number;
 
-    // Create topic #Performance
+    // Non-admin member Bob cannot create forum topics -> 403!
+    const bobTopicDenied = await reqJson(baseUrl, 'POST', `/api/v1/chats/${forumId}/topics`, bob, {
+      title: 'Unauthorized Topic',
+    });
+    expect(bobTopicDenied.status).toBe(403);
+
+    // Owner Alice creates topic #Performance
     const topicRes = await reqJson(baseUrl, 'POST', `/api/v1/chats/${forumId}/topics`, alice, {
       title: 'Performance',
       icon_emoji: '⚡',
     });
     expect(topicRes.status).toBe(201);
     expect(topicRes.data.topic_id).toBe(2);
+
+    // Non-admin member Bob cannot close topic -> 403!
+    const bobCloseDenied = await reqJson(
+      baseUrl,
+      'PATCH',
+      `/api/v1/chats/${forumId}/topics/2`,
+      bob,
+      { is_closed: true },
+    );
+    expect(bobCloseDenied.status).toBe(403);
 
     // Create invite link -> Lin Wei joins -> revoke -> 410
     const inv = await reqJson(baseUrl, 'POST', `/api/v1/chats/${forumId}/invites`, alice, {
@@ -207,11 +230,18 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     );
     expect(filteredChats.data.chats.some((c: any) => c.chat_id === forumId)).toBe(true);
 
-    // Resolve @username
-    const resolvedUser = await reqJson(baseUrl, 'GET', '/api/v1/peers/resolve?username=@bob_rivera', alice);
+    // Resolve @username (real user + real public channel)
+    const resolvedUser = await reqJson(baseUrl, 'GET', '/api/v1/peers/resolve?username=@bob_eco', alice);
     expect(resolvedUser.status).toBe(200);
     expect(resolvedUser.data.peer_type).toBe('user');
-    expect(resolvedUser.data.user.user_id).toBe(1002);
+    expect(resolvedUser.data.user.user_id).toBe(bobUser.user_id);
+
+    const pubChan = await reqJson(baseUrl, 'POST', '/api/v1/chats', alice, {
+      title: 'Tech News Channel',
+      chat_type: 3,
+      username: 'tech_news_channel',
+    });
+    expect(pubChan.status).toBe(201);
 
     const resolvedChan = await reqJson(baseUrl, 'GET', '/api/v1/peers/resolve?username=tech_news_channel', alice);
     expect(resolvedChan.status).toBe(200);
@@ -219,7 +249,7 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
 
     // Secret Chat creation + 4-emoji safety fingerprint + TTL message expiry
     const secret = await reqJson(baseUrl, 'POST', '/api/v1/secret-chats', alice, {
-      peer_user_id: 1002,
+      peer_user_id: bobUser.user_id,
       ttl_seconds: 1,
     });
     expect(secret.status).toBe(201);
@@ -240,9 +270,19 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     expect(afterTtl.data.messages.length).toBe(0);
   });
 
-  it('handles Stories, Stickers, GIFs, E2EE PreKeys, WebRTC/TURN aliases, @BotFather /setdescription & /deletebot, MiniApp /storage & Fabushi X-Telegram-Init-Data, and DERP WS', async () => {
-    const alice = (await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', undefined, { slot: 0 })).data.token;
-    const bob = (await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', undefined, { slot: 1 })).data.token;
+  it('handles Stories, Stickers, empty GIFs, E2EE PreKeys, WebRTC/TURN aliases, @BotFather /setdescription & /deletebot, MiniApp /storage & Fabushi X-Telegram-Init-Data, and DERP WS', async () => {
+    const aliceUser = await registerTestUser(baseUrl, 'alice_eco2', { first_name: 'Alice' });
+    const bobUser = await registerTestUser(baseUrl, 'bob_eco2', { first_name: 'Bob' });
+    const alice = aliceUser.token;
+    const bob = bobUser.token;
+
+    // Create real DM between Alice & Bob
+    const dmRes = await reqJson(baseUrl, 'POST', '/api/v1/chats', alice, {
+      chat_type: 0,
+      peer_user_id: bobUser.user_id,
+    });
+    expect(dmRes.status).toBe(201);
+    const dmChatId = dmRes.data.chat_id as number;
 
     // Stories create + view increment
     const story = await reqJson(baseUrl, 'POST', '/api/v1/stories', alice, {
@@ -253,14 +293,16 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     expect(view1.status).toBe(200);
     expect(view1.data.views_count).toBe(1);
 
-    // Stickers & GIFs
+    // Stickers & truthful empty GIFs (fake SVG GIF route removed -> 404)
     const stickers = await reqJson(baseUrl, 'GET', '/api/v1/stickers/sets', alice);
     expect(stickers.status).toBe(200);
     expect(stickers.data.sets.length).toBeGreaterThan(0);
 
     const gifs = await reqJson(baseUrl, 'GET', '/api/v1/gifs/search?q=rocket', alice);
     expect(gifs.status).toBe(200);
-    expect(gifs.data.gifs.length).toBe(1);
+    expect(gifs.data.gifs).toEqual([]);
+    const fakeGifSvg = await fetch(`${baseUrl}/api/v1/gifs/svg/celebrate`);
+    expect(fakeGifSvg.status).toBe(404);
 
     // E2EE PreKey Directory: publish 2 OTPKs -> fetch -> count drops 2 -> 1
     const bobIdentity = await generateE2eeIdentity('bob-dev-1');
@@ -283,21 +325,24 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     });
     expect(pubRes.status).toBe(200);
 
-    const fetchBundle1 = await reqJson(baseUrl, 'GET', '/api/v1/e2ee/users/1002/prekeys', alice);
+    const fetchBundle1 = await reqJson(baseUrl, 'GET', `/api/v1/e2ee/users/${bobUser.user_id}/prekeys`, alice);
     expect(fetchBundle1.status).toBe(200);
     expect(fetchBundle1.data.devices[0].one_time_prekey.key_id).toBe(101);
 
     const countAfter1 = await reqJson(baseUrl, 'GET', '/api/v1/e2ee/prekeys/count?device_id=bob-dev-1', bob);
     expect(countAfter1.data.remaining_one_time_prekeys).toBe(1);
 
-    // WebRTC Calls & HMAC-SHA1 TURN Credentials (including /api/v1/webrtc/turn_credentials & /api/v1/calls/invite aliases)
+    // WebRTC Calls & HMAC-SHA1 TURN Credentials (missing callee -> 400!)
     const turn = await reqJson(baseUrl, 'GET', '/api/v1/webrtc/turn_credentials', alice);
     expect(turn.status).toBe(200);
     expect(turn.data.credential).toBeTruthy();
 
+    const missingCallee = await reqJson(baseUrl, 'POST', '/api/v1/calls/invite', alice, {});
+    expect(missingCallee.status).toBe(400);
+
     const startCall = await reqJson(baseUrl, 'POST', '/api/v1/calls/invite', alice, {
-      callee_id: 1002,
-      chat_id: 101,
+      callee_id: bobUser.user_id,
+      chat_id: dmChatId,
       is_video: true,
     });
     expect(startCall.status).toBe(201);
@@ -308,12 +353,19 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     expect(endCall.status).toBe(200);
     expect(endCall.data.state).toBe('ended');
 
-    // @BotFather: /newbot -> /setdescription -> inline callback -> /deletebot
-    await reqJson(baseUrl, 'POST', '/api/v1/chats/105/messages', alice, { text: '/newbot' });
-    await reqJson(baseUrl, 'POST', '/api/v1/chats/105/messages', alice, { text: 'Temp QA Bot' });
-    await reqJson(baseUrl, 'POST', '/api/v1/chats/105/messages', alice, { text: 'temp_qa_bot' });
+    // Create real DM with official @BotFather (777001): /newbot -> /setdescription -> inline callback -> /deletebot
+    const bfChatRes = await reqJson(baseUrl, 'POST', '/api/v1/chats', alice, {
+      chat_type: 0,
+      peer_user_id: 777001,
+    });
+    expect(bfChatRes.status).toBe(201);
+    const botFatherChatId = bfChatRes.data.chat_id as number;
 
-    await reqJson(baseUrl, 'POST', '/api/v1/chats/105/messages', alice, {
+    await reqJson(baseUrl, 'POST', `/api/v1/chats/${botFatherChatId}/messages`, alice, { text: '/newbot' });
+    await reqJson(baseUrl, 'POST', `/api/v1/chats/${botFatherChatId}/messages`, alice, { text: 'Temp QA Bot' });
+    await reqJson(baseUrl, 'POST', `/api/v1/chats/${botFatherChatId}/messages`, alice, { text: 'temp_qa_bot' });
+
+    await reqJson(baseUrl, 'POST', `/api/v1/chats/${botFatherChatId}/messages`, alice, {
       text: '/setdescription @temp_qa_bot Automated QA Verification Bot',
     });
     const botsBeforeDel = await reqJson(baseUrl, 'GET', '/api/v1/bots', alice);
@@ -321,13 +373,14 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
     expect(createdBot).toBeDefined();
     expect(createdBot.description).toBe('Automated QA Verification Bot');
 
-    const cbRes = await reqJson(baseUrl, 'POST', '/api/v1/chats/105/messages/1/callback', alice, {
+    const cbRes = await reqJson(baseUrl, 'POST', `/api/v1/chats/${botFatherChatId}/callback`, alice, {
+      message_id: 0,
       callback_data: 'bf:mybots',
     });
     expect(cbRes.status).toBe(200);
     expect(cbRes.data.ok).toBe(true);
 
-    await reqJson(baseUrl, 'POST', '/api/v1/chats/105/messages', alice, {
+    await reqJson(baseUrl, 'POST', `/api/v1/chats/${botFatherChatId}/messages`, alice, {
       text: '/deletebot @temp_qa_bot',
     });
     const botsAfterDel = await reqJson(baseUrl, 'GET', '/api/v1/bots', alice);

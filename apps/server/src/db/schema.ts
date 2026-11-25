@@ -33,7 +33,14 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       is_premium INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'recently',
       last_seen_ms INTEGER NOT NULL DEFAULT 0,
-      created_at_ms INTEGER NOT NULL
+      created_at_ms INTEGER NOT NULL,
+      auth_version INTEGER NOT NULL DEFAULT 1,
+      auth_salt_b64 TEXT,
+      auth_kdf_m_kib INTEGER,
+      auth_kdf_t_cost INTEGER,
+      auth_kdf_p_cost INTEGER,
+      account_generation INTEGER NOT NULL DEFAULT 1,
+      updated_at_ms INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -107,6 +114,9 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       challenge_id TEXT PRIMARY KEY,
       challenge TEXT NOT NULL,
       username TEXT,
+      user_id INTEGER,
+      purpose TEXT NOT NULL DEFAULT 'auth',
+      rp_id TEXT,
       expires_at_ms INTEGER NOT NULL
     );
 
@@ -115,6 +125,8 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       user_id INTEGER NOT NULL,
       label TEXT NOT NULL,
       public_key_b64 TEXT,
+      cose_alg INTEGER,
+      sign_count INTEGER NOT NULL DEFAULT 0,
       created_at_ms INTEGER NOT NULL,
       last_used_ms INTEGER NOT NULL
     );
@@ -700,11 +712,89 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       last_seen_ms INTEGER NOT NULL,
       PRIMARY KEY (user_id, activity_type)
     );
+
+    CREATE TABLE IF NOT EXISTS user_vault_envelopes (
+      user_id INTEGER PRIMARY KEY,
+      key_version INTEGER NOT NULL,
+      kdf_alg TEXT NOT NULL,
+      kdf_salt_b64 TEXT NOT NULL,
+      kdf_m_cost_kib INTEGER NOT NULL,
+      kdf_t_cost INTEGER NOT NULL,
+      kdf_p_cost INTEGER NOT NULL,
+      wrapped_root_key_b64 TEXT NOT NULL,
+      recovery_wrapped_root_key_b64 TEXT,
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_vault_items (
+      user_id INTEGER NOT NULL,
+      category TEXT NOT NULL,
+      item_key TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      nonce_b64 TEXT NOT NULL,
+      ciphertext_b64 TEXT NOT NULL,
+      deleted INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (user_id, category, item_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_vault_items_user_rev
+      ON user_vault_items(user_id, revision);
+
+    CREATE TABLE IF NOT EXISTS vault_device_sync_requests (
+      request_id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      device_name TEXT NOT NULL,
+      device_public_key_b64 TEXT NOT NULL,
+      verification_code TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      approver_ephemeral_pub_b64 TEXT,
+      encrypted_root_key_b64 TEXT,
+      nonce_b64 TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_vault_device_sync_user_status
+      ON vault_device_sync_requests(user_id, status, expires_at);
+
+    CREATE TABLE IF NOT EXISTS chat_create_nonces (
+      creator_user_id INTEGER NOT NULL,
+      client_nonce TEXT NOT NULL,
+      chat_id INTEGER NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (creator_user_id, client_nonce)
+    );
+
+    CREATE TABLE IF NOT EXISTS archive_bot_dedup (
+      caller_user_id INTEGER NOT NULL,
+      chat_id INTEGER NOT NULL,
+      bot_user_id INTEGER NOT NULL,
+      client_nonce INTEGER NOT NULL,
+      message_id INTEGER NOT NULL,
+      pts INTEGER NOT NULL,
+      date_ms INTEGER NOT NULL,
+      PRIMARY KEY (caller_user_id, chat_id, bot_user_id, client_nonce)
+    );
   `);
 
-  // Safe idempotent column migration for existing SQLite databases
-  const alipayCols = db.prepare(`PRAGMA table_info(alipay_sessions)`).all() as Array<{ name: string }>;
-  if (!alipayCols.some((c) => c.name === 'upstream_attempt_id')) {
-    db.exec(`ALTER TABLE alipay_sessions ADD COLUMN upstream_attempt_id TEXT;`);
-  }
+  // Safe idempotent column migrations for existing SQLite databases
+  const ensureColumn = (table: string, column: string, definition: string): void => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+    }
+  };
+
+  ensureColumn('alipay_sessions', 'upstream_attempt_id', 'TEXT');
+  ensureColumn('users', 'auth_version', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn('users', 'auth_salt_b64', 'TEXT');
+  ensureColumn('users', 'auth_kdf_m_kib', 'INTEGER');
+  ensureColumn('users', 'auth_kdf_t_cost', 'INTEGER');
+  ensureColumn('users', 'auth_kdf_p_cost', 'INTEGER');
+  ensureColumn('users', 'account_generation', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn('users', 'updated_at_ms', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('passkey_challenges', 'user_id', 'INTEGER');
+  ensureColumn('passkey_challenges', 'purpose', "TEXT NOT NULL DEFAULT 'auth'");
+  ensureColumn('passkey_challenges', 'rp_id', 'TEXT');
+  ensureColumn('account_passkeys', 'cose_alg', 'INTEGER');
+  ensureColumn('account_passkeys', 'sign_count', 'INTEGER NOT NULL DEFAULT 0');
 }

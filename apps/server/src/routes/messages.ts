@@ -1,9 +1,8 @@
 import crypto from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import {
-  fromWireMessageEntity,
-  parseMarkdownEntities,
-  toWireMessageEntity,
+  type ArchiveLocalBotReplyRequest,
+  type ArchiveLocalBotReplyResponse,
   type GlobalSearchResponse,
   type InvoiceCard,
   type MessageContent,
@@ -11,7 +10,6 @@ import {
   type MessageItem,
   type MiniAppEntry,
   type PollData,
-  type PollOption,
   type SearchHitDto,
   type SearchTabCategory,
   type TodoListCard,
@@ -24,7 +22,11 @@ import {
   createMessageAtomic,
   deleteMessagesAtomic,
   editMessageAtomic,
+  enrichMessageWebPageAsync,
+  ensureChatAdminAccess,
   ensureChatMembership,
+  ensureChatReadAccess,
+  ensureChatWriteAccess,
   getChatDetailDto,
   getMessageById,
   getMessageReactions,
@@ -32,9 +34,14 @@ import {
   hydrateMessageRow,
   lookupWalletIdempotency,
   mapUserRowToDto,
+  parseBoundedQueryInt,
+  parseOptionalNonNegativeInt,
+  parseOptionalPositiveInt,
   purgeExpiredTtlMessages,
   recomputePollState,
   storeWalletIdempotency,
+  validateSendAsPeerId,
+  validateWireMessageContent,
 } from '../db/queries.js';
 import {
   buildHighlightedSnippet,
@@ -59,12 +66,40 @@ export type BotMessageInterceptor = (
   text: string,
 ) => void;
 
+function parsePositiveSafeIntNonce(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (
+    typeof raw !== 'number' ||
+    !Number.isInteger(raw) ||
+    raw < 1 ||
+    raw > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new ApiError(400, 'invalid_nonce', 'client_nonce must be a positive safe integer');
+  }
+  return raw;
+}
+
+function readOptionalTrimmedString(
+  val: unknown,
+  errorCode: string,
+  message: string,
+): string {
+  if (val === undefined || val === null) {
+    return '';
+  }
+  if (typeof val !== 'string') {
+    throw new ApiError(400, errorCode, message);
+  }
+  return val.trim();
+}
+
 export function registerMessageAndSearchRoutes(
   router: HttpRouter,
   db: DatabaseSync,
   hub: RealtimeGatewayHub,
   onBotMessage: BotMessageInterceptor,
   config?: ServerConfig,
+  shutdownSignal?: AbortSignal,
 ): void {
   // 1. Sync State & Difference Endpoints
   router.get('/api/v1/sync/state', (ctx) => {
@@ -84,22 +119,57 @@ export function registerMessageAndSearchRoutes(
 
   const handleGetDifference = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
-    const body =
-      ctx.method === 'GET'
-        ? {
-            chat_id: Number(ctx.query.get('chat_id') ?? 0),
-            from_pts: Number(ctx.query.get('from_pts') ?? ctx.query.get('pts') ?? 0),
-            limit: ctx.query.get('limit') ? Number(ctx.query.get('limit')) : undefined,
-          }
-        : await readJsonBody<{
-            chat_id: number;
-            pts?: number;
-            from_pts?: number;
-            limit?: number;
-            pts_total_limit?: number;
-          }>(ctx.req);
+    let diffReq: {
+      chat_id: number;
+      pts?: number;
+      from_pts?: number;
+      limit?: number;
+      pts_total_limit?: number;
+    };
+    if (ctx.method === 'GET') {
+      diffReq = {
+        chat_id: Number(ctx.query.get('chat_id') ?? 0),
+        from_pts: Number(ctx.query.get('from_pts') ?? ctx.query.get('pts') ?? 0),
+        limit: ctx.query.get('limit') ? Number(ctx.query.get('limit')) : undefined,
+      };
+    } else {
+      const body = await readJsonBody<{
+        chat_id?: unknown;
+        pts?: unknown;
+        from_pts?: unknown;
+        limit?: unknown;
+        pts_total_limit?: unknown;
+      }>(ctx.req);
+      const chatId = parseOptionalPositiveInt(
+        body.chat_id,
+        'invalid_chat_id',
+        'chat_id must be a positive integer',
+      );
+      if (chatId === undefined) {
+        throw new ApiError(400, 'invalid_chat_id', 'chat_id is required');
+      }
+      diffReq = {
+        chat_id: chatId,
+        pts: parseOptionalNonNegativeInt(body.pts, 'invalid_pts', 'pts must be a non-negative integer'),
+        from_pts: parseOptionalNonNegativeInt(
+          body.from_pts,
+          'invalid_pts',
+          'from_pts must be a non-negative integer',
+        ),
+        limit: parseOptionalPositiveInt(
+          body.limit,
+          'invalid_limit',
+          'limit must be a positive integer',
+        ),
+        pts_total_limit: parseOptionalPositiveInt(
+          body.pts_total_limit,
+          'invalid_limit',
+          'pts_total_limit must be a positive integer',
+        ),
+      };
+    }
 
-    const diff = computeChatDifference(db, auth.userId, body);
+    const diff = computeChatDifference(db, auth.userId, diffReq);
     sendJson(ctx.res, 200, diff);
   };
   router.post('/api/v1/sync/get_difference', handleGetDifference);
@@ -108,13 +178,13 @@ export function registerMessageAndSearchRoutes(
   router.get('/api/v1/sync/difference', handleGetDifference);
 
   // 2. List Messages (`limit`, `before_id`, `after_id`, `around_id`, `topic_id`, `media_filter`)
-  router.get('/api/v1/chats/:chatId/messages', (ctx) => {
+  const handleListMessages = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
-    const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    const chatId = Number(ctx.params.chatId ?? ctx.query.get('chat_id') ?? 0);
+    ensureChatReadAccess(db, chatId, auth.userId);
     purgeExpiredTtlMessages(db, chatId);
 
-    const limit = Math.min(200, Math.max(1, Number(ctx.query.get('limit') ?? 50)));
+    const limit = parseBoundedQueryInt(ctx.query.get('limit'), 50, 1, 200);
     const beforeId = ctx.query.get('before_id') ? Number(ctx.query.get('before_id')) : undefined;
     const afterId = ctx.query.get('after_id') ? Number(ctx.query.get('after_id')) : undefined;
     const aroundId = ctx.query.get('around_id') ? Number(ctx.query.get('around_id')) : undefined;
@@ -195,68 +265,175 @@ export function registerMessageAndSearchRoutes(
     });
 
     const chatRow = db.prepare(`SELECT pts FROM chats WHERE chat_id = ?`).get(chatId) as { pts: number };
+    const pts = Number(chatRow.pts);
     sendJson(ctx.res, 200, {
+      chat_id: chatId,
       messages,
-      pts: Number(chatRow.pts),
+      pts,
+      current_pts: pts,
       has_more: hasMore,
     });
-  });
+  };
+  router.get('/api/v1/chats/:chatId/messages', handleListMessages);
+  router.get('/api/v1/messages/history', handleListMessages);
 
-  // 3. Send Message (`POST /api/v1/chats/:chatId/messages` & `POST /api/v1/messages`)
+  // 3. Send Message (`POST /api/v1/chats/:chatId/messages`, `/api/v1/messages`, `/api/v1/messages/send`)
   const handleSendMessage = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      chat_id?: number;
-      text?: string;
-      entities?: Array<MessageEntity | WireMessageEntity>;
+      chat_id?: unknown;
+      text?: unknown;
+      entities?: unknown;
       parse_markdown?: boolean;
-      content?: MessageContent;
-      reply_to?: number | { reply_to_msg_id: number; quote_text?: string };
-      reply_to_id?: number;
-      quote_text?: string;
-      forward_info?: MessageItem['forward_info'];
-      topic_id?: number;
-      client_nonce?: number;
+      content?: unknown;
+      reply_to?: unknown;
+      reply_to_id?: unknown;
+      reply_to_msg_id?: unknown;
+      quote_text?: unknown;
+      forward_info?: unknown;
+      topic_id?: unknown;
+      client_nonce?: unknown;
       silent?: boolean;
-      schedule_at_ms?: number;
-      scheduled_at_ms?: number;
-      ttl_seconds?: number;
-      send_as_peer_id?: number;
+      schedule_at_ms?: unknown;
+      scheduled_at_ms?: unknown;
+      ttl_seconds?: unknown;
+      send_as_peer_id?: unknown;
+      skip_server_bot_reply?: boolean;
     }>(ctx.req);
 
-    const chatId = Number(ctx.params.chatId ?? body.chat_id);
-    ensureChatMembership(db, chatId, auth.userId);
+    const chatId =
+      ctx.params.chatId !== undefined
+        ? Number(ctx.params.chatId)
+        : (parseOptionalPositiveInt(
+            body.chat_id,
+            'invalid_chat_id',
+            'chat_id must be a positive integer',
+          ) ?? 0);
+    const access = ensureChatWriteAccess(db, chatId, auth.userId);
+    const clientNonce = parsePositiveSafeIntNonce(body.client_nonce);
 
-    let replyToMsgId: number | undefined;
-    let quoteText = body.quote_text;
-    if (typeof body.reply_to === 'number') {
-      replyToMsgId = body.reply_to;
-    } else if (body.reply_to && typeof body.reply_to === 'object') {
-      replyToMsgId = body.reply_to.reply_to_msg_id;
-      quoteText = quoteText ?? body.reply_to.quote_text;
-    } else if (body.reply_to_id !== undefined) {
-      replyToMsgId = body.reply_to_id;
+    if (body.text !== undefined && body.text !== null && typeof body.text !== 'string') {
+      throw new ApiError(400, 'invalid_text', 'Message text must be a string');
     }
+    if (
+      body.quote_text !== undefined &&
+      body.quote_text !== null &&
+      typeof body.quote_text !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_quote_text', 'quote_text must be a string');
+    }
+    if (
+      body.entities !== undefined &&
+      body.entities !== null &&
+      !Array.isArray(body.entities)
+    ) {
+      throw new ApiError(400, 'invalid_entities', 'entities must be an array');
+    }
+
+    const validatedContent =
+      body.content !== undefined && body.content !== null
+        ? validateWireMessageContent(body.content)
+        : undefined;
+    const topicId = parseOptionalPositiveInt(
+      body.topic_id,
+      'invalid_topic_id',
+      'topic_id must be a positive integer',
+    );
+    const ttlSeconds = parseOptionalNonNegativeInt(
+      body.ttl_seconds,
+      'invalid_ttl',
+      'ttl_seconds must be a non-negative integer',
+    );
+    const scheduleAtMs = parseOptionalNonNegativeInt(
+      body.schedule_at_ms ?? body.scheduled_at_ms,
+      'invalid_schedule_time',
+      'schedule_at_ms must be a non-negative integer',
+    );
+
+    if (
+      body.forward_info !== undefined &&
+      body.forward_info !== null &&
+      (typeof body.forward_info !== 'object' || Array.isArray(body.forward_info))
+    ) {
+      throw new ApiError(400, 'invalid_forward_info', 'forward_info must be a JSON object');
+    }
+
+    if (topicId !== undefined) {
+      const topicRow = db
+        .prepare(`SELECT is_closed FROM forum_topics WHERE chat_id = ? AND topic_id = ?`)
+        .get(chatId, topicId) as { is_closed: number } | undefined;
+      if (topicRow?.is_closed && !access.isAdmin) {
+        throw new ApiError(403, 'topic_closed', 'Cannot post in a closed forum topic');
+      }
+    }
+
+    let replyToMsgId = parseOptionalPositiveInt(
+      body.reply_to_msg_id ?? body.reply_to_id,
+      'invalid_reply_to',
+      'reply_to_msg_id must be a positive integer',
+    );
+    let quoteText = typeof body.quote_text === 'string' ? body.quote_text : undefined;
+    if (body.reply_to !== undefined && body.reply_to !== null) {
+      if (typeof body.reply_to === 'number') {
+        replyToMsgId = parseOptionalPositiveInt(
+          body.reply_to,
+          'invalid_reply_to',
+          'reply_to must be a positive integer',
+        );
+      } else if (typeof body.reply_to === 'object' && !Array.isArray(body.reply_to)) {
+        const rt = body.reply_to as { reply_to_msg_id?: unknown; quote_text?: unknown };
+        replyToMsgId = parseOptionalPositiveInt(
+          rt.reply_to_msg_id,
+          'invalid_reply_to',
+          'reply_to.reply_to_msg_id must be a positive integer',
+        );
+        const nestedQuote = readOptionalTrimmedString(
+          rt.quote_text,
+          'invalid_quote_text',
+          'quote_text must be a string',
+        );
+        quoteText = quoteText ?? (nestedQuote || undefined);
+      } else {
+        throw new ApiError(
+          400,
+          'invalid_reply_to',
+          'reply_to must be a message ID or reply object',
+        );
+      }
+    }
+
+    const validatedSendAsPeerId = validateSendAsPeerId(db, auth.userId, body.send_as_peer_id);
 
     const result = createMessageAtomic(db, hub, {
       chatId,
       senderId: auth.userId,
-      sendAsPeerId: body.send_as_peer_id,
-      text: body.text,
-      entities: body.entities,
+      sendAsPeerId: validatedSendAsPeerId,
+      text: typeof body.text === 'string' ? body.text : undefined,
+      entities: (body.entities as Array<MessageEntity | WireMessageEntity> | undefined) ?? undefined,
       parseMarkdown: body.parse_markdown,
-      content: body.content,
+      content: validatedContent,
       replyToMsgId,
       quoteText,
-      forwardInfo: body.forward_info,
-      topicId: body.topic_id,
-      clientNonce: body.client_nonce,
+      forwardInfo: (body.forward_info as MessageItem['forward_info']) ?? undefined,
+      topicId,
+      clientNonce,
       silent: body.silent,
-      scheduleAtMs: body.schedule_at_ms ?? body.scheduled_at_ms,
-      ttlSeconds: body.ttl_seconds,
+      scheduleAtMs,
+      ttlSeconds,
     });
 
-    if (!result.duplicate && result.message.text) {
+    if (!result.duplicate && result.message.content.type === 'Text' && result.message.text) {
+      enrichMessageWebPageAsync(
+        db,
+        hub,
+        chatId,
+        result.message.id,
+        result.message.text,
+        shutdownSignal,
+      );
+    }
+
+    if (!result.duplicate && !body.skip_server_bot_reply && result.message.text) {
       onBotMessage(chatId, auth.userId, result.message.text);
     }
 
@@ -272,12 +449,151 @@ export function registerMessageAndSearchRoutes(
       sender_id: auth.userId,
       chat_id: chatId,
       text: result.message.text ?? '',
-      client_nonce: body.client_nonce,
+      client_nonce: clientNonce,
       status: 'sent',
     });
   };
   router.post('/api/v1/chats/:chatId/messages', handleSendMessage);
   router.post('/api/v1/messages', handleSendMessage);
+  router.post('/api/v1/messages/send', handleSendMessage);
+
+  // 3b. Archive Local Fabushi Bot Reply (`v1.6.11` upstream `messages.rs:416-577`, isolated per-caller dedup)
+  router.post('/api/v1/chats/:chatId/messages/archive-local-bot-reply', async (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId);
+    if (!Number.isInteger(chatId) || chatId <= 0) {
+      throw new ApiError(400, 'invalid_chat_id', 'chatId must be a positive integer');
+    }
+
+    const body = await readJsonBody<Partial<ArchiveLocalBotReplyRequest>>(ctx.req);
+    const botUserId = parseOptionalPositiveInt(
+      body.bot_user_id,
+      'invalid_bot_user_id',
+      'bot_user_id must be a positive integer',
+    );
+    if (botUserId === undefined) {
+      throw new ApiError(400, 'invalid_bot_user_id', 'bot_user_id must be a positive integer');
+    }
+
+    const trimmedText = typeof body.text === 'string' ? body.text.trim() : '';
+    const textChars = Array.from(trimmedText).length;
+    if (!trimmedText || textChars > 4096) {
+      throw new ApiError(400, 'invalid_text', 'text must be 1..=4096 characters');
+    }
+
+    const replyToMsgId = parseOptionalPositiveInt(
+      body.reply_to_msg_id,
+      'invalid_reply_to',
+      'reply_to_msg_id must be a positive integer',
+    );
+
+    const clientNonce = parsePositiveSafeIntNonce(body.client_nonce);
+
+    // Caller must have write access in this chat (active member, and admin in channels)
+    ensureChatWriteAccess(db, chatId, auth.userId);
+
+    // Reject BotFather (777001), non-bot human accounts, and standard (non-Fabushi) bots
+    if (botUserId === 777001) {
+      throw new ApiError(403, 'invalid_fabushi_bot', 'Cannot archive local reply as BotFather');
+    }
+    const botUser = db
+      .prepare(`SELECT user_id, is_bot FROM users WHERE user_id = ?`)
+      .get(botUserId) as { user_id: number; is_bot: number } | undefined;
+    if (!botUser || !botUser.is_bot) {
+      throw new ApiError(403, 'invalid_fabushi_bot', 'Target bot_user_id is not a registered bot');
+    }
+
+    const botReg = db
+      .prepare(`SELECT owner_user_id, bot_json FROM bots_registry WHERE bot_user_id = ?`)
+      .get(botUserId) as { owner_user_id: number; bot_json: string } | undefined;
+    if (botReg?.bot_json) {
+      try {
+        const parsedBot = JSON.parse(botReg.bot_json) as { is_standard_bot?: boolean };
+        if (parsedBot.is_standard_bot === true) {
+          throw new ApiError(
+            403,
+            'invalid_fabushi_bot',
+            'Standard bots cannot archive local replies',
+          );
+        }
+      } catch (err) {
+        if (err instanceof ApiError) throw err;
+      }
+    }
+
+    const isOfficialDefault = botUserId === 777000;
+    const ownedByCaller = Boolean(botReg && Number(botReg.owner_user_id) === auth.userId);
+    const botIsMember = Boolean(
+      db
+        .prepare(
+          `SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ? AND role != 'banned'`,
+        )
+        .get(chatId, botUserId),
+    );
+    if (!isOfficialDefault && !ownedByCaller && !botIsMember) {
+      throw new ApiError(
+        403,
+        'bot_not_authorized_in_chat',
+        'Bot is not authorized to archive replies in this chat',
+      );
+    }
+
+    // Per-(caller, chat, bot, nonce) idempotency preventing cross-user/cross-chat nonce leaks
+    if (clientNonce !== undefined) {
+      const existingArchive = db
+        .prepare(
+          `SELECT message_id, pts, date_ms
+           FROM archive_bot_dedup
+           WHERE caller_user_id = ? AND chat_id = ? AND bot_user_id = ? AND client_nonce = ?`,
+        )
+        .get(auth.userId, chatId, botUserId, clientNonce) as
+        | { message_id: number; pts: number; date_ms: number }
+        | undefined;
+      if (existingArchive) {
+        const existingRow = db
+          .prepare(`SELECT text_plain FROM messages WHERE chat_id = ? AND message_id = ?`)
+          .get(chatId, Number(existingArchive.message_id)) as { text_plain: string } | undefined;
+        if (existingRow && existingRow.text_plain !== trimmedText) {
+          throw new ApiError(
+            409,
+            'nonce_conflict',
+            'client_nonce was already used with different archived reply text',
+          );
+        }
+        const dupResp: ArchiveLocalBotReplyResponse = {
+          message_id: Number(existingArchive.message_id),
+          pts: Number(existingArchive.pts),
+          date_ms: Number(existingArchive.date_ms),
+        };
+        sendJson(ctx.res, 200, dupResp);
+        return;
+      }
+    }
+
+    const res = createMessageAtomic(db, hub, {
+      chatId,
+      senderId: botUserId,
+      text: trimmedText,
+      parseMarkdown: false,
+      replyToMsgId,
+    });
+    const dateMs = res.message.date_ms ?? Date.now();
+
+    if (clientNonce !== undefined) {
+      db.prepare(`
+        INSERT OR IGNORE INTO archive_bot_dedup (
+          caller_user_id, chat_id, bot_user_id, client_nonce, message_id, pts, date_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(auth.userId, chatId, botUserId, clientNonce, res.message.id, res.pts, dateMs);
+    }
+
+    const resp: ArchiveLocalBotReplyResponse = {
+      message_id: res.message.id,
+      pts: res.pts,
+      date_ms: dateMs,
+    };
+    sendJson(ctx.res, 200, resp);
+  });
 
   // 4. Edit Message (`PATCH` / `PUT`)
   const handleEditMessage = async (ctx: RequestContext): Promise<void> => {
@@ -285,18 +601,33 @@ export function registerMessageAndSearchRoutes(
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
     const body = await readJsonBody<{
-      text?: string;
-      entities?: Array<MessageEntity | WireMessageEntity>;
-      content?: MessageContent;
+      text?: unknown;
+      entities?: unknown;
+      content?: unknown;
     }>(ctx.req);
+
+    if (body.text !== undefined && body.text !== null && typeof body.text !== 'string') {
+      throw new ApiError(400, 'invalid_text', 'Edited text must be a string');
+    }
+    if (
+      body.entities !== undefined &&
+      body.entities !== null &&
+      !Array.isArray(body.entities)
+    ) {
+      throw new ApiError(400, 'invalid_entities', 'entities must be an array');
+    }
+    const validatedContent =
+      body.content !== undefined && body.content !== null
+        ? validateWireMessageContent(body.content)
+        : undefined;
 
     const res = editMessageAtomic(db, hub, {
       chatId,
       messageId,
       editorUserId: auth.userId,
-      text: body.text,
-      entities: body.entities,
-      content: body.content,
+      text: typeof body.text === 'string' ? body.text : undefined,
+      entities: (body.entities as Array<MessageEntity | WireMessageEntity> | undefined) ?? undefined,
+      content: validatedContent,
     });
     sendJson(ctx.res, 200, { message: res.message, pts: res.pts });
   };
@@ -325,6 +656,9 @@ export function registerMessageAndSearchRoutes(
     }>(ctx.req);
     const chatId = Number(ctx.params.chatId ?? body.chat_id);
     ensureChatMembership(db, chatId, auth.userId);
+    if (body.message_ids !== undefined && !Array.isArray(body.message_ids)) {
+      throw new ApiError(400, 'invalid_message_ids', 'message_ids must be an array');
+    }
     const res = deleteMessagesAtomic(
       db,
       hub,
@@ -342,37 +676,71 @@ export function registerMessageAndSearchRoutes(
   const handleForwardMessages = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      from_chat_id?: number;
-      to_chat_id?: number;
-      message_ids?: number[];
+      from_chat_id?: unknown;
+      to_chat_id?: unknown;
+      message_ids?: unknown;
       hide_sender?: boolean;
       hideSender?: boolean;
-      comment?: string;
-      topic_id?: number;
+      comment?: unknown;
+      topic_id?: unknown;
     }>(ctx.req);
 
-    const fromChatId = Number(body.from_chat_id ?? ctx.params.chatId);
-    const toChatId = Number(
-      body.to_chat_id ?? (body.from_chat_id !== undefined ? ctx.params.chatId : undefined),
+    const parsedFromChatId = parseOptionalPositiveInt(
+      body.from_chat_id,
+      'invalid_chat_id',
+      'from_chat_id must be a positive integer',
     );
-    ensureChatMembership(db, fromChatId, auth.userId);
-    ensureChatMembership(db, toChatId, auth.userId);
+    const parsedToChatId = parseOptionalPositiveInt(
+      body.to_chat_id,
+      'invalid_chat_id',
+      'to_chat_id must be a positive integer',
+    );
+    const fromChatId = parsedFromChatId ?? Number(ctx.params.chatId);
+    const toChatId =
+      parsedToChatId ?? (parsedFromChatId !== undefined ? Number(ctx.params.chatId) : NaN);
+    ensureChatReadAccess(db, fromChatId, auth.userId);
+    ensureChatWriteAccess(db, toChatId, auth.userId);
+
+    const comment = readOptionalTrimmedString(
+      body.comment,
+      'invalid_comment',
+      'comment must be a string',
+    );
+    const topicId = parseOptionalPositiveInt(
+      body.topic_id,
+      'invalid_topic_id',
+      'topic_id must be a positive integer',
+    );
+    if (body.message_ids !== undefined && !Array.isArray(body.message_ids)) {
+      throw new ApiError(400, 'invalid_message_ids', 'message_ids must be an array');
+    }
+    const messageIds: number[] = [];
+    for (const rawId of (body.message_ids as unknown[] | undefined) ?? []) {
+      const msgId = parseOptionalPositiveInt(
+        rawId,
+        'invalid_message_ids',
+        'Each message_id must be a positive integer',
+      );
+      if (msgId === undefined) {
+        throw new ApiError(400, 'invalid_message_ids', 'Each message_id must be a positive integer');
+      }
+      messageIds.push(msgId);
+    }
 
     const hideSender = Boolean(body.hide_sender ?? body.hideSender);
     const created: MessageItem[] = [];
 
-    if (body.comment && body.comment.trim()) {
+    if (comment) {
       const commentRes = createMessageAtomic(db, hub, {
         chatId: toChatId,
         senderId: auth.userId,
-        text: body.comment.trim(),
-        topicId: body.topic_id,
+        text: comment,
+        topicId,
       });
       created.push(commentRes.message);
     }
 
-    for (const rawId of body.message_ids ?? []) {
-      const msgId = Number(rawId);
+    for (const msgId of messageIds) {
       const orig = getMessageById(db, fromChatId, msgId, auth.userId);
       if (!orig) continue;
 
@@ -399,7 +767,7 @@ export function registerMessageAndSearchRoutes(
         content: orig.content,
         text: orig.text,
         forwardInfo,
-        topicId: body.topic_id,
+        topicId,
       });
       created.push(fwdRes.message);
     }
@@ -413,12 +781,36 @@ export function registerMessageAndSearchRoutes(
   router.post('/api/v1/chats/:chatId/read', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ max_id?: number; topic_id?: number }>(ctx.req);
-    const chatRow = db.prepare(`SELECT last_message_id FROM chats WHERE chat_id = ?`).get(chatId) as {
+    const access = ensureChatReadAccess(db, chatId, auth.userId);
+    const body = await readJsonBody<{ max_id?: unknown; topic_id?: unknown }>(ctx.req);
+    const providedMaxId = parseOptionalNonNegativeInt(
+      body.max_id,
+      'invalid_max_id',
+      'max_id must be a non-negative integer',
+    );
+    parseOptionalPositiveInt(
+      body.topic_id,
+      'invalid_topic_id',
+      'topic_id must be a positive integer',
+    );
+    const chatRow = db.prepare(`SELECT last_message_id, pts FROM chats WHERE chat_id = ?`).get(chatId) as {
       last_message_id: number;
+      pts: number;
     };
-    const maxId = Number(body.max_id ?? chatRow.last_message_id ?? 0);
+    const maxId = providedMaxId ?? Number(chatRow.last_message_id ?? 0);
+
+    if (!access.isMember) {
+      sendJson(ctx.res, 200, {
+        ok: true,
+        success: true,
+        chat_id: chatId,
+        pts: Number(chatRow.pts ?? 0),
+        read_inbox_max_id: maxId,
+        read_outbox_max_id: 0,
+        unread_count: 0,
+      });
+      return;
+    }
 
     db.prepare(`
       INSERT INTO user_chat_settings (user_id, chat_id, read_inbox_max_id, unread_mark)
@@ -450,11 +842,11 @@ export function registerMessageAndSearchRoutes(
     });
   });
 
-  // 8. Pin / Unpin Messages
+  // 8. Pin / Unpin Messages (groups/supergroups/channels strictly require admin role)
   router.get('/api/v1/chats/:chatId/pins', (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatReadAccess(db, chatId, auth.userId);
     const topicId = ctx.query.get('topic_id') ? Number(ctx.query.get('topic_id')) : undefined;
 
     const rows = (
@@ -478,9 +870,16 @@ export function registerMessageAndSearchRoutes(
   const handlePinMessage = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ message_id?: number }>(ctx.req);
-    const messageId = Number(ctx.params.messageId ?? body.message_id);
+    ensureChatAdminAccess(db, chatId, auth.userId);
+    const body = await readJsonBody<{ message_id?: unknown }>(ctx.req);
+    const messageId =
+      ctx.params.messageId !== undefined
+        ? Number(ctx.params.messageId)
+        : (parseOptionalPositiveInt(
+            body.message_id,
+            'invalid_message_id',
+            'message_id must be a positive integer',
+          ) ?? 0);
 
     const msg = getMessageById(db, chatId, messageId, auth.userId);
     if (!msg) throw new ApiError(404, 'message_not_found', 'Message not found');
@@ -508,7 +907,7 @@ export function registerMessageAndSearchRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatAdminAccess(db, chatId, auth.userId);
 
     db.prepare(`DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?`).run(chatId, messageId);
     const pinRows = db
@@ -525,21 +924,150 @@ export function registerMessageAndSearchRoutes(
   router.delete('/api/v1/chats/:chatId/messages/:messageId/pin', handleUnpinMessage);
   router.delete('/api/v1/chats/:chatId/pins/:messageId', handleUnpinMessage);
 
-  // Desktop inline keyboard callback query
+  // Real inline keyboard callback query dispatch (zero stub echo responses)
   router.post('/api/v1/chats/:chatId/callback', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ message_id?: number; callback_data?: string; data?: string }>(ctx.req);
-    const cbData = String(body.callback_data ?? body.data ?? '');
-    sendJson(ctx.res, 200, {
-      ok: true,
-      chat_id: chatId,
-      message_id: body.message_id ?? 0,
-      callback_data: cbData,
-      text: cbData ? `Callback "${cbData}" received` : 'OK',
-      show_alert: false,
-    });
+    const body = await readJsonBody<{ message_id?: unknown; callback_data?: unknown; data?: unknown }>(ctx.req);
+    const cbData = readOptionalTrimmedString(
+      body.callback_data ?? body.data,
+      'invalid_callback',
+      'callback_data must be a string',
+    );
+    if (!cbData) {
+      throw new ApiError(400, 'invalid_callback', 'callback_data cannot be empty');
+    }
+    const msgId =
+      parseOptionalNonNegativeInt(
+        body.message_id,
+        'invalid_message_id',
+        'message_id must be a non-negative integer',
+      ) ?? 0;
+    const callbackQueryId = `cbq_${crypto.randomBytes(8).toString('hex')}`;
+
+    // 1. Official BotFather menu callbacks (Map lookup prevents Object.prototype property bypass)
+    const bfCommandMap = new Map<string, string>([
+      ['bf:newbot', '/newbot'],
+      ['bf:mybots', '/mybots'],
+      ['bf:newapp', '/newapp'],
+      ['bf:deletebot', '/deletebot'],
+      ['bf:setdescription', '/setdescription'],
+    ]);
+    const mappedBfCmd = bfCommandMap.get(cbData);
+    if (mappedBfCmd) {
+      onBotMessage(chatId, auth.userId, mappedBfCmd);
+      sendJson(ctx.res, 200, {
+        ok: true,
+        callback_query_id: callbackQueryId,
+        companion_chat_id: chatId,
+        chat_id: chatId,
+        message_id: msgId,
+        callback_data: cbData,
+      });
+      return;
+    }
+
+    // 2. Hermes provider CTA callback
+    if (cbData === 'hermes:open_ai_providers') {
+      sendJson(ctx.res, 200, {
+        ok: true,
+        callback_query_id: callbackQueryId,
+        companion_chat_id: chatId,
+        chat_id: chatId,
+        message_id: msgId,
+        callback_data: cbData,
+        toast: '请打开「设置 → AI 订阅与模型供应商」选择或配置模型供应商',
+      });
+      return;
+    }
+
+    // 3. Hermes tool approval callback (`hermes:approve:<approvalId>:<decision>`)
+    if (cbData.startsWith('hermes:approve:')) {
+      const parts = cbData.split(':');
+      const approvalId = parts[2]?.trim() ?? '';
+      const decision = parts[3]?.trim() ?? '';
+      const allowedDecisions = new Set(['approve_once', 'approve_session', 'approve_always', 'deny']);
+      if (!approvalId || !allowedDecisions.has(decision)) {
+        throw new ApiError(400, 'invalid_callback', 'Malformed Hermes approval callback_data');
+      }
+      const approvalRow = db
+        .prepare(`SELECT approval_json FROM hermes_approvals WHERE approval_id = ? AND user_id = ?`)
+        .get(approvalId, auth.userId) as { approval_json: string } | undefined;
+      if (!approvalRow) {
+        throw new ApiError(404, 'approval_not_found', 'Approval request not found');
+      }
+      const approvalObj = JSON.parse(approvalRow.approval_json) as Record<string, unknown>;
+      approvalObj.status = decision === 'deny' ? 'denied' : 'approved';
+      approvalObj.decision = decision;
+      approvalObj.resolved_at_ms = Date.now();
+      db.prepare(`UPDATE hermes_approvals SET approval_json = ? WHERE approval_id = ? AND user_id = ?`).run(
+        JSON.stringify(approvalObj),
+        approvalId,
+        auth.userId,
+      );
+      sendJson(ctx.res, 200, {
+        ok: true,
+        callback_query_id: callbackQueryId,
+        companion_chat_id: chatId,
+        chat_id: chatId,
+        message_id: msgId,
+        callback_data: cbData,
+        toast: decision === 'deny' ? '已拒绝工具执行请求' : '已批准工具执行请求',
+      });
+      return;
+    }
+
+    // 4. Real bot member in this chat -> persist callback_query into bot_api_updates & invoke bot turn if command
+    const botMember = db
+      .prepare(
+        `SELECT u.user_id, u.username
+         FROM chat_members cm
+         JOIN users u ON u.user_id = cm.user_id
+         WHERE cm.chat_id = ? AND u.is_bot = 1 AND cm.role != 'banned'
+         LIMIT 1`,
+      )
+      .get(chatId) as { user_id: number; username: string | null } | undefined;
+
+    if (botMember) {
+      const botUserId = Number(botMember.user_id);
+      const botUsername = botMember.username ?? `bot_${botUserId}`;
+      const caller = getUserProfileDto(db, auth.userId);
+      db.prepare(
+        `INSERT INTO bot_api_updates (bot_user_id, payload_json, created_at_ms) VALUES (?, ?, ?)`,
+      ).run(
+        botUserId,
+        JSON.stringify({
+          callback_query: {
+            id: callbackQueryId,
+            from: caller ?? { user_id: auth.userId },
+            chat_id: chatId,
+            message_id: msgId,
+            data: cbData,
+          },
+        }),
+        Date.now(),
+      );
+      if (cbData.startsWith('/')) {
+        onBotMessage(chatId, auth.userId, cbData);
+      }
+      sendJson(ctx.res, 200, {
+        ok: true,
+        callback_query_id: callbackQueryId,
+        companion_chat_id: chatId,
+        chat_id: chatId,
+        message_id: msgId,
+        callback_data: cbData,
+        toast: `已发送回调至 @${botUsername}`,
+      });
+      return;
+    }
+
+    throw new ApiError(
+      404,
+      'unknown_callback',
+      'No bot or callback handler registered for this chat',
+    );
   });
 
   // 9. Reactions (`GET` details & `POST` toggle/add/remove)
@@ -547,7 +1075,7 @@ export function registerMessageAndSearchRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatReadAccess(db, chatId, auth.userId);
 
     const { reactions, details } = getMessageReactions(db, chatId, messageId, auth.userId);
     const reactors = details.flatMap((d) =>
@@ -563,11 +1091,22 @@ export function registerMessageAndSearchRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatReadAccess(db, chatId, auth.userId);
 
-    const body = await readJsonBody<{ emoji?: string; action?: 'toggle' | 'add' | 'remove' }>(ctx.req);
-    const emoji = (body.emoji ?? '').trim();
+    const body = await readJsonBody<{ emoji?: unknown; action?: unknown }>(ctx.req);
+    const emoji = readOptionalTrimmedString(
+      body.emoji,
+      'invalid_emoji',
+      'Reaction emoji must be a string',
+    );
     if (!emoji) throw new ApiError(400, 'missing_emoji', 'Reaction emoji is required');
+    if (
+      body.action !== undefined &&
+      body.action !== null &&
+      (typeof body.action !== 'string' || !['toggle', 'add', 'remove'].includes(body.action))
+    ) {
+      throw new ApiError(400, 'invalid_action', 'action must be one of toggle, add, remove');
+    }
 
     const exists = db
       .prepare(
@@ -575,7 +1114,10 @@ export function registerMessageAndSearchRoutes(
       )
       .get(chatId, messageId, auth.userId, emoji);
 
-    const action = body.action ?? 'toggle';
+    const action = (typeof body.action === 'string' ? body.action : 'toggle') as
+      | 'toggle'
+      | 'add'
+      | 'remove';
     const shouldAdd = action === 'add' ? true : action === 'remove' ? false : !exists;
 
     if (shouldAdd) {
@@ -613,24 +1155,59 @@ export function registerMessageAndSearchRoutes(
   router.post('/api/v1/chats/:chatId/polls', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatWriteAccess(db, chatId, auth.userId);
 
     const body = await readJsonBody<{
-      question?: string;
-      options?: string[];
+      question?: unknown;
+      options?: unknown;
       is_anonymous?: boolean;
       allows_multiple_answers?: boolean;
       multiple_choice?: boolean;
       is_quiz?: boolean;
-      correct_option_id?: number;
-      solution?: string;
-      explanation?: string;
-      topic_id?: number;
-      client_nonce?: number;
+      correct_option_id?: unknown;
+      solution?: unknown;
+      explanation?: unknown;
+      topic_id?: unknown;
+      client_nonce?: unknown;
     }>(ctx.req);
 
-    const question = (body.question ?? '').trim();
-    const rawOptions = (body.options ?? []).map((o) => o.trim()).filter(Boolean);
+    const clientNonce = parsePositiveSafeIntNonce(body.client_nonce);
+    const topicId = parseOptionalPositiveInt(
+      body.topic_id,
+      'invalid_topic_id',
+      'topic_id must be a positive integer',
+    );
+    const correctOptionId = parseOptionalNonNegativeInt(
+      body.correct_option_id,
+      'invalid_quiz_answer',
+      'correct_option_id must be a non-negative integer',
+    );
+    const question = readOptionalTrimmedString(
+      body.question,
+      'invalid_question',
+      'Poll question must be a string',
+    );
+    if (body.options !== undefined && !Array.isArray(body.options)) {
+      throw new ApiError(400, 'invalid_options', 'Poll options must be an array of strings');
+    }
+    const rawOptions = ((body.options as unknown[] | undefined) ?? [])
+      .map((o) => {
+        if (typeof o !== 'string') {
+          throw new ApiError(400, 'invalid_options', 'Each poll option must be a string');
+        }
+        return o.trim();
+      })
+      .filter(Boolean);
+    if (body.solution !== undefined && body.solution !== null && typeof body.solution !== 'string') {
+      throw new ApiError(400, 'invalid_solution', 'Poll solution must be a string');
+    }
+    if (
+      body.explanation !== undefined &&
+      body.explanation !== null &&
+      typeof body.explanation !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_explanation', 'Poll explanation must be a string');
+    }
     if (!question) throw new ApiError(400, 'invalid_question', 'Poll question cannot be empty');
     if (rawOptions.length < 2 || rawOptions.length > 12) {
       throw new ApiError(400, 'invalid_options', 'Polls require between 2 and 12 non-empty options');
@@ -639,9 +1216,9 @@ export function registerMessageAndSearchRoutes(
     const isQuiz = Boolean(body.is_quiz);
     if (
       isQuiz &&
-      (body.correct_option_id === undefined ||
-        body.correct_option_id < 0 ||
-        body.correct_option_id >= rawOptions.length)
+      (correctOptionId === undefined ||
+        correctOptionId < 0 ||
+        correctOptionId >= rawOptions.length)
     ) {
       throw new ApiError(400, 'invalid_quiz_answer', 'Quiz mode requires a valid correct_option_id');
     }
@@ -663,18 +1240,44 @@ export function registerMessageAndSearchRoutes(
       is_anonymous: body.is_anonymous ?? true,
       allows_multiple_answers: isQuiz ? false : Boolean(body.allows_multiple_answers ?? body.multiple_choice),
       is_quiz: isQuiz,
-      correct_option_id: isQuiz ? body.correct_option_id : undefined,
-      solution: body.solution ?? body.explanation,
-      explanation: body.explanation ?? body.solution,
+      correct_option_id: isQuiz ? correctOptionId : undefined,
+      solution: (body.solution as string | undefined) ?? (body.explanation as string | undefined),
+      explanation: (body.explanation as string | undefined) ?? (body.solution as string | undefined),
     };
 
     const msgRes = createMessageAtomic(db, null, {
       chatId,
       senderId: auth.userId,
       content: { type: 'Poll', data: tempPoll },
-      topicId: body.topic_id,
-      clientNonce: body.client_nonce,
+      topicId,
+      clientNonce,
     });
+
+    if (msgRes.duplicate) {
+      const hydratedExisting = getMessageById(db, chatId, msgRes.message.id, auth.userId)!;
+      const existingPollRow = db
+        .prepare(`SELECT poll_id, poll_json, is_closed FROM polls WHERE chat_id = ? AND message_id = ? LIMIT 1`)
+        .get(chatId, msgRes.message.id) as
+        | { poll_id: number; poll_json: string; is_closed: number }
+        | undefined;
+      let existingPoll: PollData;
+      if (existingPollRow) {
+        const basePoll = JSON.parse(existingPollRow.poll_json) as PollData;
+        basePoll.is_closed = Boolean(existingPollRow.is_closed);
+        existingPoll = recomputePollState(db, Number(existingPollRow.poll_id), basePoll, auth.userId);
+      } else if (hydratedExisting.content.type === 'Poll') {
+        existingPoll = hydratedExisting.content.data;
+      } else {
+        existingPoll = tempPoll;
+      }
+      sendJson(ctx.res, 200, {
+        message: hydratedExisting,
+        poll: existingPoll,
+        pts: msgRes.pts,
+        duplicate: true,
+      });
+      return;
+    }
 
     const insertRes = db
       .prepare(
@@ -715,25 +1318,43 @@ export function registerMessageAndSearchRoutes(
 
   const handleVotePoll = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
-    const body = await readJsonBody<{ option_ids?: number[] }>(ctx.req);
+    const body = await readJsonBody<{ option_ids?: unknown }>(ctx.req);
+    if (body.option_ids !== undefined && !Array.isArray(body.option_ids)) {
+      throw new ApiError(400, 'invalid_option_ids', 'option_ids must be an array');
+    }
     const updatedPoll = castPollVoteAtomic(db, hub, auth.userId, {
       pollId: ctx.params.pollId ? Number(ctx.params.pollId) : undefined,
       chatId: ctx.params.chatId ? Number(ctx.params.chatId) : undefined,
       messageId: ctx.params.messageId ? Number(ctx.params.messageId) : undefined,
-      optionIds: body.option_ids ?? [],
+      optionIds: (body.option_ids as number[] | undefined) ?? [],
     });
     sendJson(ctx.res, 200, updatedPoll);
   };
   router.post('/api/v1/polls/:pollId/vote', handleVotePoll);
   router.post('/api/v1/chats/:chatId/messages/:messageId/poll/vote', handleVotePoll);
 
-  router.post('/api/v1/polls/:pollId/close', (ctx) => {
+  router.post('/api/v1/polls/:pollId/retract', (ctx) => {
     const auth = requireAuth(db, ctx);
-    const pollId = Number(ctx.params.pollId);
-    const pollRow = db.prepare(`SELECT * FROM polls WHERE poll_id = ?`).get(pollId) as
+    const updatedPoll = castPollVoteAtomic(db, hub, auth.userId, {
+      pollId: Number(ctx.params.pollId),
+      optionIds: [],
+    });
+    sendJson(ctx.res, 200, updatedPoll);
+  });
+
+  const handleClosePoll = (ctx: RequestContext): void => {
+    const auth = requireAuth(db, ctx);
+    const pollRow = (
+      ctx.params.pollId
+        ? db.prepare(`SELECT * FROM polls WHERE poll_id = ?`).get(Number(ctx.params.pollId))
+        : db
+            .prepare(`SELECT * FROM polls WHERE chat_id = ? AND message_id = ?`)
+            .get(Number(ctx.params.chatId), Number(ctx.params.messageId))
+    ) as
       | { poll_id: number; chat_id: number; message_id: number; creator_id: number; poll_json: string }
       | undefined;
     if (!pollRow) throw new ApiError(404, 'poll_not_found', 'Poll not found');
+    const pollId = Number(pollRow.poll_id);
     if (Number(pollRow.creator_id) !== auth.userId) {
       throw new ApiError(403, 'forbidden', 'Only the poll creator can close this poll');
     }
@@ -756,46 +1377,85 @@ export function registerMessageAndSearchRoutes(
       data: { chat_id: Number(pollRow.chat_id), message_id: Number(pollRow.message_id), poll: updatedPoll },
     });
     sendJson(ctx.res, 200, updatedPoll);
-  });
+  };
+  router.post('/api/v1/polls/:pollId/close', handleClosePoll);
+  router.post('/api/v1/chats/:chatId/messages/:messageId/poll/close', handleClosePoll);
 
-  router.get('/api/v1/polls/:pollId/results', (ctx) => {
+  const handleGetPoll = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const pollId = Number(ctx.params.pollId);
     const pollRow = db.prepare(`SELECT * FROM polls WHERE poll_id = ?`).get(pollId) as
       | { poll_id: number; chat_id: number; poll_json: string; is_closed: number }
       | undefined;
     if (!pollRow) throw new ApiError(404, 'poll_not_found', 'Poll not found');
-    ensureChatMembership(db, Number(pollRow.chat_id), auth.userId);
+    ensureChatReadAccess(db, Number(pollRow.chat_id), auth.userId);
 
     const basePoll = JSON.parse(pollRow.poll_json) as PollData;
     basePoll.is_closed = Boolean(pollRow.is_closed);
     const computed = recomputePollState(db, pollId, basePoll, auth.userId);
-    sendJson(ctx.res, 200, computed);
-  });
+    sendJson(ctx.res, 200, {
+      ...computed,
+      chat_id: Number(pollRow.chat_id),
+      poll: computed,
+    });
+  };
+  router.get('/api/v1/polls/:pollId/results', handleGetPoll);
+  router.get('/api/v1/polls/:pollId', handleGetPoll);
 
   // 11. Collaborative Todo Checklists (`create` & `toggle`)
   router.post('/api/v1/chats/:chatId/todos', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatWriteAccess(db, chatId, auth.userId);
     const body = await readJsonBody<{
-      title?: string;
-      items?: Array<string | { id?: string; title: string; completed?: boolean }>;
-      topic_id?: number;
+      title?: unknown;
+      items?: unknown;
+      topic_id?: unknown;
     }>(ctx.req);
 
-    const title = (body.title ?? '').trim();
-    const rawItems = body.items ?? [];
+    const topicId = parseOptionalPositiveInt(
+      body.topic_id,
+      'invalid_topic_id',
+      'topic_id must be a positive integer',
+    );
+    const title = readOptionalTrimmedString(
+      body.title,
+      'invalid_todo',
+      'Todo title must be a string',
+    );
+    if (body.items !== undefined && !Array.isArray(body.items)) {
+      throw new ApiError(400, 'invalid_todo', 'Todo items must be an array');
+    }
+    const rawItems = (body.items as unknown[] | undefined) ?? [];
     if (!title || rawItems.length === 0 || rawItems.length > 30) {
       throw new ApiError(400, 'invalid_todo', 'Todo checklist requires a title and 1–30 items');
     }
 
     const listId = `todo_${crypto.randomBytes(6).toString('hex')}`;
-    const items = rawItems.map((it, idx) =>
-      typeof it === 'string'
-        ? { id: `item_${idx + 1}`, title: it.trim(), completed: false }
-        : { id: it.id || `item_${idx + 1}`, title: it.title.trim(), completed: Boolean(it.completed) },
-    );
+    const items = rawItems.map((it, idx) => {
+      if (typeof it === 'string') {
+        return { id: `item_${idx + 1}`, title: it.trim(), completed: false };
+      }
+      if (it && typeof it === 'object' && !Array.isArray(it)) {
+        const obj = it as { id?: unknown; title?: unknown; completed?: unknown };
+        if (typeof obj.title !== 'string') {
+          throw new ApiError(400, 'invalid_todo', 'Each todo item title must be a string');
+        }
+        if (obj.id !== undefined && obj.id !== null && typeof obj.id !== 'string') {
+          throw new ApiError(400, 'invalid_todo', 'Each todo item id must be a string');
+        }
+        return {
+          id: (typeof obj.id === 'string' && obj.id) || `item_${idx + 1}`,
+          title: obj.title.trim(),
+          completed: Boolean(obj.completed),
+        };
+      }
+      throw new ApiError(
+        400,
+        'invalid_todo',
+        'Each todo item must be a string or an object with a string title',
+      );
+    });
 
     const card: TodoListCard = {
       id: listId,
@@ -810,7 +1470,7 @@ export function registerMessageAndSearchRoutes(
       chatId,
       senderId: auth.userId,
       content: { type: 'Todo', data: card },
-      topicId: body.topic_id,
+      topicId,
     });
     sendJson(ctx.res, 201, { message: res.message, todo: card, pts: res.pts });
   });
@@ -819,16 +1479,33 @@ export function registerMessageAndSearchRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatWriteAccess(db, chatId, auth.userId);
 
     const existing = getMessageById(db, chatId, messageId, auth.userId);
     if (!existing || existing.content.type !== 'Todo') {
       throw new ApiError(404, 'todo_not_found', 'Todo checklist message not found');
     }
 
-    const body = await readJsonBody<{ item_id?: string; completed?: boolean }>(ctx.req);
+    const body = await readJsonBody<{ item_id?: unknown; completed?: boolean }>(ctx.req);
+    const itemId = readOptionalTrimmedString(
+      body.item_id,
+      'invalid_item_id',
+      'item_id must be a string',
+    );
+    if (!itemId) {
+      throw new ApiError(400, 'invalid_item_id', 'item_id is required');
+    }
     const card = structuredClone(existing.content.data);
-    const targetItem = card.items.find((i) => i.id === body.item_id);
+    if (
+      !card ||
+      typeof card !== 'object' ||
+      Array.isArray(card) ||
+      !Array.isArray(card.items) ||
+      !card.items.every((i) => Boolean(i) && typeof i === 'object' && !Array.isArray(i))
+    ) {
+      throw new ApiError(400, 'invalid_todo', 'Todo checklist message has invalid items');
+    }
+    const targetItem = card.items.find((i) => i.id === itemId);
     if (!targetItem) {
       throw new ApiError(404, 'todo_item_not_found', 'Checklist item not found');
     }
@@ -855,34 +1532,68 @@ export function registerMessageAndSearchRoutes(
   router.post('/api/v1/chats/:chatId/invoices', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
-    ensureChatMembership(db, chatId, auth.userId);
+    ensureChatWriteAccess(db, chatId, auth.userId);
     const body = await readJsonBody<{
-      title?: string;
-      description?: string;
-      currency?: string;
-      amount?: number;
-      amount_cents?: number;
+      title?: unknown;
+      description?: unknown;
+      currency?: unknown;
+      amount?: unknown;
+      amount_cents?: unknown;
+      topic_id?: unknown;
     }>(ctx.req);
 
-    const amount = Math.max(1, Math.trunc(Number(body.amount ?? body.amount_cents ?? 100)));
+    const topicId = parseOptionalPositiveInt(
+      body.topic_id,
+      'invalid_topic_id',
+      'topic_id must be a positive integer',
+    );
+    const rawTitle = readOptionalTrimmedString(
+      body.title,
+      'invalid_invoice',
+      'Invoice title must be a string',
+    );
+    const rawDescription = readOptionalTrimmedString(
+      body.description,
+      'invalid_invoice',
+      'Invoice description must be a string',
+    );
+    const rawCurrency = readOptionalTrimmedString(
+      body.currency,
+      'invalid_invoice',
+      'Invoice currency must be a string',
+    );
+    const rawAmount = body.amount ?? body.amount_cents;
+    let amount = 100;
+    if (rawAmount !== undefined && rawAmount !== null) {
+      if (
+        typeof rawAmount !== 'number' ||
+        !Number.isInteger(rawAmount) ||
+        rawAmount < 1 ||
+        rawAmount > Number.MAX_SAFE_INTEGER
+      ) {
+        throw new ApiError(400, 'invalid_invoice', 'amount must be a positive integer');
+      }
+      amount = rawAmount;
+    }
     const invId = `inv_${crypto.randomBytes(6).toString('hex')}`;
     const card: InvoiceCard = {
       id: invId,
       invoice_id: invId,
-      title: (body.title ?? 'Stars Invoice').trim(),
-      description: (body.description ?? 'Instant checkout via GPUI Telegram Wallet').trim(),
-      currency: (body.currency ?? 'XTR').toUpperCase(),
+      title: rawTitle || 'Stars Invoice',
+      description: rawDescription || 'Instant checkout via GPUI Telegram Wallet',
+      currency: (rawCurrency || 'XTR').toUpperCase(),
       amount_cents: amount,
       total_amount: amount,
       status: 'pending',
       is_paid: false,
-      prices: [{ label: body.title ?? 'Item', amount_cents: amount }],
+      prices: [{ label: rawTitle || 'Item', amount_cents: amount }],
     };
 
     const res = createMessageAtomic(db, hub, {
       chatId,
       senderId: auth.userId,
       content: { type: 'Invoice', data: card },
+      topicId,
     });
     sendJson(ctx.res, 201, { message: res.message, invoice: card, pts: res.pts });
   });
@@ -891,12 +1602,21 @@ export function registerMessageAndSearchRoutes(
     const auth = requireAuth(db, ctx);
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
-    ensureChatMembership(db, chatId, auth.userId);
-    const body = await readJsonBody<{ idempotency_key?: string }>(ctx.req);
+    const access = ensureChatReadAccess(db, chatId, auth.userId);
+    if (access.chatType === 3) {
+      ensureChatWriteAccess(db, chatId, auth.userId);
+    }
+    const body = await readJsonBody<{ idempotency_key?: unknown }>(ctx.req);
+    const bodyIdempotencyKey = readOptionalTrimmedString(
+      body.idempotency_key,
+      'invalid_idempotency_key',
+      'idempotency_key must be a string',
+    );
 
     const headerIdem = ctx.req.headers['idempotency-key'];
     const idempotencyKey =
-      (typeof headerIdem === 'string' ? headerIdem.trim() : undefined) ?? body.idempotency_key?.trim();
+      (typeof headerIdem === 'string' && headerIdem.trim() ? headerIdem.trim() : undefined) ??
+      (bodyIdempotencyKey || undefined);
     const idemScope = `invoice_pay:${chatId}:${messageId}`;
     const cached = lookupWalletIdempotency(db, auth.userId, idempotencyKey, idemScope);
     if (cached) {
@@ -910,6 +1630,9 @@ export function registerMessageAndSearchRoutes(
     }
 
     const card = structuredClone(existing.content.data);
+    if (!card || typeof card !== 'object' || Array.isArray(card)) {
+      throw new ApiError(400, 'invalid_invoice', 'Invoice message has invalid payload');
+    }
     if (card.is_paid) {
       const wallet = db
         .prepare(`SELECT stars_balance, ton_nano FROM wallet_accounts WHERE user_id = ?`)
@@ -924,6 +1647,18 @@ export function registerMessageAndSearchRoutes(
       storeWalletIdempotency(db, auth.userId, idempotencyKey, idemScope, alreadyPaidPayload);
       sendJson(ctx.res, 200, alreadyPaidPayload);
       return;
+    }
+
+    if (
+      typeof card.total_amount !== 'number' ||
+      !Number.isInteger(card.total_amount) ||
+      card.total_amount < 1 ||
+      card.total_amount > Number.MAX_SAFE_INTEGER ||
+      typeof card.currency !== 'string' ||
+      card.currency.trim().length === 0 ||
+      typeof card.title !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_invoice', 'Invoice has an invalid payload');
     }
 
     let newBalance = 0;
@@ -1105,8 +1840,8 @@ export function registerMessageAndSearchRoutes(
     let senderIdFilter = ctx.query.get('sender_id') ? Number(ctx.query.get('sender_id')) : undefined;
     const minDate = ctx.query.get('min_date') ? Number(ctx.query.get('min_date')) : undefined;
     const maxDate = ctx.query.get('max_date') ? Number(ctx.query.get('max_date')) : undefined;
-    const limit = Math.min(100, Math.max(1, Number(ctx.query.get('limit') ?? 50)));
-    const offset = Math.max(0, Number(ctx.query.get('offset') ?? 0));
+    const limit = parseBoundedQueryInt(ctx.query.get('limit'), 50, 1, 100);
+    const offset = parseBoundedQueryInt(ctx.query.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
 
     const parsed = parseSearchQuery(rawQ);
     if (parsed.fromUsername && senderIdFilter === undefined) {
@@ -1267,28 +2002,45 @@ export function registerMessageAndSearchRoutes(
   // AI Compose Assist Endpoint (uses real configured Magpie/Gateway LLM in production)
   router.post('/api/v1/messages/ai-compose', async (ctx) => {
     const auth = requireAuth(db, ctx);
-    const body = await readJsonBody<{ text?: string; mode?: string }>(ctx.req);
-    const text = (body.text ?? '').trim();
-    const mode = body.mode ?? 'improve';
+    const body = await readJsonBody<{ text?: unknown; mode?: unknown }>(ctx.req);
+    const text = readOptionalTrimmedString(body.text, 'invalid_text', 'text must be a string');
+    const mode =
+      readOptionalTrimmedString(body.mode, 'invalid_mode', 'mode must be a string') || 'improve';
     if (!text) {
       throw new ApiError(400, 'empty_text', 'text is required');
     }
 
-    const modeInstruction: Record<string, string> = {
-      translate_zh: 'Translate the following message accurately into natural Simplified Chinese. Output only the translation.',
-      translate_en: 'Translate the following message accurately into natural English. Output only the translation.',
-      shorter: 'Rewrite the following message to be concise while preserving the original meaning and language. Output only the rewritten message.',
-      formal: 'Rewrite the following message in a polite, professional tone in the same language. Output only the rewritten message.',
-      improve: 'Polish and improve the clarity of the following message in the same language. Output only the improved message.',
-    };
+    const defaultInstruction =
+      'Polish and improve the clarity of the following message in the same language. Output only the improved message.';
+    const modeInstruction = new Map<string, string>([
+      [
+        'translate_zh',
+        'Translate the following message accurately into natural Simplified Chinese. Output only the translation.',
+      ],
+      [
+        'translate_en',
+        'Translate the following message accurately into natural English. Output only the translation.',
+      ],
+      [
+        'shorter',
+        'Rewrite the following message to be concise while preserving the original meaning and language. Output only the rewritten message.',
+      ],
+      [
+        'formal',
+        'Rewrite the following message in a polite, professional tone in the same language. Output only the rewritten message.',
+      ],
+      ['improve', defaultInstruction],
+    ]);
+    const systemInstruction = modeInstruction.get(mode) ?? defaultInstruction;
 
+    let llmError: string | undefined;
     if (config) {
       const llmRes = await runConfiguredLlmCompletion(
         db,
         config,
         auth.userId,
         [
-          { role: 'system', content: modeInstruction[mode] ?? modeInstruction.improve },
+          { role: 'system', content: systemInstruction },
           { role: 'user', content: text },
         ],
       );
@@ -1303,29 +2055,15 @@ export function registerMessageAndSearchRoutes(
         });
         return;
       }
-      if (!config.seedDemoData) {
-        throw new ApiError(
-          503,
-          'ai_provider_unconfigured',
-          llmRes.error
-            ? `AI 写作助手调用模型失败：${llmRes.error}`
-            : '请先在 Magpie LLM 网关配置并启用可用的模型提供商后再使用 AI 写作助手。',
-        );
-      }
+      llmError = llmRes.error;
     }
 
-    let result = text;
-    if (mode === 'translate_zh') {
-      result = `[中文翻译] ${text}`;
-    } else if (mode === 'translate_en') {
-      result = `[EN Translation] ${text}`;
-    } else if (mode === 'shorter') {
-      result = text.length > 80 ? `${text.slice(0, 77)}...` : text;
-    } else if (mode === 'formal') {
-      result = `Dear colleague, ${text}`;
-    } else {
-      result = `${text} ✨`;
-    }
-    sendJson(ctx.res, 200, { ok: true, mode, original: text, result });
+    throw new ApiError(
+      503,
+      'ai_provider_unconfigured',
+      llmError
+        ? `AI 写作助手调用模型失败：${llmError}`
+        : '请先在 Magpie LLM 网关配置并启用可用的模型提供商后再使用 AI 写作助手。',
+    );
   });
 }

@@ -7,7 +7,6 @@ import {
   type CallSessionState,
   type CallSignalPayload,
   type DevicePreKeyBundle,
-  type GifResultDto,
   type MediaDescriptor,
   type PublishPreKeysRequest,
   type StickerItemDto,
@@ -17,8 +16,15 @@ import {
   type TurnCredentialsDto,
 } from '@gpui-telegram/protocol';
 import type { ServerConfig } from '../config.js';
-import { createMessageAtomic, getUserProfileDto } from '../db/queries.js';
-import { sha256Hex } from '../utils/crypto.js';
+import {
+  createMessageAtomic,
+  ensureChatMembership,
+  ensureChatWriteAccess,
+  getUserProfileDto,
+  parseOptionalNonNegativeInt,
+  parseOptionalPositiveInt,
+} from '../db/queries.js';
+import { decodeStandardBase64Strict, sha256Hex } from '../utils/crypto.js';
 import {
   ApiError,
   readJsonBody,
@@ -110,16 +116,39 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   router.post('/api/v1/media/upload/init', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      file_name?: string;
-      mime_type?: string;
-      total_size?: number;
-      size_bytes?: number;
-      part_size?: number;
-      expected_sha256?: string;
+      file_name?: unknown;
+      mime_type?: unknown;
+      total_size?: unknown;
+      size_bytes?: unknown;
+      part_size?: unknown;
+      expected_sha256?: unknown;
     }>(ctx.req);
 
-    const totalSize = Math.max(0, Math.trunc(Number(body.total_size ?? body.size_bytes ?? 0)));
-    const partSize = Math.max(1, Math.trunc(Number(body.part_size ?? 524_288)));
+    if (body.file_name !== undefined && body.file_name !== null && typeof body.file_name !== 'string') {
+      throw new ApiError(400, 'invalid_file_name', 'file_name must be a string');
+    }
+    if (body.mime_type !== undefined && body.mime_type !== null && typeof body.mime_type !== 'string') {
+      throw new ApiError(400, 'invalid_mime_type', 'mime_type must be a string');
+    }
+    if (
+      body.expected_sha256 !== undefined &&
+      body.expected_sha256 !== null &&
+      typeof body.expected_sha256 !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_sha256', 'expected_sha256 must be a string');
+    }
+    const totalSize =
+      parseOptionalNonNegativeInt(
+        body.total_size ?? body.size_bytes,
+        'invalid_size',
+        'total_size must be a non-negative integer',
+      ) ?? 0;
+    const partSize =
+      parseOptionalPositiveInt(
+        body.part_size,
+        'invalid_part_size',
+        'part_size must be a positive integer',
+      ) ?? 524_288;
     const totalParts = Math.max(1, Math.ceil(totalSize / partSize));
     const uploadId = `upl_${crypto.randomBytes(10).toString('hex')}`;
 
@@ -132,12 +161,12 @@ export function registerMediaStoriesE2eeAndCallRoutes(
     `).run(
       uploadId,
       auth.userId,
-      body.file_name?.trim() || 'upload.bin',
-      body.mime_type?.trim() || 'application/octet-stream',
+      (typeof body.file_name === 'string' ? body.file_name.trim() : '') || 'upload.bin',
+      (typeof body.mime_type === 'string' ? body.mime_type.trim() : '') || 'application/octet-stream',
       totalSize,
       partSize,
       totalParts,
-      body.expected_sha256?.toLowerCase() ?? null,
+      typeof body.expected_sha256 === 'string' ? body.expected_sha256.toLowerCase() : null,
       Date.now(),
     );
 
@@ -227,15 +256,60 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   const handleCompleteUpload = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      upload_id?: string;
-      width?: number;
-      height?: number;
-      duration_seconds?: number;
-      waveform?: number[];
+      upload_id?: unknown;
+      width?: unknown;
+      height?: unknown;
+      duration_seconds?: unknown;
+      waveform?: unknown;
       has_spoiler?: boolean;
-      expected_sha256?: string;
+      expected_sha256?: unknown;
     }>(ctx.req);
-    const uploadId = ctx.params.uploadId ?? body.upload_id ?? ctx.query.get('upload_id') ?? '';
+    if (body.upload_id !== undefined && body.upload_id !== null && typeof body.upload_id !== 'string') {
+      throw new ApiError(400, 'invalid_upload_id', 'upload_id must be a string');
+    }
+    if (
+      body.expected_sha256 !== undefined &&
+      body.expected_sha256 !== null &&
+      typeof body.expected_sha256 !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_sha256', 'expected_sha256 must be a string');
+    }
+    const width = parseOptionalNonNegativeInt(
+      body.width,
+      'invalid_dimensions',
+      'width must be a non-negative integer',
+    );
+    const height = parseOptionalNonNegativeInt(
+      body.height,
+      'invalid_dimensions',
+      'height must be a non-negative integer',
+    );
+    let durationSecs: number | undefined;
+    if (body.duration_seconds !== undefined && body.duration_seconds !== null) {
+      if (
+        typeof body.duration_seconds !== 'number' ||
+        !Number.isFinite(body.duration_seconds) ||
+        body.duration_seconds < 0
+      ) {
+        throw new ApiError(400, 'invalid_duration', 'duration_seconds must be a non-negative number');
+      }
+      durationSecs = body.duration_seconds;
+    }
+    let waveform: number[] | undefined;
+    if (body.waveform !== undefined && body.waveform !== null) {
+      if (
+        !Array.isArray(body.waveform) ||
+        !body.waveform.every((v) => typeof v === 'number' && Number.isFinite(v))
+      ) {
+        throw new ApiError(400, 'invalid_waveform', 'waveform must be an array of finite numbers');
+      }
+      waveform = body.waveform as number[];
+    }
+    const uploadId =
+      ctx.params.uploadId ??
+      (typeof body.upload_id === 'string' ? body.upload_id : undefined) ??
+      ctx.query.get('upload_id') ??
+      '';
 
     const session = db
       .prepare(`SELECT * FROM media_uploads WHERE upload_id = ? AND user_id = ?`)
@@ -265,7 +339,10 @@ export function registerMediaStoriesE2eeAndCallRoutes(
     const buffers = partRows.map((p) => fs.readFileSync(p.part_path));
     const fullBuffer = Buffer.concat(buffers);
     const actualSha256 = sha256Hex(fullBuffer);
-    const expectedSha = (body.expected_sha256 ?? session.expected_sha256)?.toLowerCase();
+    const expectedSha = (
+      (typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined) ??
+      session.expected_sha256
+    )?.toLowerCase();
 
     if (expectedSha && expectedSha !== actualSha256) {
       throw new ApiError(400, 'sha256_mismatch', 'Assembled file SHA-256 does not match expected hash');
@@ -274,11 +351,11 @@ export function registerMediaStoriesE2eeAndCallRoutes(
     const descriptor = storeCasBlobAndMetadata(db, config, auth.userId, fullBuffer, {
       fileName: session.file_name,
       mimeType: session.mime_type,
-      width: body.width,
-      height: body.height,
-      durationSecs: body.duration_seconds,
-      waveform: body.waveform,
-      hasSpoiler: body.has_spoiler,
+      width,
+      height,
+      durationSecs,
+      waveform,
+      hasSpoiler: Boolean(body.has_spoiler),
     });
 
     // Clean temporary upload parts
@@ -329,20 +406,14 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   router.post('/api/v1/media/:fileId/transcribe', (ctx) => {
     requireAuth(db, ctx);
     const row = db
-      .prepare(`SELECT file_id, file_name, duration_secs FROM media_files WHERE file_id = ?`)
-      .get(ctx.params.fileId!) as { file_id: string; file_name: string; duration_secs: number | null } | undefined;
+      .prepare(`SELECT file_id FROM media_files WHERE file_id = ?`)
+      .get(ctx.params.fileId!) as { file_id: string } | undefined;
     if (!row) throw new ApiError(404, 'media_not_found', 'Media file not found');
-    if (!config.seedDemoData) {
-      throw new ApiError(
-        501,
-        'transcription_not_configured',
-        'Voice transcription service is not configured on this server',
-      );
-    }
-    sendJson(ctx.res, 200, {
-      file_id: row.file_id,
-      transcript: `Voice note transcript (${row.file_name}, ${row.duration_secs ?? 3}s): Verified clear audio stream.`,
-    });
+    throw new ApiError(
+      501,
+      'transcription_not_configured',
+      'Voice transcription service is not configured on this server',
+    );
   });
 
   // 2. HTTP `206 Partial Content` & `416 Range Not Satisfiable` Byte-Range Streaming
@@ -517,19 +588,64 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   router.post('/api/v1/stories', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      media_id?: string;
-      media_file_id?: string;
-      media_type?: string;
-      caption?: string;
-      background_gradient?: string;
-      privacy?: string;
-      ttl_secs?: number;
+      media_id?: unknown;
+      media_file_id?: unknown;
+      media_type?: unknown;
+      caption?: unknown;
+      text_overlay?: unknown;
+      background_gradient?: unknown;
+      privacy?: unknown;
+      ttl_secs?: unknown;
+      ttl_hours?: unknown;
     }>(ctx.req);
+
+    const readOptionalStoryString = (val: unknown, field: string): string | undefined => {
+      if (val === undefined || val === null) {
+        return undefined;
+      }
+      if (typeof val !== 'string') {
+        throw new ApiError(400, 'invalid_story', `${field} must be a string`);
+      }
+      return val;
+    };
+
+    const rawMediaId = readOptionalStoryString(body.media_id, 'media_id');
+    const rawMediaFileId = readOptionalStoryString(body.media_file_id, 'media_file_id');
+    const rawMediaType = readOptionalStoryString(body.media_type, 'media_type');
+    const rawCaption = readOptionalStoryString(body.caption, 'caption');
+    const rawTextOverlay = readOptionalStoryString(body.text_overlay, 'text_overlay');
+    const rawBackgroundGradient = readOptionalStoryString(
+      body.background_gradient,
+      'background_gradient',
+    );
+    const rawPrivacy = readOptionalStoryString(body.privacy, 'privacy');
+
+    let ttlSecs = 86_400;
+    if (body.ttl_secs !== undefined && body.ttl_secs !== null) {
+      if (typeof body.ttl_secs !== 'number' || !Number.isFinite(body.ttl_secs) || body.ttl_secs <= 0) {
+        throw new ApiError(400, 'invalid_story', 'ttl_secs must be a positive number');
+      }
+      ttlSecs = body.ttl_secs;
+    } else if (body.ttl_hours !== undefined && body.ttl_hours !== null) {
+      if (
+        typeof body.ttl_hours !== 'number' ||
+        !Number.isFinite(body.ttl_hours) ||
+        body.ttl_hours <= 0
+      ) {
+        throw new ApiError(400, 'invalid_story', 'ttl_hours must be a positive number');
+      }
+      ttlSecs = body.ttl_hours * 3600;
+    }
 
     const storyId = `story_${crypto.randomBytes(8).toString('hex')}`;
     const now = Date.now();
-    const ttlMs = Math.max(60, Number(body.ttl_secs ?? 86_400)) * 1000;
-    const mediaId = body.media_id ?? body.media_file_id ?? null;
+    const ttlMs = Math.max(60, Math.round(ttlSecs)) * 1000;
+    const mediaId = rawMediaId ?? rawMediaFileId ?? null;
+    const mediaType = rawMediaType ?? (mediaId ? 'photo' : 'gradient_card');
+    const caption = rawCaption ?? rawTextOverlay ?? null;
+    const backgroundGradient =
+      rawBackgroundGradient ?? 'linear-gradient(135deg, #1084FE, #2B5278)';
+    const privacy = rawPrivacy ?? 'everyone';
 
     db.prepare(`
       INSERT INTO stories (
@@ -540,10 +656,10 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       storyId,
       auth.userId,
       mediaId,
-      body.media_type ?? (mediaId ? 'photo' : 'gradient_card'),
-      body.caption ?? null,
-      body.background_gradient ?? 'linear-gradient(135deg, #1084FE, #2B5278)',
-      body.privacy ?? 'everyone',
+      mediaType,
+      caption,
+      backgroundGradient,
+      privacy,
       now,
       now + ttlMs,
     );
@@ -556,10 +672,10 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       username: user?.username,
       firstName: user?.first_name ?? 'User',
       mediaId: mediaId ?? undefined,
-      mediaType: body.media_type ?? (mediaId ? 'photo' : 'gradient_card'),
-      caption: body.caption,
-      backgroundGradient: body.background_gradient ?? 'linear-gradient(135deg, #1084FE, #2B5278)',
-      privacy: body.privacy ?? 'everyone',
+      mediaType,
+      caption: caption ?? undefined,
+      backgroundGradient,
+      privacy,
       viewsCount: 0,
       isViewed: false,
       createdAtMs: now,
@@ -639,49 +755,157 @@ export function registerMediaStoriesE2eeAndCallRoutes(
 
   const handleSearchGifs = (ctx: RequestContext): void => {
     requireAuth(db, ctx);
-    const q = (ctx.query.get('q') ?? '').trim().toLowerCase();
-    if (!config.seedDemoData) {
-      sendJson(ctx.res, 200, { gifs: [], results: [] });
-      return;
-    }
-    const catalog: GifResultDto[] = [
-      { id: 'gif_celebrate', title: 'Celebrate Launch Rocket', file_id: 'gif_celebrate', url: '/api/v1/gifs/svg/celebrate', preview_url: '/api/v1/gifs/svg/celebrate', width: 320, height: 180, mime_type: 'image/svg+xml' },
-      { id: 'gif_thumbsup', title: 'Thumbs Up Approved', file_id: 'gif_thumbsup', url: '/api/v1/gifs/svg/thumbsup', preview_url: '/api/v1/gifs/svg/thumbsup', width: 320, height: 180, mime_type: 'image/svg+xml' },
-      { id: 'gif_coding', title: 'Fast Typing Ship It', file_id: 'gif_coding', url: '/api/v1/gifs/svg/coding', preview_url: '/api/v1/gifs/svg/coding', width: 320, height: 180, mime_type: 'image/svg+xml' },
-    ];
-    const results = q ? catalog.filter((g) => g.title.toLowerCase().includes(q) || g.id.includes(q)) : catalog;
-    sendJson(ctx.res, 200, { gifs: results, results });
+    sendJson(ctx.res, 200, { gifs: [], results: [] });
   };
   router.get('/api/v1/gifs/search', handleSearchGifs);
   router.get('/api/v1/gifs/trending', handleSearchGifs);
 
-  router.get('/api/v1/gifs/svg/:slug', (ctx) => {
-    const slug = ctx.params.slug ?? 'gif';
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" width="320" height="180"><rect width="320" height="180" rx="12" fill="#182533"/><text x="160" y="98" text-anchor="middle" fill="#3390EC" font-family="sans-serif" font-size="22" font-weight="600">GIF · ${slug}</text></svg>`;
-    ctx.res.statusCode = 200;
-    ctx.res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
-    ctx.res.end(svg);
-  });
+  // 5. E2EE X3DH PreKey Directory (Cryptographically verified Ed25519 + ECDSA P-256)
+  const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+  const P256_SPKI_PREFIX = Buffer.from(
+    '3059301306072a8648ce3d020106082a8648ce3d030107034200',
+    'hex',
+  );
 
-  // 5. E2EE X3DH PreKey Directory (`publish`, `count`, `fetch & pop OTPK`)
+  const decodeE2eeKeyStrict = (raw: unknown, field: string): Buffer => {
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new ApiError(400, 'invalid_key_encoding', `${field} must be a non-empty base64 string`);
+    }
+    try {
+      return decodeStandardBase64Strict(raw.trim());
+    } catch {
+      throw new ApiError(400, 'invalid_key_encoding', `${field} has invalid base64 encoding`);
+    }
+  };
+
   router.post('/api/v1/e2ee/prekeys', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<PublishPreKeysRequest>(ctx.req);
-    if (!body.device_id || !body.identity_key || !body.signed_prekey) {
-      throw new ApiError(400, 'invalid_prekeys', 'device_id, identity_key, and signed_prekey are required');
+
+    const headerDeviceId =
+      typeof ctx.req.headers['x-device-id'] === 'string' ? ctx.req.headers['x-device-id'].trim() : '';
+    const deviceId = (typeof body.device_id === 'string' ? body.device_id.trim() : '') || headerDeviceId;
+    if (!deviceId || deviceId.length > 128) {
+      throw new ApiError(400, 'invalid_device_id', 'device_id must be 1..=128 characters');
     }
+
+    if (!body.signed_prekey || typeof body.signed_prekey !== 'object') {
+      throw new ApiError(400, 'invalid_prekeys', 'signed_prekey is required');
+    }
+
+    const ikBytes = decodeE2eeKeyStrict(body.identity_key, 'identity_key');
+    const signingBytes = decodeE2eeKeyStrict(body.identity_signing_key, 'identity_signing_key');
+    const spkPubBytes = decodeE2eeKeyStrict(body.signed_prekey.public_key, 'signed_prekey.public_key');
+    const spkSigBytes = decodeE2eeKeyStrict(body.signed_prekey.signature, 'signed_prekey.signature');
+
+    const otpks = Array.isArray(body.one_time_prekeys) ? body.one_time_prekeys : [];
+    const otpkBuffers = otpks.map((o, idx) =>
+      decodeE2eeKeyStrict(o?.public_key, `one_time_prekeys[${idx}].public_key`),
+    );
+
+    if (signingBytes.length === 32) {
+      // Upstream Rust contract (`routes/e2ee.rs` & `TEST_INFRA.md` A07): 32B X25519 + 32B Ed25519
+      if (
+        ikBytes.length !== 32 ||
+        spkPubBytes.length !== 32 ||
+        spkSigBytes.length !== 64 ||
+        otpkBuffers.some((b) => b.length !== 32)
+      ) {
+        throw new ApiError(
+          400,
+          'invalid_key_length',
+          'Ed25519/X25519 prekey bundle requires 32-byte keys and a 64-byte signature',
+        );
+      }
+      let validSig = false;
+      try {
+        const pubKey = crypto.createPublicKey({
+          key: Buffer.concat([ED25519_SPKI_PREFIX, signingBytes]),
+          format: 'der',
+          type: 'spki',
+        });
+        const signedMsg = Buffer.concat([Buffer.from('gpui-e2ee-spk-v1', 'utf8'), spkPubBytes]);
+        validSig = crypto.verify(null, signedMsg, pubKey, spkSigBytes);
+      } catch {
+        validSig = false;
+      }
+      if (!validSig) {
+        throw new ApiError(
+          400,
+          'invalid_spk_signature',
+          'Signed prekey Ed25519 signature verification failed',
+        );
+      }
+    } else if (signingBytes.length === 65 && signingBytes[0] === 0x04) {
+      // `@gpui-telegram/protocol` WebCrypto P-256 X3DH contract: 65B uncompressed P-256 keys
+      if (
+        ikBytes.length !== 65 ||
+        ikBytes[0] !== 0x04 ||
+        spkPubBytes.length !== 65 ||
+        spkPubBytes[0] !== 0x04 ||
+        spkSigBytes.length < 64 ||
+        otpkBuffers.some((b) => b.length !== 65 || b[0] !== 0x04)
+      ) {
+        throw new ApiError(
+          400,
+          'invalid_key_length',
+          'P-256 prekey bundle requires 65-byte uncompressed keys and a valid ECDSA signature',
+        );
+      }
+      let validSig = false;
+      try {
+        const pubKey = crypto.createPublicKey({
+          key: Buffer.concat([P256_SPKI_PREFIX, signingBytes]),
+          format: 'der',
+          type: 'spki',
+        });
+        const signedMsg = Buffer.concat([
+          Buffer.from('gpui-telegram-x3dh-spk-v1', 'utf8'),
+          spkPubBytes,
+        ]);
+        validSig = crypto.verify(
+          'sha256',
+          signedMsg,
+          {
+            key: pubKey,
+            dsaEncoding: spkSigBytes.length === 64 ? 'ieee-p1363' : 'der',
+          },
+          spkSigBytes,
+        );
+      } catch {
+        validSig = false;
+      }
+      if (!validSig) {
+        throw new ApiError(
+          400,
+          'invalid_spk_signature',
+          'Signed prekey ECDSA P-256 signature verification failed',
+        );
+      }
+    } else {
+      throw new ApiError(
+        400,
+        'invalid_key_length',
+        'identity_signing_key must be 32-byte Ed25519 or 65-byte uncompressed P-256 key',
+      );
+    }
+
+    const storedBundle: PublishPreKeysRequest = {
+      ...body,
+      device_id: deviceId,
+    };
 
     const now = Date.now();
     db.prepare(`
       INSERT OR REPLACE INTO e2ee_prekeys (user_id, device_id, bundle_json, updated_at_ms)
       VALUES (?, ?, ?, ?)
-    `).run(auth.userId, body.device_id, JSON.stringify(body), now);
+    `).run(auth.userId, deviceId, JSON.stringify(storedBundle), now);
 
     sendJson(ctx.res, 200, {
       success: true,
       user_id: auth.userId,
-      device_id: body.device_id,
-      remaining_one_time_prekeys: (body.one_time_prekeys ?? []).length,
+      device_id: deviceId,
+      remaining_one_time_prekeys: otpks.length,
       updated_at_ms: now,
     });
   });
@@ -715,21 +939,38 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   const handleGetUserPreKeys = (ctx: RequestContext): void => {
     requireAuth(db, ctx);
     const targetUserId = Number(ctx.params.userId);
-    const rows = db
-      .prepare(`SELECT device_id, bundle_json FROM e2ee_prekeys WHERE user_id = ?`)
-      .all(targetUserId) as Array<{ device_id: string; bundle_json: string }>;
+    if (!Number.isInteger(targetUserId) || targetUserId <= 0) {
+      throw new ApiError(400, 'invalid_user_id', 'userId must be a positive integer');
+    }
+    const targetUser = db
+      .prepare(`SELECT user_id FROM users WHERE user_id = ?`)
+      .get(targetUserId);
+    if (!targetUser) {
+      throw new ApiError(404, 'user_not_found', `User ${targetUserId} not found`);
+    }
+
+    const deviceFilter = ctx.query.get('device_id')?.trim();
+    const rows = (
+      deviceFilter
+        ? db
+            .prepare(`SELECT device_id, bundle_json FROM e2ee_prekeys WHERE user_id = ? AND device_id = ?`)
+            .all(targetUserId, deviceFilter)
+        : db
+            .prepare(`SELECT device_id, bundle_json FROM e2ee_prekeys WHERE user_id = ?`)
+            .all(targetUserId)
+    ) as Array<{ device_id: string; bundle_json: string }>;
+
+    if (rows.length === 0) {
+      throw new ApiError(404, 'prekeys_not_found', 'No E2EE prekey bundles published for user');
+    }
 
     const devices: DevicePreKeyBundle[] = [];
     for (const r of rows) {
       const stored = JSON.parse(r.bundle_json) as PublishPreKeysRequest;
       const otpk = (stored.one_time_prekeys ?? []).shift();
-      // Persist popped one-time prekey consumption
-      db.prepare(`UPDATE e2ee_prekeys SET bundle_json = ?, updated_at_ms = ? WHERE user_id = ? AND device_id = ?`).run(
-        JSON.stringify(stored),
-        Date.now(),
-        targetUserId,
-        r.device_id,
-      );
+      db.prepare(
+        `UPDATE e2ee_prekeys SET bundle_json = ?, updated_at_ms = ? WHERE user_id = ? AND device_id = ?`,
+      ).run(JSON.stringify(stored), Date.now(), targetUserId, r.device_id);
 
       devices.push({
         user_id: targetUserId,
@@ -745,16 +986,29 @@ export function registerMediaStoriesE2eeAndCallRoutes(
     sendJson(ctx.res, 200, { user_id: targetUserId, devices });
   };
   router.get('/api/v1/e2ee/users/:userId/prekeys', handleGetUserPreKeys);
+  router.get('/api/v1/e2ee/devices/:userId/prekeys', handleGetUserPreKeys);
   router.get('/api/v1/e2ee/prekeys/:userId', handleGetUserPreKeys);
 
-  // 6. WebRTC Calls & Ephemeral HMAC-SHA1 TURN Credentials
+  router.delete('/api/v1/e2ee/devices/:deviceId', (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const deviceId = (ctx.params.deviceId ?? '').trim();
+    const del = db
+      .prepare(`DELETE FROM e2ee_prekeys WHERE user_id = ? AND device_id = ?`)
+      .run(auth.userId, deviceId);
+    if (Number(del.changes) === 0) {
+      throw new ApiError(404, 'device_not_found', 'E2EE device bundle not found');
+    }
+    sendJson(ctx.res, 200, { revoked: true, device_id: deviceId });
+  });
+
+  // 6. WebRTC Calls & Ephemeral HMAC-SHA1 TURN Credentials (signed with `config.turnSecret`)
   const handleTurnCredentials = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const ttlSecs = 3600;
     const expiresAt = Math.floor(Date.now() / 1000) + ttlSecs;
     const username = `${expiresAt}:${auth.userId}`;
     const credential = crypto
-      .createHmac('sha1', config.masterSecret)
+      .createHmac('sha1', config.turnSecret)
       .update(username)
       .digest('base64');
 
@@ -765,9 +1019,7 @@ export function registerMediaStoriesE2eeAndCallRoutes(
     const uris =
       envUris.length > 0
         ? envUris
-        : config.seedDemoData
-          ? ['stun:127.0.0.1:3478', 'turn:127.0.0.1:3478?transport=udp']
-          : ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
+        : ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
 
     const dto: TurnCredentialsDto = {
       username,
@@ -810,17 +1062,38 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   const handleStartCall = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<{
-      callee_id?: number;
-      peer_user_id?: number;
-      chat_id?: number;
+      callee_id?: unknown;
+      peer_user_id?: unknown;
+      chat_id?: unknown;
       is_video?: boolean;
     }>(ctx.req);
 
-    const rawCallee = body.callee_id ?? body.peer_user_id ?? (config.seedDemoData ? 1002 : undefined);
-    if (!rawCallee || !Number.isFinite(Number(rawCallee))) {
+    const rawCallee = body.callee_id ?? body.peer_user_id;
+    if (
+      typeof rawCallee !== 'number' ||
+      !Number.isInteger(rawCallee) ||
+      rawCallee <= 0 ||
+      rawCallee > Number.MAX_SAFE_INTEGER
+    ) {
       throw new ApiError(400, 'missing_callee', 'callee_id or peer_user_id is required to start a call');
     }
-    const calleeId = Number(rawCallee);
+    const calleeId = rawCallee;
+    if (calleeId === auth.userId) {
+      throw new ApiError(400, 'cannot_call_self', 'Cannot place a call to yourself');
+    }
+    const calleeUser = getUserProfileDto(db, calleeId);
+    if (!calleeUser) {
+      throw new ApiError(404, 'callee_not_found', `Target callee user ${calleeId} not found`);
+    }
+    const chatId = parseOptionalPositiveInt(
+      body.chat_id,
+      'invalid_chat_id',
+      'chat_id must be a positive integer',
+    );
+    if (chatId !== undefined) {
+      ensureChatWriteAccess(db, chatId, auth.userId);
+      ensureChatMembership(db, chatId, calleeId);
+    }
     const callId = `call_${crypto.randomBytes(8).toString('hex')}`;
     const now = Date.now();
     const fpHash = crypto.createHash('sha256').update(`call:${callId}:${auth.userId}:${calleeId}`).digest();
@@ -830,11 +1103,11 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       INSERT INTO call_sessions (
         call_id, chat_id, caller_id, callee_id, is_video, state, duration_secs, emoji_fingerprint_json, started_at_ms
       ) VALUES (?, ?, ?, ?, ?, 'ringing', 0, ?, ?)
-    `).run(callId, body.chat_id ?? null, auth.userId, calleeId, body.is_video ? 1 : 0, JSON.stringify(emojiFp), now);
+    `).run(callId, chatId ?? null, auth.userId, calleeId, body.is_video ? 1 : 0, JSON.stringify(emojiFp), now);
 
     const session: CallSessionState = {
       call_id: callId,
-      chat_id: body.chat_id,
+      chat_id: chatId,
       caller_id: auth.userId,
       callee_id: calleeId,
       is_video: Boolean(body.is_video),
@@ -854,7 +1127,7 @@ export function registerMediaStoriesE2eeAndCallRoutes(
           state: 'ringing',
           signal: {
             call_id: callId,
-            chat_id: body.chat_id,
+            chat_id: chatId,
             from_user_id: auth.userId,
             target_user_id: calleeId,
             signal_type: 'ringing',
@@ -869,73 +1142,186 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   router.post('/api/v1/calls/start', handleStartCall);
   router.post('/api/v1/calls/invite', handleStartCall);
 
+  const requireCallParticipant = (callId: string, userId: number): Record<string, unknown> => {
+    const row = db.prepare(`SELECT * FROM call_sessions WHERE call_id = ?`).get(callId) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) {
+      throw new ApiError(404, 'call_not_found', 'Call session not found');
+    }
+    if (Number(row.caller_id) !== userId && Number(row.callee_id) !== userId) {
+      throw new ApiError(403, 'forbidden', 'You are not a participant of this call');
+    }
+    return row;
+  };
+
   const handleCallSignal = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
     const body = await readJsonBody<CallSignalPayload>(ctx.req);
-    const callId = ctx.params.callId ?? body.call_id;
+    const rawCallId: unknown = ctx.params.callId ?? body.call_id;
+    if (rawCallId !== undefined && rawCallId !== null && typeof rawCallId !== 'string') {
+      throw new ApiError(400, 'invalid_call_id', 'call_id must be a string');
+    }
+    if (
+      body.signal_type !== undefined &&
+      body.signal_type !== null &&
+      typeof body.signal_type !== 'string'
+    ) {
+      throw new ApiError(400, 'invalid_signal_type', 'signal_type must be a string');
+    }
+    const sigChatId = parseOptionalPositiveInt(
+      body.chat_id,
+      'invalid_chat_id',
+      'chat_id must be a positive integer',
+    );
+    const sigTargetUserId = parseOptionalPositiveInt(
+      body.target_user_id,
+      'invalid_target_user_id',
+      'target_user_id must be a positive integer',
+    );
+    const callId = typeof rawCallId === 'string' ? rawCallId.trim() : '';
     const sig: CallSignalPayload = {
       ...body,
+      chat_id: sigChatId,
+      target_user_id: sigTargetUserId,
       call_id: callId,
       from_user_id: auth.userId,
     };
 
-    if (sig.signal_type === 'accept' || sig.signal_type === 'answer') {
-      db.prepare(`UPDATE call_sessions SET state = 'active' WHERE call_id = ?`).run(callId);
+    let callRow: Record<string, unknown> | undefined;
+    if (callId) {
+      callRow = requireCallParticipant(callId, auth.userId);
+    }
+    if (sigChatId !== undefined) {
+      ensureChatWriteAccess(db, sigChatId, auth.userId);
     }
 
-    if (sig.target_user_id) {
-      hub.sendToUser(Number(sig.target_user_id), {
+    if (callId && (sig.signal_type === 'accept' || sig.signal_type === 'answer')) {
+      if (callRow && String(callRow.state) === 'ended') {
+        throw new ApiError(
+          409,
+          'call_already_ended',
+          'Cannot accept or answer an ended call',
+        );
+      }
+      const upd = db
+        .prepare(`UPDATE call_sessions SET state = 'active' WHERE call_id = ? AND state != 'ended'`)
+        .run(callId);
+      if (Number(upd.changes) === 0) {
+        throw new ApiError(
+          409,
+          'call_already_ended',
+          'Cannot accept or answer an ended call',
+        );
+      }
+    }
+
+    if (sigTargetUserId !== undefined) {
+      hub.sendToUser(sigTargetUserId, {
         type: 'Update',
         payload: { type: 'CallSignal', data: sig },
       });
-    } else if (sig.chat_id) {
-      hub.broadcastChatEphemeral(Number(sig.chat_id), { type: 'CallSignal', data: sig }, auth.userId);
+    } else if (sigChatId !== undefined) {
+      hub.broadcastChatEphemeral(sigChatId, { type: 'CallSignal', data: sig }, auth.userId);
     }
-    sendJson(ctx.res, 200, { ok: true, call_id: callId });
+    sendJson(ctx.res, 200, { ok: true, call_id: callId || undefined });
   };
   router.post('/api/v1/calls/signal', handleCallSignal);
   router.post('/api/v1/calls/:callId/signal', handleCallSignal);
 
   router.post('/api/v1/calls/:callId/accept', (ctx) => {
-    requireAuth(db, ctx);
+    const auth = requireAuth(db, ctx);
     const callId = ctx.params.callId!;
-    db.prepare(`UPDATE call_sessions SET state = 'active' WHERE call_id = ?`).run(callId);
+    const row = requireCallParticipant(callId, auth.userId);
+    if (String(row.state) === 'ended') {
+      throw new ApiError(409, 'call_already_ended', 'Cannot accept an ended call');
+    }
+    const upd = db
+      .prepare(`UPDATE call_sessions SET state = 'active' WHERE call_id = ? AND state != 'ended'`)
+      .run(callId);
+    if (Number(upd.changes) === 0) {
+      throw new ApiError(409, 'call_already_ended', 'Cannot accept an ended call');
+    }
     sendJson(ctx.res, 200, { ok: true, call_id: callId, state: 'active' });
   });
 
   router.post('/api/v1/calls/:callId/end', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const callId = ctx.params.callId!;
-    const body = await readJsonBody<{ rating?: number; duration_secs?: number }>(ctx.req);
-    const row = db.prepare(`SELECT * FROM call_sessions WHERE call_id = ?`).get(callId) as
-      | Record<string, unknown>
-      | undefined;
-    if (!row) throw new ApiError(404, 'call_not_found', 'Call session not found');
+    const body = await readJsonBody<{
+      rating?: unknown;
+      duration_secs?: unknown;
+      comment?: unknown;
+    }>(ctx.req);
 
+    let providedDurationSecs: number | undefined;
+    if (body.duration_secs !== undefined && body.duration_secs !== null) {
+      if (
+        typeof body.duration_secs !== 'number' ||
+        !Number.isFinite(body.duration_secs) ||
+        body.duration_secs < 0
+      ) {
+        throw new ApiError(400, 'invalid_duration', 'duration_secs must be a non-negative number');
+      }
+      providedDurationSecs = Math.trunc(body.duration_secs);
+    }
+    let validatedRating: number | undefined;
+    if (body.rating !== undefined && body.rating !== null) {
+      if (
+        typeof body.rating !== 'number' ||
+        !Number.isInteger(body.rating) ||
+        body.rating < 1 ||
+        body.rating > 5
+      ) {
+        throw new ApiError(400, 'invalid_rating', 'rating must be an integer between 1 and 5');
+      }
+      validatedRating = body.rating;
+    }
+    if (body.comment !== undefined && body.comment !== null && typeof body.comment !== 'string') {
+      throw new ApiError(400, 'invalid_comment', 'comment must be a string');
+    }
+
+    const row = requireCallParticipant(callId, auth.userId);
+
+    if (row.chat_id !== undefined && row.chat_id !== null) {
+      ensureChatWriteAccess(db, Number(row.chat_id), auth.userId);
+    }
+
+    const alreadyEnded = String(row.state) === 'ended';
     const now = Date.now();
-    const durationSecs =
-      body.duration_secs ?? Math.max(1, Math.round((now - Number(row.started_at_ms)) / 1000));
+    const durationSecs = alreadyEnded
+      ? Number(row.duration_secs ?? 0)
+      : (providedDurationSecs ?? Math.max(1, Math.round((now - Number(row.started_at_ms)) / 1000)));
 
-    db.prepare(`
-      UPDATE call_sessions
-      SET state = 'ended', duration_secs = ?, rating = COALESCE(?, rating), ended_at_ms = ?
-      WHERE call_id = ?
-    `).run(durationSecs, body.rating ?? null, now, callId);
+    if (!alreadyEnded) {
+      const updateRes = db
+        .prepare(`
+          UPDATE call_sessions
+          SET state = 'ended', duration_secs = ?, rating = COALESCE(?, rating), ended_at_ms = ?
+          WHERE call_id = ? AND state != 'ended'
+        `)
+        .run(durationSecs, validatedRating ?? null, now, callId);
 
-    if (row.chat_id) {
-      createMessageAtomic(db, hub, {
-        chatId: Number(row.chat_id),
-        senderId: auth.userId,
-        content: {
-          type: 'Service',
-          data: {
-            kind: 'call_ended',
-            call_id: callId,
-            duration_secs: durationSecs,
-            is_video: Boolean(row.is_video),
+      if (Number(updateRes.changes) === 1 && row.chat_id !== undefined && row.chat_id !== null) {
+        createMessageAtomic(db, hub, {
+          chatId: Number(row.chat_id),
+          senderId: auth.userId,
+          content: {
+            type: 'Service',
+            data: {
+              kind: 'call_ended',
+              call_id: callId,
+              duration_secs: durationSecs,
+              is_video: Boolean(row.is_video),
+            },
           },
-        },
-      });
+        });
+      }
+    } else if (validatedRating !== undefined) {
+      db.prepare(`UPDATE call_sessions SET rating = COALESCE(?, rating) WHERE call_id = ?`).run(
+        validatedRating,
+        callId,
+      );
     }
 
     sendJson(ctx.res, 200, {
@@ -943,15 +1329,33 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       call_id: callId,
       state: 'ended',
       duration_secs: durationSecs,
-      rating: body.rating,
+      rating:
+        validatedRating ??
+        (row.rating !== null && row.rating !== undefined ? Number(row.rating) : undefined),
     });
   });
 
   router.post('/api/v1/calls/:callId/rate', async (ctx) => {
-    requireAuth(db, ctx);
-    const body = await readJsonBody<{ rating?: number }>(ctx.req);
-    const rating = Math.max(1, Math.min(5, Math.trunc(Number(body.rating ?? 5))));
-    db.prepare(`UPDATE call_sessions SET rating = ? WHERE call_id = ?`).run(rating, ctx.params.callId!);
+    const auth = requireAuth(db, ctx);
+    const callId = ctx.params.callId!;
+    requireCallParticipant(callId, auth.userId);
+    const body = await readJsonBody<{ rating?: unknown; comment?: unknown }>(ctx.req);
+    let rating = 5;
+    if (body.rating !== undefined && body.rating !== null) {
+      if (
+        typeof body.rating !== 'number' ||
+        !Number.isInteger(body.rating) ||
+        body.rating < 1 ||
+        body.rating > 5
+      ) {
+        throw new ApiError(400, 'invalid_rating', 'rating must be an integer between 1 and 5');
+      }
+      rating = body.rating;
+    }
+    if (body.comment !== undefined && body.comment !== null && typeof body.comment !== 'string') {
+      throw new ApiError(400, 'invalid_comment', 'comment must be a string');
+    }
+    db.prepare(`UPDATE call_sessions SET rating = ? WHERE call_id = ?`).run(rating, callId);
     sendJson(ctx.res, 200, { ok: true, rating });
   });
 }

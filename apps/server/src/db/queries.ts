@@ -1,3 +1,7 @@
+import dns from 'node:dns';
+import http from 'node:http';
+import https from 'node:https';
+import net from 'node:net';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   extractPlainTextFromContent,
@@ -26,6 +30,104 @@ import {
   type WirePeerId,
 } from '@gpui-telegram/protocol';
 import { ApiError } from '../utils/http.js';
+
+export function parseOptionalPositiveInt(
+  val: unknown,
+  errorCode: string,
+  message: string,
+): number | undefined {
+  if (val === undefined || val === null) {
+    return undefined;
+  }
+  if (
+    typeof val !== 'number' ||
+    !Number.isInteger(val) ||
+    val < 1 ||
+    val > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new ApiError(400, errorCode, message);
+  }
+  return val;
+}
+
+export function parseOptionalNonNegativeInt(
+  val: unknown,
+  errorCode: string,
+  message: string,
+): number | undefined {
+  if (val === undefined || val === null) {
+    return undefined;
+  }
+  if (
+    typeof val !== 'number' ||
+    !Number.isInteger(val) ||
+    val < 0 ||
+    val > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new ApiError(400, errorCode, message);
+  }
+  return val;
+}
+
+export function parseBoundedQueryInt(
+  raw: string | null,
+  defaultVal: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = raw !== null && raw.trim() !== '' ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, Math.trunc(parsed))) : defaultVal;
+}
+
+export function validateWireMessageContent(raw: unknown): MessageContent {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ApiError(400, 'invalid_content', 'Message content must be a JSON object');
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.type !== 'string' || !obj.type.trim()) {
+    throw new ApiError(
+      400,
+      'invalid_content',
+      'Message content.type must be a non-empty string',
+    );
+  }
+  if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
+    throw new ApiError(400, 'invalid_content', 'Message content.data must be a JSON object');
+  }
+  if (obj.type === 'Text') {
+    const dataObj = obj.data as Record<string, unknown>;
+    if (typeof dataObj.text !== 'string') {
+      throw new ApiError(400, 'invalid_content', 'Text content data.text must be a string');
+    }
+    if (
+      dataObj.entities !== undefined &&
+      dataObj.entities !== null &&
+      !Array.isArray(dataObj.entities)
+    ) {
+      throw new ApiError(400, 'invalid_content', 'Text content data.entities must be an array');
+    }
+  }
+  return obj as unknown as MessageContent;
+}
+
+export function safeExtractPlainTextFromContent(content: unknown): string {
+  if (!content || typeof content !== 'object' || Array.isArray(content)) {
+    return '';
+  }
+  const obj = content as { type?: unknown; data?: unknown };
+  if (typeof obj.type !== 'string') {
+    return '';
+  }
+  if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
+    return '';
+  }
+  try {
+    const extracted = extractPlainTextFromContent(content as MessageContent);
+    return typeof extracted === 'string' ? extracted : '';
+  } catch {
+    return '';
+  }
+}
 
 export function peerIdForChat(chatId: number, chatType: number, peerUserId?: number | null): WirePeerId {
   if (chatType === 0 && peerUserId) {
@@ -64,31 +166,194 @@ export function mapUserRowToDto(row: Record<string, unknown>): UserProfileDto {
   };
 }
 
-export function ensureChatMembership(db: DatabaseSync, chatId: number, userId: number): void {
-  const chat = db.prepare(`SELECT chat_id, chat_type FROM chats WHERE chat_id = ?`).get(chatId) as
-    | { chat_id: number; chat_type: number }
+export interface ChatAccessContext {
+  chatId: number;
+  chatType: number;
+  creatorId: number;
+  username: string | null;
+  role: string | null;
+  adminRights: number;
+  bannedRights: number;
+  isMember: boolean;
+  isOwner: boolean;
+  isAdmin: boolean;
+  isPublicChannel: boolean;
+}
+
+/**
+ * Read access guard:
+ * - Missing chat -> 404
+ * - Banned user -> 403 (even on public channels)
+ * - Public channel (chat_type === 3 with non-empty username) -> readable by non-members
+ * - Private channel (no username) and all other chats -> strictly requires active membership (403)
+ */
+export function ensureChatReadAccess(
+  db: DatabaseSync,
+  chatId: number,
+  userId: number,
+): ChatAccessContext {
+  const chat = db
+    .prepare(`SELECT chat_id, chat_type, creator_id, username FROM chats WHERE chat_id = ?`)
+    .get(chatId) as
+    | { chat_id: number; chat_type: number; creator_id: number; username: string | null }
     | undefined;
   if (!chat) {
     throw new ApiError(404, 'chat_not_found', `Chat ${chatId} not found`);
   }
+
   const mem = db
-    .prepare(`SELECT role, banned_rights FROM chat_members WHERE chat_id = ? AND user_id = ?`)
-    .get(chatId, userId) as { role: string; banned_rights: number } | undefined;
-  if (!mem) {
-    // Allow public channels read/join or auto-enroll demo users in public channels
-    if (Number(chat.chat_type) === 3) {
-      return;
-    }
-    throw new ApiError(403, 'forbidden', 'You are not a member of this chat');
-  }
-  if (mem.role === 'banned') {
+    .prepare(
+      `SELECT role, admin_rights, banned_rights FROM chat_members WHERE chat_id = ? AND user_id = ?`,
+    )
+    .get(chatId, userId) as
+    | { role: string; admin_rights: number; banned_rights: number }
+    | undefined;
+
+  if (mem?.role === 'banned') {
     throw new ApiError(403, 'banned_in_chat', 'You are banned from this chat');
   }
+
+  const chatType = Number(chat.chat_type);
+  const creatorId = Number(chat.creator_id);
+  const username = chat.username && String(chat.username).trim().length > 0 ? String(chat.username).trim() : null;
+  const isMember = Boolean(mem && !['banned', 'left', 'kicked'].includes(mem.role));
+  const isOwner =
+    isMember &&
+    (mem!.role === 'owner' || (creatorId === userId && [1, 2, 3].includes(chatType)));
+  const isAdmin = isOwner || (isMember && mem!.role === 'admin');
+  const isPublicChannel = chatType === 3 && username !== null;
+
+  if (!isMember && !isPublicChannel) {
+    throw new ApiError(403, 'forbidden', 'You are not a member of this chat');
+  }
+
+  return {
+    chatId: Number(chat.chat_id),
+    chatType,
+    creatorId,
+    username,
+    role: mem?.role ?? null,
+    adminRights: Number(mem?.admin_rights ?? 0),
+    bannedRights: Number(mem?.banned_rights ?? 0),
+    isMember,
+    isOwner,
+    isAdmin,
+    isPublicChannel,
+  };
+}
+
+/**
+ * Strict active membership guard (zero non-member bypass, even for public channels).
+ */
+export function ensureChatMembership(
+  db: DatabaseSync,
+  chatId: number,
+  userId: number,
+): ChatAccessContext {
+  const access = ensureChatReadAccess(db, chatId, userId);
+  if (!access.isMember) {
+    throw new ApiError(403, 'forbidden', 'You are not a member of this chat');
+  }
+  return access;
+}
+
+/**
+ * Write access guard:
+ * - Requires active membership
+ * - Channels (chat_type === 3) strictly require owner/admin role (403 for subscribers/non-members)
+ * - Restricted users with bit 0x01 cannot send messages (403)
+ * - Blocked 1-on-1 / secret chats return 403 user_is_blocked
+ */
+export function ensureChatWriteAccess(
+  db: DatabaseSync,
+  chatId: number,
+  userId: number,
+): ChatAccessContext {
+  const access = ensureChatMembership(db, chatId, userId);
+  if (access.chatType === 3 && !access.isAdmin) {
+    throw new ApiError(
+      403,
+      'channel_write_forbidden',
+      'Only channel owners or admins can post in this channel',
+    );
+  }
+  if (access.role === 'restricted' && (access.bannedRights & 1) !== 0) {
+    throw new ApiError(403, 'forbidden', 'You are restricted from sending messages in this chat');
+  }
+  if (access.chatType === 0 || access.chatType === 4) {
+    const peer = db
+      .prepare(`SELECT user_id FROM chat_members WHERE chat_id = ? AND user_id != ? LIMIT 1`)
+      .get(chatId, userId) as { user_id: number } | undefined;
+    if (peer) {
+      const peerId = Number(peer.user_id);
+      const blocked = db
+        .prepare(
+          `SELECT 1 FROM user_blocks
+           WHERE (owner_user_id = ? AND blocked_user_id = ?)
+              OR (owner_user_id = ? AND blocked_user_id = ?)
+           LIMIT 1`,
+        )
+        .get(userId, peerId, peerId, userId);
+      if (blocked) {
+        throw new ApiError(403, 'user_is_blocked', 'Cannot send messages in a blocked chat');
+      }
+    }
+  }
+  return access;
+}
+
+/**
+ * Admin access guard for groups, supergroups, and channels (`chat_type in [1, 2, 3]`).
+ */
+export function ensureChatAdminAccess(
+  db: DatabaseSync,
+  chatId: number,
+  userId: number,
+): ChatAccessContext {
+  const access = ensureChatMembership(db, chatId, userId);
+  if ([1, 2, 3].includes(access.chatType) && !access.isAdmin) {
+    throw new ApiError(403, 'admin_required', 'Only chat owners or admins can perform this action');
+  }
+  return access;
+}
+
+export function validateSendAsPeerId(
+  db: DatabaseSync,
+  userId: number,
+  rawPeerId: unknown,
+): number | undefined {
+  const peerId = parseOptionalPositiveInt(
+    rawPeerId,
+    'invalid_send_as_peer',
+    'send_as_peer_id must be a positive integer',
+  );
+  if (peerId === undefined) {
+    return undefined;
+  }
+  if (peerId === userId) {
+    return peerId;
+  }
+  let peerAccess: ChatAccessContext;
+  try {
+    peerAccess = ensureChatAdminAccess(db, peerId, userId);
+  } catch {
+    throw new ApiError(403, 'forbidden', 'You are not allowed to send as this peer');
+  }
+  if (peerAccess.chatType !== 3 || !peerAccess.isAdmin) {
+    throw new ApiError(
+      403,
+      'forbidden',
+      'send_as_peer_id must be your own user ID or a channel you administer',
+    );
+  }
+  return peerId;
 }
 
 export function getChatMemberIds(db: DatabaseSync, chatId: number): number[] {
   const rows = db
-    .prepare(`SELECT user_id FROM chat_members WHERE chat_id = ? AND role != 'banned'`)
+    .prepare(
+      `SELECT user_id FROM chat_members WHERE chat_id = ? AND role NOT IN ('banned', 'left', 'kicked')`,
+    )
     .all(chatId) as Array<{ user_id: number }>;
   return rows.map((r) => Number(r.user_id));
 }
@@ -401,7 +666,7 @@ export function hydrateMessageRow(
     date_ms: dateMs,
     edit_date: row.edit_date_ms ? new Date(Number(row.edit_date_ms)).toISOString() : undefined,
     isEdited: flags.is_edited,
-    text: String(row.text_plain ?? extractPlainTextFromContent(content)),
+    text: String(row.text_plain ?? safeExtractPlainTextFromContent(content)),
     entities,
     content,
     reply_to: replyTo,
@@ -442,27 +707,658 @@ export function getMessageById(
   return hydrateMessageRow(db, row, viewerUserId);
 }
 
-export function synthesizeWebPagePreview(text: string): WebPagePreview | undefined {
+// ============================================================================
+// Genuine SSRF-Hardened OpenGraph Link Preview Fetching (Zero Fabrication)
+// ============================================================================
+
+export function extractFirstHttpUrl(text: string): string | null {
   const m = /https?:\/\/[^\s<>()]+/i.exec(text);
-  if (!m) return undefined;
-  const rawUrl = m[0].replace(/[.,!?;:'"\]}]+$/, '');
-  try {
-    const parsed = new URL(rawUrl);
-    return {
-      url: rawUrl,
-      display_url: `${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`,
-      site_name: parsed.hostname,
-      title: `Article on ${parsed.hostname}`,
-      description: `Preview & Instant View reader summary for ${rawUrl}`,
-      instant_view_available: true,
-      instant_view_blocks: [
-        { kind: 'heading', text: `Instant View — ${parsed.hostname}` },
-        { kind: 'paragraph', text: `Clean reader view generated for ${rawUrl}.` },
-      ],
-    };
-  } catch {
+  if (!m) return null;
+  const cleaned = m[0].replace(/[.,!?;:'"\]})>]+$/, '');
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+function isBlockedIpv4Octets(a: number, b: number, c: number, _d: number): boolean {
+  if (a === 0) return true; // 0.0.0.0/8
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 (CGNAT)
+  if (a === 127) return true; // 127.0.0.0/8 (loopback)
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 (link-local / cloud metadata)
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24
+  if (a === 192 && b === 0 && c === 2) return true; // 192.0.2.0/24
+  if (a === 192 && b === 88 && c === 99) return true; // 192.88.99.0/24 (6to4 relay anycast)
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15
+  if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24
+  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24
+  if (a >= 224) return true; // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved
+  return false;
+}
+
+function parseIpv6ToGroups(raw: string): Uint16Array | null {
+  const lower = raw.toLowerCase();
+  const doubleColonParts = lower.split('::');
+  if (doubleColonParts.length > 2) return null;
+
+  const parseSegmentList = (seg: string): number[] | null => {
+    if (!seg) return [];
+    const tokens = seg.split(':');
+    const out: number[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i]!;
+      if (tok.includes('.')) {
+        if (i !== tokens.length - 1) return null;
+        const octets = tok.split('.').map((p) => Number.parseInt(p, 10));
+        if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+          return null;
+        }
+        out.push(((octets[0]! << 8) | octets[1]!) >>> 0);
+        out.push(((octets[2]! << 8) | octets[3]!) >>> 0);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(tok)) return null;
+        out.push(Number.parseInt(tok, 16));
+      }
+    }
+    return out;
+  };
+
+  const left = parseSegmentList(doubleColonParts[0] ?? '');
+  if (!left) return null;
+
+  if (doubleColonParts.length === 1) {
+    if (left.length !== 8) return null;
+    return Uint16Array.from(left);
+  }
+
+  const right = parseSegmentList(doubleColonParts[1] ?? '');
+  if (!right) return null;
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) return null;
+
+  const groups = new Uint16Array(8);
+  for (let i = 0; i < left.length; i++) groups[i] = left[i]!;
+  for (let i = 0; i < right.length; i++) groups[left.length + missing + i] = right[i]!;
+  return groups;
+}
+
+/**
+ * Strictly fail-closed IPv4/IPv6 SSRF address filter.
+ * Blocks all loopback, private, CGNAT, link-local, metadata, ULA, NAT64, multicast,
+ * documentation, IPv4-mapped IPv6, and unparseable addresses.
+ */
+export function isBlockedIpAddress(rawIp: string): boolean {
+  let ip = rawIp.trim();
+  if (ip.startsWith('[') && ip.endsWith(']')) {
+    ip = ip.slice(1, -1);
+  }
+  const zoneIdx = ip.indexOf('%');
+  if (zoneIdx !== -1) {
+    ip = ip.slice(0, zoneIdx);
+  }
+  const family = net.isIP(ip);
+  if (family === 0) return true;
+
+  if (family === 4) {
+    const parts = ip.split('.').map((p) => Number.parseInt(p, 10));
+    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+      return true;
+    }
+    return isBlockedIpv4Octets(parts[0]!, parts[1]!, parts[2]!, parts[3]!);
+  }
+
+  const g = parseIpv6ToGroups(ip);
+  if (!g) return true;
+
+  const g0 = g[0]!;
+  const g1 = g[1]!;
+  const g2 = g[2]!;
+  const g3 = g[3]!;
+  const g4 = g[4]!;
+  const g5 = g[5]!;
+  const g6 = g[6]!;
+  const g7 = g[7]!;
+
+  // ::/128, ::1/128, IPv4-compatible ::/96
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return true;
+  }
+  // IPv4-mapped IPv6 ::ffff:0:0/96 -> validate embedded IPv4
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+    return isBlockedIpv4Octets(g6 >>> 8, g6 & 0xff, g7 >>> 8, g7 & 0xff);
+  }
+  // IPv4-translated ::ffff:0:0:0/96
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0xffff && g5 === 0) {
+    return true;
+  }
+  // NAT64 well-known & local-use prefixes 64:ff9b::/96, 64:ff9b:1::/48
+  if (g0 === 0x0064 && g1 === 0xff9b) {
+    return true;
+  }
+  // Discard 100::/64
+  if (g0 === 0x0100 && g1 === 0 && g2 === 0 && g3 === 0) {
+    return true;
+  }
+  // Teredo 2001::/32
+  if (g0 === 0x2001 && g1 === 0x0000) {
+    return true;
+  }
+  // Documentation 2001:db8::/32
+  if (g0 === 0x2001 && g1 === 0x0db8) {
+    return true;
+  }
+  // 6to4 2002::/16
+  if (g0 === 0x2002) {
+    return true;
+  }
+  // Unique Local fc00::/7
+  if ((g0 & 0xfe00) === 0xfc00) {
+    return true;
+  }
+  // Link-local fe80::/10 & deprecated site-local fec0::/10
+  if ((g0 & 0xffc0) === 0xfe80 || (g0 & 0xffc0) === 0xfec0) {
+    return true;
+  }
+  // Multicast ff00::/8
+  if ((g0 & 0xff00) === 0xff00) {
+    return true;
+  }
+  return false;
+}
+
+function isBlockedHostname(rawHostname: string): boolean {
+  const host = rawHostname.trim().toLowerCase().replace(/\.+$/, '');
+  if (!host) return true;
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host === 'metadata.google.internal'
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function decodeHtmlEntities(input: string): string {
+  return input.replace(
+    /&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos|nbsp);/gi,
+    (_match, entity: string) => {
+      const lower = entity.toLowerCase();
+      switch (lower) {
+        case 'amp':
+          return '&';
+        case 'lt':
+          return '<';
+        case 'gt':
+          return '>';
+        case 'quot':
+          return '"';
+        case 'apos':
+          return "'";
+        case 'nbsp':
+          return ' ';
+        default: {
+          if (lower.startsWith('#x')) {
+            const code = Number.parseInt(lower.slice(2), 16);
+            return Number.isFinite(code) &&
+              code > 0 &&
+              code <= 0x10ffff &&
+              (code < 0xd800 || code > 0xdfff)
+              ? String.fromCodePoint(code)
+              : '';
+          }
+          if (lower.startsWith('#')) {
+            const code = Number.parseInt(lower.slice(1), 10);
+            return Number.isFinite(code) &&
+              code > 0 &&
+              code <= 0x10ffff &&
+              (code < 0xd800 || code > 0xdfff)
+              ? String.fromCodePoint(code)
+              : '';
+          }
+          return _match;
+        }
+      }
+    },
+  );
+}
+
+function parseHtmlAttributes(tagInner: string): Record<string, string> {
+  const attrs: Record<string, string> = Object.create(null) as Record<string, string>;
+  const attrRe = /([a-zA-Z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+  let m: RegExpExecArray | null;
+  while ((m = attrRe.exec(tagInner)) !== null) {
+    const key = m[1]!.toLowerCase();
+    const val = m[2] ?? m[3] ?? m[4] ?? '';
+    attrs[key] = val;
+  }
+  return attrs;
+}
+
+function parseOpenGraphFromHtml(html: string, finalUrl: URL): WebPagePreview | undefined {
+  const metaByKey = new Map<string, string>();
+  const metaRe = /<meta\b([^>]{1,4096})>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = metaRe.exec(html)) !== null) {
+    const attrs = parseHtmlAttributes(match[1]!);
+    const key = (attrs.property ?? attrs.name ?? '').trim().toLowerCase();
+    const content = attrs.content?.trim();
+    if (key && content && !metaByKey.has(key)) {
+      metaByKey.set(key, decodeHtmlEntities(content));
+    }
+  }
+
+  let htmlTitle = '';
+  const titleMatch = /<title\b[^>]*>([\s\S]{1,1024}?)<\/title>/i.exec(html);
+  if (titleMatch?.[1]) {
+    htmlTitle = decodeHtmlEntities(titleMatch[1]).replace(/\s+/g, ' ').trim();
+  }
+
+  const rawTitle = (
+    metaByKey.get('og:title') ??
+    metaByKey.get('twitter:title') ??
+    htmlTitle
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+  const rawDescription = (
+    metaByKey.get('og:description') ??
+    metaByKey.get('twitter:description') ??
+    metaByKey.get('description') ??
+    ''
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Zero-fabrication invariant: if neither genuine title nor description was found, return undefined!
+  if (!rawTitle && !rawDescription) {
     return undefined;
   }
+
+  const rawSiteName = (metaByKey.get('og:site_name') ?? finalUrl.hostname)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const title = rawTitle ? rawTitle.slice(0, 200) : undefined;
+  const description = rawDescription ? rawDescription.slice(0, 400) : undefined;
+  const siteName = rawSiteName ? rawSiteName.slice(0, 120) : finalUrl.hostname;
+  const displayPath = finalUrl.pathname === '/' ? '' : finalUrl.pathname;
+
+  return {
+    url: finalUrl.toString(),
+    display_url: `${finalUrl.host}${displayPath}`,
+    site_name: siteName,
+    title,
+    description,
+    instant_view_available: false,
+  };
+}
+
+export interface OpenGraphHttpResponse {
+  statusCode: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string | Buffer | AsyncIterable<Buffer | string>;
+}
+
+export interface OpenGraphFetchOptions {
+  timeoutMs?: number;
+  maxBytes?: number;
+  maxRedirects?: number;
+  signal?: AbortSignal;
+  lookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  requestImpl?: (params: {
+    url: URL;
+    resolvedAddress: string;
+    resolvedFamily: number;
+    headers: Record<string, string>;
+    signal: AbortSignal;
+  }) => Promise<OpenGraphHttpResponse>;
+}
+
+async function defaultPinnedOpenGraphRequest(params: {
+  url: URL;
+  resolvedAddress: string;
+  resolvedFamily: number;
+  headers: Record<string, string>;
+  signal: AbortSignal;
+}): Promise<OpenGraphHttpResponse> {
+  const { url, resolvedAddress, resolvedFamily, headers, signal } = params;
+  const isHttps = url.protocol === 'https:';
+  const port = url.port ? Number(url.port) : isHttps ? 443 : 80;
+  const pinnedLookup = (
+    _hostname: string,
+    optsOrCb: unknown,
+    maybeCb?: (
+      err: NodeJS.ErrnoException | null,
+      address: string | dns.LookupAddress[],
+      family?: number,
+    ) => void,
+  ) => {
+    const cb =
+      typeof optsOrCb === 'function'
+        ? (optsOrCb as (
+            err: NodeJS.ErrnoException | null,
+            address: string | dns.LookupAddress[],
+            family?: number,
+          ) => void)
+        : maybeCb!;
+    const wantsAll =
+      typeof optsOrCb === 'object' &&
+      optsOrCb !== null &&
+      Boolean((optsOrCb as { all?: boolean }).all);
+    if (wantsAll) {
+      cb(null, [{ address: resolvedAddress, family: resolvedFamily }]);
+    } else {
+      cb(null, resolvedAddress, resolvedFamily);
+    }
+  };
+
+  return new Promise<OpenGraphHttpResponse>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error('OpenGraph fetch aborted'));
+      return;
+    }
+    const rawHost = url.hostname.replace(/^\[|\]$/g, '');
+    const req = (isHttps ? https.request : http.request)(
+      {
+        protocol: url.protocol,
+        hostname: rawHost,
+        port,
+        method: 'GET',
+        path: `${url.pathname}${url.search}`,
+        agent: false,
+        headers: {
+          ...headers,
+          Host: url.host,
+        },
+        lookup: pinnedLookup as unknown as http.RequestOptions['lookup'],
+        ...(isHttps ? { servername: net.isIP(rawHost) === 0 ? rawHost : undefined } : {}),
+      },
+      (res) => {
+        resolve({
+          statusCode: res.statusCode ?? 0,
+          headers: res.headers,
+          body: res,
+        });
+      },
+    );
+
+    const onAbort = () => {
+      req.destroy(new Error('OpenGraph fetch aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    req.on('close', () => {
+      signal.removeEventListener('abort', onAbort);
+    });
+    req.on('error', (err) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(err);
+    });
+    req.end();
+  });
+}
+
+async function readBoundedHtmlFromResponse(
+  body: OpenGraphHttpResponse['body'],
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<string> {
+  if (typeof body === 'string') {
+    const buf = Buffer.from(body, 'utf8');
+    return buf.subarray(0, maxBytes).toString('utf8');
+  }
+  if (Buffer.isBuffer(body)) {
+    return body.subarray(0, maxBytes).toString('utf8');
+  }
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let prevTail = '';
+  try {
+    for await (const rawChunk of body) {
+      if (signal.aborted) break;
+      const buf = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk, 'utf8');
+      const remaining = maxBytes - total;
+      if (remaining <= 0) break;
+      const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+      chunks.push(slice);
+      total += slice.length;
+
+      // Linear-time overlap scan for </head> (avoids O(N^2) Buffer.concat per chunk)
+      const windowStr = prevTail + slice.toString('latin1');
+      const hitHeadEnd = /<\/head>/i.test(windowStr);
+      prevTail = windowStr.length > 7 ? windowStr.slice(-7) : windowStr;
+
+      if (hitHeadEnd || total >= maxBytes) {
+        if ('destroy' in body && typeof (body as { destroy?: () => void }).destroy === 'function') {
+          (body as { destroy: () => void }).destroy();
+        }
+        break;
+      }
+    }
+  } catch {
+    // Return partial head if already captured, otherwise empty
+  }
+  return chunks.length === 0 ? '' : Buffer.concat(chunks, total).toString('utf8');
+}
+
+/**
+ * Fetches genuine OpenGraph HTML metadata with strict SSRF protection:
+ * - Only `http:` / `https:` schemes, no embedded credentials
+ * - Blocks localhost / `.local` / `.internal` and all private/reserved IPv4 & IPv6 ranges
+ * - Resolves DNS and validates EVERY returned IP before connecting via an IP-pinned socket
+ * - Re-validates every manual redirect hop (max 3)
+ * - Enforces timeout, `text/html` content-type, and max byte cap
+ * - NEVER fabricates titles, descriptions, or synthetic reader preview blocks
+ */
+export async function fetchOpenGraphPreview(
+  textOrUrl: string,
+  options: OpenGraphFetchOptions = {},
+): Promise<WebPagePreview | undefined> {
+  const extracted = extractFirstHttpUrl(textOrUrl);
+  if (!extracted) return undefined;
+
+  const timeoutMs = options.timeoutMs ?? 2500;
+  const maxBytes = options.maxBytes ?? 256 * 1024;
+  const maxRedirects = options.maxRedirects ?? 3;
+  const lookupFn =
+    options.lookup ??
+    (async (hostname: string) => {
+      const addrs = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+      return addrs.map((a) => ({ address: a.address, family: a.family }));
+    });
+  const requestFn = options.requestImpl ?? defaultPinnedOpenGraphRequest;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref?.();
+  const onExternalAbort = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) {
+      clearTimeout(timer);
+      return undefined;
+    }
+    options.signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  try {
+    let currentUrlStr = extracted;
+    for (let hop = 0; hop <= maxRedirects; hop++) {
+      if (controller.signal.aborted) return undefined;
+
+      let parsed: URL;
+      try {
+        parsed = new URL(currentUrlStr);
+      } catch {
+        return undefined;
+      }
+
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return undefined;
+      }
+      if (parsed.username || parsed.password) {
+        return undefined;
+      }
+
+      const rawHost = parsed.hostname.replace(/^\[|\]$/g, '');
+      if (isBlockedHostname(rawHost)) {
+        return undefined;
+      }
+
+      let resolvedAddress: string;
+      let resolvedFamily: number;
+      const literalFamily = net.isIP(rawHost);
+      if (literalFamily !== 0) {
+        if (isBlockedIpAddress(rawHost)) {
+          return undefined;
+        }
+        resolvedAddress = rawHost;
+        resolvedFamily = literalFamily;
+      } else {
+        let addresses: Array<{ address: string; family: number }>;
+        try {
+          addresses = await lookupFn(rawHost);
+        } catch {
+          return undefined;
+        }
+        if (!addresses || addresses.length === 0) {
+          return undefined;
+        }
+        for (const entry of addresses) {
+          if (isBlockedIpAddress(entry.address)) {
+            return undefined;
+          }
+        }
+        resolvedAddress = addresses[0]!.address;
+        resolvedFamily = addresses[0]!.family || net.isIP(resolvedAddress) || 4;
+      }
+
+      const response = await requestFn({
+        url: parsed,
+        resolvedAddress,
+        resolvedFamily,
+        headers: {
+          'User-Agent': 'FabushiWeb-LinkPreview/1.6.11',
+          Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.1',
+          'Accept-Encoding': 'identity',
+        },
+        signal: controller.signal,
+      });
+
+      const status = response.statusCode;
+      if ([301, 302, 303, 307, 308].includes(status)) {
+        if (
+          typeof response.body === 'object' &&
+          response.body !== null &&
+          'destroy' in response.body &&
+          typeof (response.body as { destroy?: () => void }).destroy === 'function'
+        ) {
+          (response.body as { destroy: () => void }).destroy();
+        }
+        if (hop === maxRedirects) {
+          return undefined;
+        }
+        const rawLoc = response.headers.location;
+        const location = Array.isArray(rawLoc) ? rawLoc[0] : rawLoc;
+        if (!location || !location.trim()) {
+          return undefined;
+        }
+        try {
+          currentUrlStr = new URL(location.trim(), parsed).toString();
+        } catch {
+          return undefined;
+        }
+        continue;
+      }
+
+      if (status < 200 || status >= 300) {
+        if (
+          typeof response.body === 'object' &&
+          response.body !== null &&
+          'destroy' in response.body &&
+          typeof (response.body as { destroy?: () => void }).destroy === 'function'
+        ) {
+          (response.body as { destroy: () => void }).destroy();
+        }
+        return undefined;
+      }
+
+      const rawCt = response.headers['content-type'];
+      const ct = (Array.isArray(rawCt) ? rawCt[0] : rawCt ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+      if (ct !== 'text/html' && ct !== 'application/xhtml+xml') {
+        if (
+          typeof response.body === 'object' &&
+          response.body !== null &&
+          'destroy' in response.body &&
+          typeof (response.body as { destroy?: () => void }).destroy === 'function'
+        ) {
+          (response.body as { destroy: () => void }).destroy();
+        }
+        return undefined;
+      }
+
+      const html = await readBoundedHtmlFromResponse(response.body, maxBytes, controller.signal);
+      if (!html) return undefined;
+      return parseOpenGraphFromHtml(html, parsed);
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+/**
+ * Post-commit asynchronous OpenGraph enrichment for newly created text messages containing HTTP(S) URLs.
+ * Never blocks message creation, never fabricates previews, and aborts cleanly during server shutdown.
+ */
+export function enrichMessageWebPageAsync(
+  db: DatabaseSync,
+  sink: PtsBroadcastSink | null,
+  chatId: number,
+  messageId: number,
+  plainText: string,
+  signal?: AbortSignal,
+): void {
+  if (signal?.aborted || !extractFirstHttpUrl(plainText)) {
+    return;
+  }
+  void (async () => {
+    try {
+      const preview = await fetchOpenGraphPreview(plainText, { signal });
+      if (!preview || signal?.aborted) return;
+
+      const existing = db
+        .prepare(
+          `SELECT sender_id, deleted_for_everyone, web_page_json FROM messages WHERE chat_id = ? AND message_id = ?`,
+        )
+        .get(chatId, messageId) as
+        | { sender_id: number; deleted_for_everyone: number; web_page_json: string | null }
+        | undefined;
+      if (!existing || existing.deleted_for_everyone || existing.web_page_json !== null) {
+        return;
+      }
+
+      db.prepare(`UPDATE messages SET web_page_json = ? WHERE chat_id = ? AND message_id = ?`).run(
+        JSON.stringify(preview),
+        chatId,
+        messageId,
+      );
+      const updated = getMessageById(db, chatId, messageId, Number(existing.sender_id));
+      if (updated) {
+        commitPtsEventAtomic(db, sink, chatId, {
+          type: 'EditMessage',
+          data: updated,
+        });
+      }
+    } catch {
+      // Swallow teardown/network errors cleanly
+    }
+  })();
 }
 
 export interface CreateMessageParams {
@@ -473,6 +1369,7 @@ export interface CreateMessageParams {
   entities?: Array<MessageEntity | WireMessageEntity>;
   parseMarkdown?: boolean;
   content?: MessageContent;
+  webPage?: WebPagePreview;
   replyToMsgId?: number;
   quoteText?: string;
   forwardInfo?: MessageItem['forward_info'];
@@ -492,7 +1389,7 @@ export interface PtsBroadcastSink {
 
 /**
  * Atomically persists a message (honoring `(user_id, client_nonce)` idempotent deduplication!),
- * advances `chats.pts` by 1, appends to `pts_events`, and broadcasts `PtsUpdate`.
+ * advances `chats.pts` by 1, appends to `pts_events`, and broadcasts `PtsPush`.
  */
 export function createMessageAtomic(
   db: DatabaseSync,
@@ -500,35 +1397,45 @@ export function createMessageAtomic(
   params: CreateMessageParams,
 ): { message: MessageItem; pts: number; duplicate: boolean } {
   const now = Date.now();
-  if (params.scheduleAtMs !== undefined && params.scheduleAtMs < now - 5000) {
+  const scheduleAtMs = parseOptionalNonNegativeInt(
+    params.scheduleAtMs,
+    'invalid_schedule_time',
+    'schedule_at_ms must be a non-negative integer',
+  );
+  if (scheduleAtMs !== undefined && scheduleAtMs < now - 5000) {
     throw new ApiError(400, 'invalid_schedule_time', 'Scheduled timestamp cannot be in the past');
   }
-
-  // 1. Check idempotent `(senderId, clientNonce)` outbox deduplication BEFORE mutating state
-  if (params.clientNonce !== undefined && Number.isFinite(params.clientNonce)) {
-    const existingDedup = db
-      .prepare(
-        `SELECT chat_id, message_id, pts FROM outbox_dedup WHERE user_id = ? AND client_nonce = ?`,
-      )
-      .get(params.senderId, Math.trunc(params.clientNonce)) as
-      | { chat_id: number; message_id: number; pts: number }
-      | undefined;
-
-    if (existingDedup) {
-      const existingMsg = getMessageById(
-        db,
-        Number(existingDedup.chat_id),
-        Number(existingDedup.message_id),
-        params.senderId,
-      );
-      if (existingMsg) {
-        return {
-          message: existingMsg,
-          pts: Number(existingDedup.pts),
-          duplicate: true,
-        };
-      }
-    }
+  const topicId = parseOptionalPositiveInt(
+    params.topicId,
+    'invalid_topic_id',
+    'topic_id must be a positive integer',
+  );
+  const replyToMsgId = parseOptionalPositiveInt(
+    params.replyToMsgId,
+    'invalid_reply_to',
+    'reply_to_msg_id must be a positive integer',
+  );
+  const ttlSeconds = parseOptionalNonNegativeInt(
+    params.ttlSeconds,
+    'invalid_ttl',
+    'ttl_seconds must be a non-negative integer',
+  );
+  if (params.text !== undefined && params.text !== null && typeof params.text !== 'string') {
+    throw new ApiError(400, 'invalid_text', 'Message text must be a string');
+  }
+  if (
+    params.quoteText !== undefined &&
+    params.quoteText !== null &&
+    typeof params.quoteText !== 'string'
+  ) {
+    throw new ApiError(400, 'invalid_quote_text', 'quote_text must be a string');
+  }
+  if (
+    params.entities !== undefined &&
+    params.entities !== null &&
+    !Array.isArray(params.entities)
+  ) {
+    throw new ApiError(400, 'invalid_entities', 'entities must be an array');
   }
 
   const chatRow = db
@@ -544,13 +1451,16 @@ export function createMessageAtomic(
   let wireEntities: WireMessageEntity[] = [];
   let plainText = '';
 
-  if (params.content) {
-    content = params.content;
+  if (params.content !== undefined && params.content !== null) {
+    content = validateWireMessageContent(params.content);
     if (content.type === 'Text') {
       plainText = content.data.text;
-      wireEntities = content.data.entities ?? [];
+      wireEntities = Array.isArray(content.data.entities)
+        ? content.data.entities.map((e) => toWireMessageEntity(fromWireMessageEntity(e)))
+        : [];
     } else {
-      plainText = params.text ?? extractPlainTextFromContent(content);
+      plainText =
+        typeof params.text === 'string' ? params.text : safeExtractPlainTextFromContent(content);
     }
   } else {
     const rawText = params.text ?? '';
@@ -576,18 +1486,62 @@ export function createMessageAtomic(
     };
   }
 
+  // 1. Check idempotent `(senderId, clientNonce)` outbox deduplication BEFORE mutating state
+  if (params.clientNonce !== undefined && Number.isFinite(params.clientNonce)) {
+    const existingDedup = db
+      .prepare(
+        `SELECT chat_id, message_id, pts FROM outbox_dedup WHERE user_id = ? AND client_nonce = ?`,
+      )
+      .get(params.senderId, Math.trunc(params.clientNonce)) as
+      | { chat_id: number; message_id: number; pts: number }
+      | undefined;
+
+    if (existingDedup) {
+      if (Number(existingDedup.chat_id) !== params.chatId) {
+        throw new ApiError(
+          409,
+          'nonce_conflict',
+          'client_nonce was already used in another chat',
+        );
+      }
+      const existingMsg = getMessageById(
+        db,
+        Number(existingDedup.chat_id),
+        Number(existingDedup.message_id),
+        params.senderId,
+      );
+      if (existingMsg) {
+        const payloadMismatch =
+          existingMsg.content.type !== content.type ||
+          (content.type === 'Text' && (existingMsg.text ?? '') !== plainText);
+        if (payloadMismatch) {
+          throw new ApiError(
+            409,
+            'nonce_conflict',
+            'client_nonce conflict with different message payload',
+          );
+        }
+        return {
+          message: existingMsg,
+          pts: Number(existingDedup.pts),
+          duplicate: true,
+        };
+      }
+    }
+  }
+
   const mediaType = classifyMessageMediaType(content, plainText);
 
-  const webPage = content.type === 'Text' ? synthesizeWebPagePreview(plainText) : undefined;
+  const webPage = params.webPage;
 
   let replyHeader: ReplyHeader | undefined;
-  if (params.replyToMsgId !== undefined) {
+  if (replyToMsgId !== undefined) {
     const targetRow = db
       .prepare(`SELECT sender_id, text_plain FROM messages WHERE chat_id = ? AND message_id = ?`)
-      .get(params.chatId, params.replyToMsgId) as { sender_id: number; text_plain: string } | undefined;
+      .get(params.chatId, replyToMsgId) as { sender_id: number; text_plain: string } | undefined;
     const senderDto = targetRow ? getUserProfileDto(db, Number(targetRow.sender_id)) : null;
     replyHeader = {
-      reply_to_msg_id: params.replyToMsgId,
+      reply_to_msg_id: replyToMsgId,
       quote_text: params.quoteText,
       sender_name: senderDto ? [senderDto.first_name, senderDto.last_name].filter(Boolean).join(' ') : undefined,
       preview_text: targetRow?.text_plain?.slice(0, 100),
@@ -595,8 +1549,8 @@ export function createMessageAtomic(
   }
 
   const effectiveTtl =
-    params.ttlSeconds !== undefined
-      ? params.ttlSeconds
+    ttlSeconds !== undefined
+      ? ttlSeconds
       : Number(chatRow.ttl_seconds) > 0
         ? Number(chatRow.ttl_seconds)
         : undefined;
@@ -609,7 +1563,7 @@ export function createMessageAtomic(
     is_pinned: false,
     is_silent: Boolean(params.silent),
     is_edited: false,
-    is_scheduled: Boolean(params.scheduleAtMs),
+    is_scheduled: Boolean(scheduleAtMs),
     media_unread: content.type === 'Voice' || content.type === 'VideoNote',
     has_reactions: false,
     no_forwards: false,
@@ -636,7 +1590,7 @@ export function createMessageAtomic(
       msgId,
       params.senderId,
       params.sendAsPeerId ?? null,
-      params.topicId ?? null,
+      topicId ?? null,
       now,
       plainText,
       mediaType,
@@ -677,10 +1631,10 @@ export function createMessageAtomic(
         draft_json = NULL
     `).run(params.senderId, params.chatId, msgId, msgId);
 
-    if (params.topicId) {
+    if (topicId) {
       db.prepare(
         `UPDATE forum_topics SET last_message_id = ? WHERE chat_id = ? AND topic_id = ?`,
-      ).run(msgId, params.chatId, params.topicId);
+      ).run(msgId, params.chatId, topicId);
     }
 
     if (params.clientNonce !== undefined && Number.isFinite(params.clientNonce)) {
@@ -774,18 +1728,30 @@ export function classifyMessageMediaType(
   content: MessageContent,
   plainText: string,
 ): string | null {
-  if (content.type === 'Text') {
-    return plainText.includes('http://') || plainText.includes('https://') ? 'links' : null;
+  const contentType =
+    content && typeof content === 'object' && typeof content.type === 'string'
+      ? content.type
+      : '';
+  if (!contentType) {
+    return null;
   }
-  if (content.type === 'Media') {
-    const mime = (content.data?.mime_type ?? '').toLowerCase();
+  const safeText = typeof plainText === 'string' ? plainText : '';
+  if (contentType === 'Text') {
+    return safeText.includes('http://') || safeText.includes('https://') ? 'links' : null;
+  }
+  if (contentType === 'Media') {
+    const rawMime =
+      content.data && typeof content.data === 'object'
+        ? (content.data as { mime_type?: unknown }).mime_type
+        : undefined;
+    const mime = typeof rawMime === 'string' ? rawMime.toLowerCase() : '';
     if (mime === 'image/gif') return 'gif';
     if (mime.startsWith('image/')) return 'photo';
     if (mime.startsWith('video/')) return 'video';
     if (mime.startsWith('audio/')) return 'audio';
     return 'document';
   }
-  return content.type.toLowerCase();
+  return contentType.toLowerCase();
 }
 
 export function editMessageAtomic(
@@ -800,12 +1766,23 @@ export function editMessageAtomic(
     content?: MessageContent;
   },
 ): { message: MessageItem; pts: number } {
-  ensureChatMembership(db, params.chatId, params.editorUserId);
+  if (params.text !== undefined && params.text !== null && typeof params.text !== 'string') {
+    throw new ApiError(400, 'invalid_text', 'Edited text must be a string');
+  }
+  if (
+    params.entities !== undefined &&
+    params.entities !== null &&
+    !Array.isArray(params.entities)
+  ) {
+    throw new ApiError(400, 'invalid_entities', 'entities must be an array');
+  }
+
+  const access = ensureChatWriteAccess(db, params.chatId, params.editorUserId);
   const existing = getMessageById(db, params.chatId, params.messageId, params.editorUserId);
   if (!existing) {
     throw new ApiError(404, 'message_not_found', 'Message not found');
   }
-  if (existing.sender_id !== params.editorUserId) {
+  if (access.chatType !== 3 && existing.sender_id !== params.editorUserId) {
     throw new ApiError(403, 'forbidden', 'Only the message author can edit this message');
   }
 
@@ -813,15 +1790,18 @@ export function editMessageAtomic(
   let wireEntities: WireMessageEntity[] = (existing.entities ?? []).map(toWireMessageEntity);
   let newContent: MessageContent = existing.content;
 
-  if (params.content) {
-    newContent = params.content;
+  if (params.content !== undefined && params.content !== null) {
+    newContent = validateWireMessageContent(params.content);
     if (newContent.type === 'Text') {
       plainText = newContent.data.text;
-      wireEntities = (newContent.data.entities ?? []).map((e) =>
-        toWireMessageEntity(fromWireMessageEntity(e)),
-      );
+      wireEntities = Array.isArray(newContent.data.entities)
+        ? newContent.data.entities.map((e) => toWireMessageEntity(fromWireMessageEntity(e)))
+        : [];
     } else {
-      plainText = params.text ?? extractPlainTextFromContent(newContent);
+      plainText =
+        typeof params.text === 'string'
+          ? params.text
+          : safeExtractPlainTextFromContent(newContent);
     }
   } else if (params.text !== undefined) {
     if (!params.text.trim()) {
@@ -878,37 +1858,36 @@ export function deleteMessagesAtomic(
   messageIds: number[],
   forEveryone: boolean,
 ): { pts: number; deletedIds: number[]; tombstone: DeleteTombstone } {
+  const access = ensureChatMembership(db, chatId, userId);
+  if (access.chatType === 3 && !access.isAdmin) {
+    throw new ApiError(
+      403,
+      'admin_required',
+      'Only channel owners or admins can delete channel messages',
+    );
+  }
+
+  if (!Array.isArray(messageIds)) {
+    throw new ApiError(400, 'invalid_message_ids', 'message_ids must be an array');
+  }
   const cleanIds = Array.from(
     new Set(messageIds.map((id) => Math.trunc(Number(id))).filter((id) => id > 0)),
   );
   const now = Date.now();
 
   if (forEveryone) {
-    const chatMeta = db
-      .prepare(`SELECT chat_type FROM chats WHERE chat_id = ?`)
-      .get(chatId) as { chat_type: number } | undefined;
-    if (!chatMeta) {
-      throw new ApiError(404, 'chat_not_found', `Chat ${chatId} not found`);
-    }
-
-    // In group / supergroup / channel chats, non-admin members can ONLY delete their own messages for everyone!
-    if ([1, 2, 3].includes(Number(chatMeta.chat_type))) {
-      const memberRow = db
-        .prepare(`SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?`)
-        .get(chatId, userId) as { role: string } | undefined;
-      const isAdminOrOwner = memberRow?.role === 'owner' || memberRow?.role === 'admin';
-      if (!isAdminOrOwner) {
-        for (const id of cleanIds) {
-          const msgOwner = db
-            .prepare(`SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ?`)
-            .get(chatId, id) as { sender_id: number } | undefined;
-          if (msgOwner && Number(msgOwner.sender_id) !== userId) {
-            throw new ApiError(
-              403,
-              'forbidden',
-              'Only chat admins or the message author can delete messages for everyone',
-            );
-          }
+    // In group / supergroup chats, non-admin members can ONLY delete their own messages for everyone!
+    if ((access.chatType === 1 || access.chatType === 2) && !access.isAdmin) {
+      for (const id of cleanIds) {
+        const msgOwner = db
+          .prepare(`SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ?`)
+          .get(chatId, id) as { sender_id: number } | undefined;
+        if (msgOwner && Number(msgOwner.sender_id) !== userId) {
+          throw new ApiError(
+            403,
+            'forbidden',
+            'Only chat admins or the message author can delete messages for everyone',
+          );
         }
       }
     }
@@ -1043,20 +2022,29 @@ export function castPollVoteAtomic(
   const pollId = Number(pollRow.poll_id);
   const chatId = Number(pollRow.chat_id);
   const messageId = Number(pollRow.message_id);
-  ensureChatMembership(db, chatId, voterUserId);
+  ensureChatReadAccess(db, chatId, voterUserId);
 
   if (pollRow.is_closed) {
     throw new ApiError(400, 'poll_closed', 'Cannot vote on a closed poll');
   }
 
   const basePoll = JSON.parse(pollRow.poll_json) as PollData;
-  const optionIds = Array.from(new Set((params.optionIds ?? []).map(Number)));
-
-  for (const oid of optionIds) {
-    if (!Number.isInteger(oid) || oid < 0 || oid >= basePoll.options.length) {
-      throw new ApiError(400, 'invalid_option_id', `Invalid option_id ${oid}`);
-    }
+  if (!Array.isArray(params.optionIds)) {
+    throw new ApiError(400, 'invalid_option_ids', 'option_ids must be an array');
   }
+  const optionIdsSet = new Set<number>();
+  for (const rawOid of params.optionIds) {
+    if (
+      typeof rawOid !== 'number' ||
+      !Number.isInteger(rawOid) ||
+      rawOid < 0 ||
+      rawOid >= basePoll.options.length
+    ) {
+      throw new ApiError(400, 'invalid_option_id', `Invalid option_id ${String(rawOid)}`);
+    }
+    optionIdsSet.add(rawOid);
+  }
+  const optionIds = Array.from(optionIdsSet);
 
   if (!basePoll.allows_multiple_answers && optionIds.length > 1) {
     throw new ApiError(400, 'single_choice_poll', 'This poll allows only a single choice');
@@ -1139,7 +2127,7 @@ export function computeChatDifference(
   req: SyncGetDifferenceRequest,
 ): SyncGetDifferenceResponse {
   const chatId = Number(req.chat_id);
-  ensureChatMembership(db, chatId, userId);
+  ensureChatReadAccess(db, chatId, userId);
 
   const chatRow = db.prepare(`SELECT pts FROM chats WHERE chat_id = ?`).get(chatId) as
     | { pts: number }
@@ -1149,8 +2137,12 @@ export function computeChatDifference(
   }
 
   const currentPts = Number(chatRow.pts);
-  const fromPts = Math.max(0, Math.trunc(Number(req.from_pts ?? req.pts ?? 0)));
-  const maxLimit = Math.min(500, Math.max(1, Number(req.limit ?? req.pts_total_limit ?? 200)));
+  const rawFromPts = Number(req.from_pts ?? req.pts ?? 0);
+  const fromPts = Number.isFinite(rawFromPts) ? Math.max(0, Math.trunc(rawFromPts)) : 0;
+  const rawLimit = Number(req.limit ?? req.pts_total_limit ?? 200);
+  const maxLimit = Number.isFinite(rawLimit)
+    ? Math.min(500, Math.max(1, Math.trunc(rawLimit)))
+    : 200;
 
   if (fromPts >= currentPts) {
     return {

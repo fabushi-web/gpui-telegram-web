@@ -17,6 +17,7 @@ import {
   createTelegramServer,
   type TelegramServerInstance,
 } from '@gpui-telegram/server';
+import { registerTestUser } from './_helpers.js';
 
 const TEST_TMP_ROOT = path.join(REPO_ROOT_DIR, '.test-tmp');
 
@@ -124,6 +125,9 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
       host: '127.0.0.1',
       dataDir,
       enableTestReset: true,
+      seedDemoData: false,
+      allowDemoAuth: false,
+      exposeDevOtpCode: false,
     });
     const info = await server.start();
     baseUrl = info.baseUrl;
@@ -186,12 +190,8 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
     expect(DOM_IDS.NAV_DEST_BROWSER).toBe('nav-dest-browser');
     expect(DOM_IDS.BROWSER_CONTROL_WORKSPACE).toBe('browser-control-workspace');
 
-    const aliceAuth = (
-      await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', { body: { slot: 0 } })
-    ).data.token as string;
-    const bobAuth = (
-      await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', { body: { slot: 1 } })
-    ).data.token as string;
+    const aliceAuth = (await registerTestUser(baseUrl, 'bctrl_alice')).token;
+    const bobAuth = (await registerTestUser(baseUrl, 'bctrl_bob')).token;
 
     // CORS preflight allows X-Desktop-Browser-Token
     const preflight = await fetch(`${baseUrl}/api/v1/browser/targets`, { method: 'OPTIONS' });
@@ -482,9 +482,7 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
   });
 
   it('drives real Headless Chromium CDP (`/usr/lib/chromium/chromium`) AND deterministic `http_dom_fallback` sessions end-to-end', async () => {
-    const aliceAuth = (
-      await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', { body: { slot: 0 } })
-    ).data.token as string;
+    const aliceAuth = (await registerTestUser(baseUrl, 'bctrl_cdp_alice')).token;
 
     //Unsafe URL schemes (file://, javascript:) must be rejected with 400!
     const unsafeOpen = await reqJson(baseUrl, 'POST', '/api/v1/browser/headless/open', {
@@ -660,9 +658,7 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
   }, 25000);
 
   it('implements MCP JSON-RPC 2.0 (`/api/v1/mcp/manifest`, `/api/v1/mcp/rpc`) and Web UI `/api/v1/mcp/invoke` browser_* tools', async () => {
-    const aliceAuth = (
-      await reqJson(baseUrl, 'POST', '/api/v1/auth/demo', { body: { slot: 0 } })
-    ).data.token as string;
+    const aliceAuth = (await registerTestUser(baseUrl, 'bctrl_mcp_alice')).token;
 
     // 1. Manifest discovery
     const manifest = await reqJson(baseUrl, 'GET', '/api/v1/mcp/manifest', { token: aliceAuth });
