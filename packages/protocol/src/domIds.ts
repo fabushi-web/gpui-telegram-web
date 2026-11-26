@@ -169,6 +169,49 @@ export const DOM_IDS = {
   BROWSER_HEADLESS_VIEWPORT: 'browser-headless-viewport',
   BROWSER_SNAPSHOT_VIEW: 'browser-snapshot-view',
   BROWSER_AUDIT_LOG: 'browser-audit-log',
+
+  // 7. Apple Sidebar & Content Hub (15 IDs)
+  APPLE_SIDEBAR: 'apple-sidebar',
+  BTN_TOGGLE_APPLE_SIDEBAR: 'btn-toggle-apple-sidebar',
+  APPLE_NAV_CHATS: 'apple-nav-chats',
+  APPLE_NAV_COMMUNITY: 'apple-nav-community',
+  APPLE_NAV_BOOKS: 'apple-nav-books',
+  APPLE_NAV_MUSIC: 'apple-nav-music',
+  APPLE_NAV_GAMES: 'apple-nav-games',
+  APPLE_NAV_APPSTORE: 'apple-nav-appstore',
+  APPLE_NAV_CREATIONS: 'apple-nav-creations',
+  QUICK_CREATIONS_DRAWER: 'quick-creations-drawer',
+  BTN_TOGGLE_QUICK_CREATIONS: 'btn-toggle-quick-creations',
+  CONTENT_HUB_WORKSPACE: 'content-hub-workspace',
+  PUBLISH_REVIEW_MODAL: 'publish-review-modal',
+  MUSIC_SYNTH_PLAYER: 'music-synth-player',
+  MINI_GAME_CANVAS: 'mini-game-canvas',
+
+  // 8. Community Platform (8 IDs)
+  NAV_DEST_COMMUNITY: 'nav-dest-community',
+  COMMUNITY_WORKSPACE: 'community-workspace',
+  COMMUNITY_FEED: 'community-feed',
+  COMMUNITY_COMPOSER_MODAL: 'community-composer-modal',
+  COMMUNITY_MOD_QUEUE: 'community-mod-queue',
+  COMMUNITY_BOT_STUDIO: 'community-bot-studio',
+  COMMUNITY_LISTS_VIEW: 'community-lists-view',
+  COMMUNITY_ALGO_TUNER: 'community-algo-tuner',
+
+  // 9. Orca Bot OS, Agent IDE & Browser Design Mode (14 IDs)
+  NAV_DEST_ORCA_BOTS: 'nav-dest-orca-bots',
+  NAV_DEST_ORCA_IDE: 'nav-dest-orca-ide',
+  ORCA_BOTS_WORKSPACE: 'orca-bots-workspace',
+  ORCA_NEEDS_YOU_INBOX: 'orca-needs-you-inbox',
+  ORCA_IDE_WORKSPACE: 'orca-ide-workspace',
+  ORCA_SPLIT_LAYOUT: 'orca-split-layout',
+  ORCA_JUMP_PALETTE: 'orca-jump-palette',
+  ORCA_KANBAN_BOARD: 'orca-kanban-board',
+  ORCA_DIFF_PANEL: 'orca-diff-panel',
+  ORCA_USAGE_POPOVER: 'orca-usage-popover',
+  ORCA_VAULT_PANEL: 'orca-vault-panel',
+  ORCA_PLUGINS_PANEL: 'orca-plugins-panel',
+  ORCA_SECURITY_SURFACE_MODAL: 'orca-security-surface-modal',
+  BROWSER_DESIGN_MODE_OVERLAY: 'browser-design-mode-overlay',
 } as const;
 
 export type DomIdKey = keyof typeof DOM_IDS;

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT_DIR = path.resolve(currentDir, '../../..');
 
-export const DEFAULT_APP_VERSION = '1.6.11';
+export const DEFAULT_APP_VERSION = '1.7.0';
 export const DEFAULT_CLOUD_GATEWAY_URL = 'https://api.ombhrum.com';
 export const DEFAULT_AI_GATEWAY_URL = 'https://ai.ombhrum.com';
 
@@ -67,21 +67,6 @@ export interface ServerConfig {
   fabushiAssetsDir: string;
   enableTestReset: boolean;
   /**
-   * When true, seeds deterministic demo users/chats/wallets/sandboxes (test/dev ONLY).
-   * Always false in real production unless explicitly opted in via `SEED_DEMO_DATA=1` or `ENABLE_TEST_RESET=1`.
-   */
-  seedDemoData: boolean;
-  /**
-   * When true, permits 1-click demo login and simulated QR/Alipay/Passkey shortcuts.
-   * Always false in production unless explicitly opted in.
-   */
-  allowDemoAuth: boolean;
-  /**
-   * When true, exposes deterministic OTP `dev_code` in send-code responses (test/dev ONLY).
-   * Always false in production.
-   */
-  exposeDevOtpCode: boolean;
-  /**
    * Optional upstream `gpui_telegram_server` URL (e.g. `https://your-upstream-server.example.com`).
    * When set, this server acts as an HTTPS/HTTP + SSE + WebSocket reverse proxy while serving the SPA.
    */
@@ -111,9 +96,6 @@ export interface ServerConfigOverrides {
   webDistDir?: string;
   fabushiAssetsDir?: string;
   enableTestReset?: boolean;
-  seedDemoData?: boolean;
-  allowDemoAuth?: boolean;
-  exposeDevOtpCode?: boolean;
   upstreamServerUrl?: string | null;
   proxyBrowserWs?: boolean;
   cloudGatewayUrl?: string;
@@ -176,12 +158,6 @@ export function resolveServerConfig(
   fs.mkdirSync(uploadsDir, { recursive: true });
 
   const enableTestReset = overrides.enableTestReset ?? env.ENABLE_TEST_RESET === '1';
-  const seedDemoData =
-    overrides.seedDemoData ?? (enableTestReset || env.SEED_DEMO_DATA === '1');
-  const allowDemoAuth =
-    overrides.allowDemoAuth ?? (enableTestReset || seedDemoData || env.ALLOW_DEMO_AUTH === '1');
-  const exposeDevOtpCode =
-    overrides.exposeDevOtpCode ?? (enableTestReset || env.EXPOSE_DEV_OTP_CODE === '1');
 
   const rawUpstream =
     overrides.upstreamServerUrl !== undefined
@@ -254,9 +230,6 @@ export function resolveServerConfig(
     webDistDir,
     fabushiAssetsDir,
     enableTestReset,
-    seedDemoData,
-    allowDemoAuth,
-    exposeDevOtpCode,
     upstreamServerUrl,
     proxyBrowserWs,
     cloudGatewayUrl,

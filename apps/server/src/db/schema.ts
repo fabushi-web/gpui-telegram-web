@@ -31,6 +31,7 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       is_bot INTEGER NOT NULL DEFAULT 0,
       is_verified INTEGER NOT NULL DEFAULT 0,
       is_premium INTEGER NOT NULL DEFAULT 0,
+      is_support INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'recently',
       last_seen_ms INTEGER NOT NULL DEFAULT 0,
       created_at_ms INTEGER NOT NULL,
@@ -264,11 +265,43 @@ export function initDatabaseSchema(db: DatabaseSync): void {
       forwards INTEGER NOT NULL DEFAULT 0,
       ttl_seconds INTEGER,
       expires_at_ms INTEGER,
+      scheduled_at_ms INTEGER,
       deleted_for_everyone INTEGER NOT NULL DEFAULT 0,
       client_nonce INTEGER,
       PRIMARY KEY (chat_id, message_id)
     );
     CREATE INDEX IF NOT EXISTS idx_messages_chat_date ON messages(chat_id, date_ms);
+    CREATE INDEX IF NOT EXISTS idx_messages_chat_scheduled ON messages(chat_id, scheduled_at_ms);
+
+    CREATE TABLE IF NOT EXISTS chat_admin_log (
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id INTEGER NOT NULL,
+      actor_user_id INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      target_user_id INTEGER,
+      target_message_id INTEGER,
+      details_json TEXT NOT NULL DEFAULT '{}',
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_admin_log_chat
+      ON chat_admin_log(chat_id, event_id DESC);
+
+    CREATE TABLE IF NOT EXISTS bot_inline_queries (
+      query_id TEXT PRIMARY KEY,
+      bot_user_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      chat_id INTEGER,
+      query_text TEXT NOT NULL DEFAULT '',
+      offset_str TEXT NOT NULL DEFAULT '',
+      results_json TEXT,
+      next_offset TEXT,
+      cache_time INTEGER,
+      is_personal INTEGER NOT NULL DEFAULT 0,
+      answered_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_bot_inline_queries_bot_user
+      ON bot_inline_queries(bot_user_id, user_id, created_at_ms DESC);
 
     CREATE TABLE IF NOT EXISTS message_user_deletions (
       user_id INTEGER NOT NULL,
@@ -1094,6 +1127,8 @@ export function initDatabaseSchema(db: DatabaseSync): void {
   ensureColumn('users', 'auth_kdf_p_cost', 'INTEGER');
   ensureColumn('users', 'account_generation', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn('users', 'updated_at_ms', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('users', 'is_support', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('messages', 'scheduled_at_ms', 'INTEGER');
   ensureColumn('passkey_challenges', 'user_id', 'INTEGER');
   ensureColumn('passkey_challenges', 'purpose', "TEXT NOT NULL DEFAULT 'auth'");
   ensureColumn('passkey_challenges', 'rp_id', 'TEXT');
@@ -1103,5 +1138,7 @@ export function initDatabaseSchema(db: DatabaseSync): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_mini_app_installs_recent
       ON mini_app_installs(user_id, last_launched_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_messages_chat_scheduled
+      ON messages(chat_id, scheduled_at_ms);
   `);
 }

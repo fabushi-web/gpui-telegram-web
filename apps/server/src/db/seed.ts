@@ -305,10 +305,7 @@ export function seedSystemEntitiesIfEmpty(
   }
 }
 
-export function seedDatabaseIfEmpty(
-  db: DatabaseSync,
-  _options?: { seedDemoData?: boolean },
-): void {
+export function seedDatabaseIfEmpty(db: DatabaseSync): void {
   seedSystemEntitiesIfEmpty(db);
 }
 
@@ -321,7 +318,6 @@ export function resetDatabaseClean(
   db: DatabaseSync,
   mediaDir: string,
   uploadsDir: string,
-  _options?: { seedDemoData?: boolean },
 ): void {
   const browserProfilesDir = path.join(path.dirname(mediaDir), 'p');
   for (const dir of [mediaDir, uploadsDir, browserProfilesDir]) {
@@ -390,6 +386,7 @@ export function resetDatabaseClean(
       DELETE FROM mini_app_cloud_storage;
       DELETE FROM mini_app_installs;
       DELETE FROM mini_apps;
+      DELETE FROM bot_inline_queries;
       DELETE FROM bot_api_updates;
       DELETE FROM botfather_wizards;
       DELETE FROM bots_registry;
@@ -410,6 +407,7 @@ export function resetDatabaseClean(
       DELETE FROM message_reactions;
       DELETE FROM message_user_deletions;
       DELETE FROM messages;
+      DELETE FROM chat_admin_log;
       DELETE FROM chat_invite_links;
       DELETE FROM forum_topics;
       DELETE FROM chat_folders;

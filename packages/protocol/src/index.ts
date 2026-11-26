@@ -1,4 +1,4 @@
-export const FABUSHI_PROTOCOL_VERSION = '1.6.11' as const;
+export const FABUSHI_PROTOCOL_VERSION = '1.7.0' as const;
 
 export * from './domIds.js';
 export * from './entities.js';
@@ -17,3 +17,7 @@ export * from './codingAgents.js';
 export * from './remoteControl.js';
 export * from './miniAppWebMcp.js';
 export * from './officialMcp.js';
+export * from './creations.js';
+export * from './community.js';
+export * from './orca.js';
+export * from './appleDeepLink.js';

@@ -256,6 +256,13 @@ export class LoopBudget {
 // 3. Two-Stage Reply Gate (Stage 1 Wake Scoring + Stage 2 Sentinel & Echo Filter)
 // ============================================================================
 
+export interface BotMessageContext {
+  messageId?: number;
+  replyToMsgId?: number;
+  replyToSenderId?: number | null;
+  quoteText?: string;
+}
+
 export interface GroupBotCandidate {
   bot_user_id: number;
   agent_id: string;
@@ -270,6 +277,37 @@ export interface WakeDecision {
   status: 'wake' | 'pass' | 'skipped';
   reason: string;
   targets: GroupBotCandidate[];
+}
+
+/**
+ * Extracts normalized `@mention` tokens from both `/cmd@botname` slash commands
+ * and standalone `@username` mentions, stripping trailing punctuation and rejecting email addresses.
+ */
+export function extractMentionTokens(text: string): string[] {
+  if (!text) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const pushToken = (raw: string): void => {
+    const cleaned = raw.replace(/[.-]+$/g, '').toLowerCase();
+    if (!cleaned || seen.has(cleaned)) return;
+    seen.add(cleaned);
+    out.push(cleaned);
+  };
+
+  // 1. Slash-command bot mentions: `/status@alpha_bot`
+  for (const m of text.matchAll(
+    /(?:^|[\s(（【\[])\/[A-Za-z0-9_]+@([A-Za-z0-9_][A-Za-z0-9_.-]*)/gu,
+  )) {
+    if (m[1]) pushToken(m[1]);
+  }
+
+  // 2. Standalone @mentions (not preceded by letter/number/`_`/`/` so `alice@alpha_bot` emails are excluded)
+  for (const m of text.matchAll(/(?:^|[^\p{L}\p{N}_/])@([A-Za-z0-9_][A-Za-z0-9_.-]*)/gu)) {
+    if (m[1]) pushToken(m[1]);
+  }
+
+  return out;
 }
 
 const LOW_SIGNAL_ACKS = new Set([
@@ -370,16 +408,17 @@ export function evaluateGroupWakeGate(params: {
   const trimmed = params.text.trim();
   const lower = trimmed.toLowerCase();
 
-  // Rule 1: @all / @everyone / @here / @所有人
-  if (/(?:^|\s)@(?:all|everyone|here|所有人)(?:\b|$)/i.test(trimmed)) {
+  // Rule 1: @all / @everyone / @here / @所有人 / @全体成员 (CJK-safe, no ASCII \b after CJK)
+  const hasBroadcastMention =
+    /(?:^|[^\p{L}\p{N}_/])@(?:all|everyone|here)(?![A-Za-z0-9_.-])/iu.test(trimmed) ||
+    /(?:^|[^\p{L}\p{N}_/])@(?:所有人|全体成员)/u.test(trimmed);
+  if (hasBroadcastMention) {
     return { status: 'wake', reason: 'mention_all', targets: eligible };
   }
 
-  // Rule 2: explicit @mention matching username, agent_id, display_name, or bot_user_id
+  // Rule 2: explicit @mention or /cmd@botname matching username, agent_id, display_name, or bot_user_id
   const mentioned: GroupBotCandidate[] = [];
-  const mentionTokens = Array.from(trimmed.matchAll(/@([A-Za-z0-9_.-]+)/g)).map((m) =>
-    m[1]!.toLowerCase(),
-  );
+  const mentionTokens = extractMentionTokens(trimmed);
   if (mentionTokens.length > 0) {
     for (const bot of eligible) {
       const aliases = new Set([
@@ -419,6 +458,7 @@ export function evaluateGroupWakeGate(params: {
     .split(' ')
     .filter((w) => w.length >= 2);
   let best: { bot: GroupBotCandidate; score: number } | null = null;
+  let topPositive: { bot: GroupBotCandidate; score: number } | null = null;
 
   for (const bot of eligible) {
     let score = 0;
@@ -455,13 +495,65 @@ export function evaluateGroupWakeGate(params: {
       score -= params.senderIsHuman ? 0.2 : 0.35;
     }
 
-    if (score >= 0.35 && (!best || score > best.score)) {
+    if (
+      score > 0 &&
+      (!topPositive ||
+        score > topPositive.score ||
+        (score === topPositive.score && bot.bot_user_id < topPositive.bot.bot_user_id))
+    ) {
+      topPositive = { bot, score };
+    }
+
+    if (
+      score >= 0.35 &&
+      (!best ||
+        score > best.score ||
+        (score === best.score && bot.bot_user_id < best.bot.bot_user_id))
+    ) {
       best = { bot, score };
     }
   }
 
   if (best) {
     return { status: 'wake', reason: 'scored_relevance', targets: [best.bot] };
+  }
+
+  // Rule 6: PrimaryFallback (v1.6.14) — HUMAN messages only, NEVER bot-to-bot!
+  if (params.senderIsHuman) {
+    let fallbackBot: GroupBotCandidate | undefined = topPositive?.bot;
+
+    if (!fallbackBot && params.lastSpeakerAgentId) {
+      fallbackBot = eligible.find((c) => c.agent_id === params.lastSpeakerAgentId);
+    }
+
+    if (!fallbackBot) {
+      let mostRecent: GroupBotCandidate | undefined;
+      for (const c of eligible) {
+        const ts = c.last_spoken_ms ?? 0;
+        if (ts <= 0) continue;
+        const bestTs = mostRecent?.last_spoken_ms ?? 0;
+        if (
+          !mostRecent ||
+          ts > bestTs ||
+          (ts === bestTs && c.bot_user_id < mostRecent.bot_user_id)
+        ) {
+          mostRecent = c;
+        }
+      }
+      fallbackBot = mostRecent;
+    }
+
+    if (!fallbackBot) {
+      fallbackBot = eligible.find((c) => c.bot_user_id === 777000);
+    }
+
+    if (!fallbackBot) {
+      fallbackBot = eligible[0];
+    }
+
+    if (fallbackBot) {
+      return { status: 'wake', reason: 'primary_fallback', targets: [fallbackBot] };
+    }
   }
 
   return { status: 'pass', reason: 'no_relevant_candidate', targets: [] };
@@ -865,7 +957,8 @@ export class MultiAgentOrchestrator {
         `SELECT br.bot_user_id, br.bot_json
          FROM chat_members cm
          INNER JOIN bots_registry br ON br.bot_user_id = cm.user_id
-         WHERE cm.chat_id = ? AND br.bot_user_id != ?`,
+         WHERE cm.chat_id = ? AND br.bot_user_id != ?
+         ORDER BY br.bot_user_id ASC`,
       )
       .all(chatId, BOTFATHER_USER_ID) as Array<{ bot_user_id: number; bot_json: string }>;
 
@@ -897,7 +990,12 @@ export class MultiAgentOrchestrator {
     return out;
   }
 
-  handleGroupMessage(chatId: number, senderUserId: number, text: string): boolean {
+  handleGroupMessage(
+    chatId: number,
+    senderUserId: number,
+    text: string,
+    meta?: BotMessageContext,
+  ): boolean {
     if (this.disposed) return false;
     const bots = this.listGroupFabushiBots(chatId);
     if (bots.length === 0) return false;
@@ -907,12 +1005,26 @@ export class MultiAgentOrchestrator {
     room.budget.reset();
     room.floor.preemptForHuman(`user:${senderUserId}`);
 
+    let replyToSenderId = meta?.replyToSenderId ?? null;
+    if (meta?.replyToSenderId === undefined && meta?.replyToMsgId) {
+      const targetRow = this.db
+        .prepare(
+          `SELECT sender_id FROM messages
+           WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+        )
+        .get(chatId, meta.replyToMsgId) as { sender_id: number } | undefined;
+      if (targetRow) {
+        replyToSenderId = Number(targetRow.sender_id);
+      }
+    }
+
     const wake = evaluateGroupWakeGate({
       text,
       senderIsHuman: true,
       senderUserId,
       remainingLoopBudget: room.budget.remaining,
       candidates: bots.map((b) => b.candidate),
+      replyToSenderId,
       lastSpeakerAgentId: room.lastSpeakerAgentId,
     });
 
@@ -921,9 +1033,15 @@ export class MultiAgentOrchestrator {
     }
 
     const priority =
-      wake.reason === 'explicit_mention' || wake.reason === 'mention_all'
+      wake.reason === 'explicit_mention' ||
+      wake.reason === 'mention_all' ||
+      wake.reason === 'reply_to_bot'
         ? FloorPriority.DirectMention
         : FloorPriority.GeneralContribution;
+
+    const promptText = meta?.quoteText?.trim()
+      ? `[Quoted message]: ${meta.quoteText.trim()}\n\n${text}`
+      : text;
 
     for (const target of wake.targets) {
       const botMeta = bots.find((b) => b.candidate.bot_user_id === target.bot_user_id);
@@ -934,7 +1052,7 @@ export class MultiAgentOrchestrator {
         bot: botMeta.entry,
         agentId: botMeta.candidate.agent_id,
         allBots: bots,
-        promptText: text,
+        promptText,
         priority,
         fromAgentId: null,
       });
@@ -1185,7 +1303,9 @@ export class MultiAgentOrchestrator {
       // Stage 2 outbound review (suppress [PASS], NO_REPLY, empty, or >= 0.85 Jaccard echo)
       const recentRows = this.db
         .prepare(
-          `SELECT text_plain FROM messages WHERE chat_id = ? ORDER BY message_id DESC LIMIT 8`,
+          `SELECT text_plain FROM messages
+           WHERE chat_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL
+           ORDER BY message_id DESC LIMIT 8`,
         )
         .all(chatId) as Array<{ text_plain: string | null }>;
       const recentTexts = recentRows

@@ -26,9 +26,6 @@ describe('@gpui-telegram/server — Clean Production Mode (Zero Fake Data, v1.6.
       port: 0,
       dataDir: prodDataDir,
       enableTestReset: false,
-      seedDemoData: false,
-      allowDemoAuth: false,
-      exposeDevOtpCode: false,
       turnSecret: explicitTurnSecret,
     });
     const startedProd = await prodServer.start();
@@ -40,8 +37,6 @@ describe('@gpui-telegram/server — Clean Production Mode (Zero Fake Data, v1.6.
       port: 0,
       dataDir: proxyDataDir,
       enableTestReset: false,
-      seedDemoData: false,
-      allowDemoAuth: false,
       upstreamServerUrl: prodBaseUrl,
       proxyBrowserWs: false,
     });
@@ -57,31 +52,37 @@ describe('@gpui-telegram/server — Clean Production Mode (Zero Fake Data, v1.6.
     fs.rmSync(prodDataDir, { recursive: true, force: true });
   });
 
-  it('boots cleanly at v1.6.11 with plain /health OK, 33 status capabilities, MCP CORS headers, compression exclusions, and zero fake data', async () => {
+  it('boots cleanly at v1.7.0 with plain /health OK, 39 status capabilities, MCP CORS headers, compression exclusions, and zero fake data', async () => {
     // 1. Plain-text /health -> "OK"
     const plainHealth = await fetch(`${prodBaseUrl}/health`);
     expect(plainHealth.status).toBe(200);
     expect(plainHealth.headers.get('content-type')).toContain('text/plain');
     expect(await plainHealth.text()).toBe('OK');
 
-    // 2. JSON /api/v1/health & /api/v1/status (v1.6.11 + all 33 capabilities + MCP CORS headers)
+    // 2. JSON /api/v1/health & /api/v1/status (v1.7.0 + all 39 capabilities + MCP CORS headers)
     const health = await apiJson(prodBaseUrl, 'GET', '/api/v1/health');
     expect(health.status).toBe(200);
     expect(health.data.ok).toBe(true);
     expect(health.data.app).toBe('Fabushi Web');
     expect(health.data.mode).toBe('production');
-    expect(health.data.version).toBe('1.6.11');
+    expect(health.data.version).toBe('1.7.0');
 
     const status = await apiJson(prodBaseUrl, 'GET', '/api/v1/status');
     expect(status.status).toBe(200);
     expect(status.data.server).toBe('fabushi-web');
     expect(status.data.status).toBe('ok');
-    expect(status.data.version).toBe('1.6.11');
+    expect(status.data.version).toBe('1.7.0');
     expect(status.data.capabilities).toContain('official_mcp_oauth21');
     expect(status.data.capabilities).toContain('auto_update_relay');
     expect(status.data.capabilities).toContain('remote_control');
     expect(status.data.capabilities).toContain('remote_assist');
-    expect(status.data.capabilities.length).toBe(33);
+    expect(status.data.capabilities).toContain('bot_inline_query');
+    expect(status.data.capabilities).toContain('scheduled_messages');
+    expect(status.data.capabilities).toContain('message_translate');
+    expect(status.data.capabilities).toContain('admin_log');
+    expect(status.data.capabilities).toContain('multi_agent_primary_fallback');
+    expect(status.data.capabilities).toContain('protocol_v170_contracts');
+    expect(status.data.capabilities.length).toBe(39);
 
     const exposeHeaders = status.headers.get('access-control-expose-headers') ?? '';
     expect(exposeHeaders).toContain('Mcp-Session-Id');

@@ -37,6 +37,7 @@ import type {
   MiniAppWebMcpCommand,
   MiniAppWebMcpResponse,
 } from './miniAppWebMcp.js';
+import type { CreationKind, CreationReviewStatus } from './creations.js';
 
 export type TypingAction =
   | 'typing'
@@ -130,7 +131,90 @@ export type UpdateEvent =
     }
   | { type: 'MiniAppWebMcpCommand'; data: MiniAppWebMcpCommand }
   | { type: 'MiniAppControlStatus'; data: MiniAppControlStatus }
-  | { type: 'CodingHostCommand'; data: CodingHostCommand };
+  | { type: 'CodingHostCommand'; data: CodingHostCommand }
+  | { type: 'UserCreationChanged'; data: UserCreationChangedData }
+  | {
+      type: 'UserCreationChanged';
+      creation_id: string;
+      revision: number;
+      status: string;
+      action: 'created' | 'updated' | 'deleted' | 'review_changed';
+    }
+  | { type: 'PublicCatalogChanged'; data: PublicCatalogChangedData }
+  | {
+      type: 'PublicCatalogChanged';
+      entry_id: string;
+      kind: string;
+      action: 'published' | 'updated' | 'unpublished' | 'deleted';
+    }
+  | { type: 'community_event'; data: CommunityEventData }
+  | {
+      type: 'community_event';
+      event_kind: string;
+      community_id?: string;
+      post_id?: string;
+      comment_id?: string;
+      actor_id?: string;
+      payload: Record<string, unknown>;
+    };
+
+export interface UserCreationChangedData {
+  creation_id: string;
+  owner_user_id: number;
+  kind: CreationKind;
+  review_status: CreationReviewStatus;
+  cloud_revision: number;
+  action?: 'created' | 'updated' | 'deleted' | 'review_changed';
+}
+
+export interface PublicCatalogChangedData {
+  creation_id: string;
+  entry_id?: string;
+  kind: CreationKind | string;
+  action: 'published' | 'updated' | 'unpublished' | 'deleted' | string;
+}
+
+export interface CommunityEventData {
+  event_kind: string;
+  community_id?: string;
+  post_id?: string;
+  comment_id?: string;
+  actor_id?: string;
+  payload_json: string;
+  payload?: Record<string, unknown>;
+  timestamp_ms: number;
+}
+
+// ============================================================================
+// Orca Content-Free Wake WebSocket Contracts (`/api/v1/orca/wake`)
+// ============================================================================
+
+export const ORCA_WAKE_CLOSE_SUPERSEDED = 4409 as const;
+export const ORCA_WAKE_CLOSE_OVERSIZE = 1009 as const;
+export const ORCA_WAKE_MAX_FRAME_BYTES = 16384 as const;
+export const ORCA_WAKE_MAX_INBOUND_FRAME_BYTES = 4096 as const;
+
+export interface OrcaWakeFrame {
+  type: 'wake';
+  scope: string;
+  entity_id: string;
+  revision: number;
+  ts_ms: number;
+}
+
+export type OrcaWakeFrameKind =
+  | 'delivery'
+  | 'access_request'
+  | 'webhook_call'
+  | 'team_share'
+  | 'ping';
+
+export interface ContentFreeWakeFrame {
+  hostId: string;
+  kind: OrcaWakeFrameKind;
+  sequence: number;
+  timestampMs: number;
+}
 
 export interface PtsUpdate {
   chat_id: number;

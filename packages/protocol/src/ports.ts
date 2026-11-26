@@ -39,7 +39,9 @@ import type {
 import type { PublishPreKeysRequest, PublishPreKeysResponse, UserPreKeyBundlesResponse } from './e2ee.js';
 import type { MessageEntity } from './entities.js';
 import type {
+  AdminLogEventDto,
   AuthResponse,
+  CallRecordDto,
   CallSessionState,
   CallSignalPayload,
   ChannelStatisticsDto,
@@ -50,6 +52,7 @@ import type {
   ForumTopic,
   GifResultDto,
   GlobalSearchResponse,
+  InlineQueryResponse,
   InviteLinkDto,
   InvoiceCard,
   MediaDescriptor,
@@ -59,6 +62,7 @@ import type {
   QrPairSessionDto,
   ReactionCount,
   ReactionDetail,
+  ScheduledMessageDto,
   SearchHitDto,
   SearchTabCategory,
   SessionDto,
@@ -66,6 +70,7 @@ import type {
   StoryGroup,
   StoryItem,
   TodoListCard,
+  TranslateMessageResponse,
   TwoFactorStatusDto,
   UserPrivacySettingsDto,
   UserProfile,
@@ -110,6 +115,77 @@ import type {
   RemoteSessionsResponse,
 } from './remoteControl.js';
 import type { McpAuditListResponse, OAuthGrantsResponse } from './officialMcp.js';
+import type {
+  CatalogRecommendResponse,
+  CatalogReviewsResponse,
+  CreationAuditListResponse,
+  CreationKind,
+  CreationListResponse,
+  CreationSyncResponse,
+  GameLeaderboardResponse,
+  PublicCatalogSearchResponse,
+  ReviewDecisionRequest,
+  SubmitGameScoreRequest,
+  SubmitReviewRequest,
+  UpsertCatalogReviewRequest,
+  UpsertCatalogStateRequest,
+  UpsertCreationRequest,
+  UpsertCreationResponse,
+  UserCreationDto,
+  UserCreationStateDto,
+} from './creations.js';
+import type {
+  AlgoPreferencesDto,
+  AutoModDecisionDto,
+  AutoModDryRunRequest,
+  CommunityActorDto,
+  CommunityCommentDto,
+  CommunityListDto,
+  CommunityNotificationDto,
+  CommunityPostDto,
+  CommunitySearchRequestDto,
+  CommunitySearchResponseDto,
+  EngagementSignalDto,
+  FeedResponseDto,
+  FeedSort,
+  FeedTab,
+  ModLogEntryDto,
+  ModQueueItemDto,
+  SubCommunityDto,
+  TrendingTopicDto,
+} from './community.js';
+import type {
+  BotGroupDto,
+  BotHomeFilesDto,
+  BotItemDto,
+  BotMemoryEntryDto,
+  BotPackageV1Dto,
+  BrowserDesignCaptureRequest,
+  BrowserDesignCaptureResponse,
+  DesignModeChatHandoffDto,
+  NeedsYouItemDto,
+  OrcaArtifactPublicView,
+  OrcaBotDto,
+  OrcaBotTemplateDto,
+  OrcaDecisionGateDto,
+  OrcaDiffAnnotationDto,
+  OrcaHostFederationDto,
+  OrcaMailboxMessageDto,
+  OrcaPluginManifestDto,
+  OrcaRpcRequestEnvelope,
+  OrcaRpcResponseEnvelope,
+  OrcaRunDto,
+  OrcaTaskDto,
+  OrcaTelegramLinkDto,
+  OrcaUsageQuotaSnapshotDto,
+  OrcaVaultSearchHitDto,
+  OrcaWebhookCreatedDto,
+  OrcaWebhookPublicDto,
+  OrcaWorktreeDto,
+  TeamShareIdentityDto,
+  TeamShareOfferEnvelopeDto,
+  UpNextSuggestionDto,
+} from './orca.js';
 
 /**
  * Runtime transport mode.
@@ -472,9 +548,128 @@ export interface TelegramClientPort {
   revokeOAuthMcpGrant?(familyId: string): Promise<{ ok: boolean }>;
   listOAuthMcpAudit?(limit?: number): Promise<McpAuditListResponse>;
 
+  // Optional v1.7.0 Core Parity methods (inline queries, scheduled messages, translate, admin log, calls history)
+  queryBotInline?(req: {
+    bot: string;
+    query: string;
+    chatId?: number;
+    offset?: string;
+    limit?: number;
+    queryId?: string;
+  }): Promise<InlineQueryResponse>;
+  listScheduledMessages?(chatId: number): Promise<ScheduledMessageDto[]>;
+  cancelScheduledMessage?(chatId: number, messageId: number): Promise<{ ok: boolean }>;
+  sendScheduledMessageNow?(chatId: number, messageId: number): Promise<{ message: MessageItem; pts: number }>;
+  translateMessage?(chatId: number, messageId: number, targetLang: string): Promise<TranslateMessageResponse>;
+  listAdminLog?(
+    chatId: number,
+    opts?: { limit?: number; beforeId?: number; action?: string; actorId?: number },
+  ): Promise<{ chat_id: number; events: AdminLogEventDto[]; total: number }>;
+  listCallsHistory?(opts?: {
+    limit?: number;
+    filter?: 'all' | 'missed' | 'video';
+  }): Promise<{ calls: CallRecordDto[]; total: number }>;
+
   getTailnetStatus(): Promise<TailnetStatusDto>;
   getWalletState(): Promise<WalletStateDto>;
   /** @deprecated Unverified direct Stars minting is replaced by verified checkout/redeem in v1.6.11. */
   topUpStars(amount: number): Promise<WalletStateDto>;
   sendStarGift(req: { toUserId: number; chatId?: number; amountStars: number; giftId?: string; message?: string }): Promise<WalletStateDto>;
 }
+
+// ============================================================================
+// Dedicated v1.7.0 Sub-Port Interfaces (M2–M5)
+// ============================================================================
+
+export interface CreationsClientPort {
+  listMyCreations(kind?: CreationKind): Promise<CreationListResponse>;
+  syncMyCreations(sinceRevision?: number): Promise<CreationSyncResponse>;
+  getCreation(creationId: string): Promise<UserCreationDto>;
+  upsertCreation(req: UpsertCreationRequest): Promise<UpsertCreationResponse>;
+  deleteCreation(creationId: string): Promise<{ ok: boolean }>;
+  submitCreationReview(creationId: string, req?: SubmitReviewRequest): Promise<UserCreationDto>;
+  withdrawCreationReview(creationId: string): Promise<UserCreationDto>;
+  unpublishCreation(creationId: string): Promise<UserCreationDto>;
+  listReviewQueue(): Promise<CreationListResponse>;
+  decideCreationReview(creationId: string, req: ReviewDecisionRequest): Promise<UserCreationDto>;
+  listCreationAudit(creationId: string): Promise<CreationAuditListResponse>;
+  searchPublicCatalog(opts?: {
+    kind?: CreationKind;
+    query?: string;
+    genre?: string;
+    limit?: number;
+  }): Promise<PublicCatalogSearchResponse>;
+  getCatalogRecommendations(opts?: { kind?: CreationKind; limit?: number }): Promise<CatalogRecommendResponse>;
+  listMyCatalogStates(): Promise<UserCreationStateDto[]>;
+  upsertCatalogState(creationId: string, req: UpsertCatalogStateRequest): Promise<UserCreationStateDto>;
+  listCatalogReviews(creationId: string): Promise<CatalogReviewsResponse>;
+  upsertCatalogReview(creationId: string, req: UpsertCatalogReviewRequest): Promise<CatalogReviewsResponse>;
+  submitGameScore(creationId: string, req: SubmitGameScoreRequest): Promise<GameLeaderboardResponse>;
+  getGameLeaderboard(creationId: string): Promise<GameLeaderboardResponse>;
+}
+
+export interface CommunityClientPort {
+  listIdentities(): Promise<{ actors: CommunityActorDto[]; active_actor_id?: string }>;
+  getFeed(opts?: {
+    tab?: FeedTab;
+    sort?: FeedSort;
+    cursor?: string;
+    limit?: number;
+  }): Promise<FeedResponseDto>;
+  getAlgoPreferences(): Promise<AlgoPreferencesDto>;
+  updateAlgoPreferences(prefs: Partial<AlgoPreferencesDto>): Promise<AlgoPreferencesDto>;
+  recordSignal(signal: EngagementSignalDto): Promise<{ ok: boolean }>;
+  createPost(payload: Record<string, unknown>): Promise<CommunityPostDto>;
+  getPost(postId: string): Promise<CommunityPostDto>;
+  listComments(postId: string, sort?: string): Promise<CommunityCommentDto[]>;
+  createComment(postId: string, bodyMarkdown: string, parentCommentId?: string): Promise<CommunityCommentDto>;
+  listCommunities(): Promise<SubCommunityDto[]>;
+  getCommunity(slug: string): Promise<SubCommunityDto>;
+  listLists(): Promise<CommunityListDto[]>;
+  listTrending(): Promise<TrendingTopicDto[]>;
+  searchCommunity(req: CommunitySearchRequestDto): Promise<CommunitySearchResponseDto>;
+  listNotifications(unreadOnly?: boolean): Promise<CommunityNotificationDto[]>;
+  listModQueue(slug: string): Promise<ModQueueItemDto[]>;
+  listModLogs(slug: string): Promise<ModLogEntryDto[]>;
+  dryRunAutoMod(req: AutoModDryRunRequest): Promise<AutoModDecisionDto>;
+}
+
+export interface OrcaBotsClientPort {
+  listBots(): Promise<OrcaBotDto[]>;
+  listTemplates(): Promise<OrcaBotTemplateDto[]>;
+  createBot(payload: Record<string, unknown>): Promise<OrcaBotDto>;
+  getBotHomeFiles(botId: string): Promise<BotHomeFilesDto>;
+  listBotMemory(botId: string): Promise<BotMemoryEntryDto[]>;
+  listBotItems(botId: string): Promise<BotItemDto[]>;
+  listNeedsYou(): Promise<NeedsYouItemDto[]>;
+  listUpNext(botId: string): Promise<UpNextSuggestionDto[]>;
+  listGroups(): Promise<BotGroupDto[]>;
+  exportBotPackage(botId: string): Promise<BotPackageV1Dto>;
+  importBotPackage(pkg: BotPackageV1Dto): Promise<OrcaBotDto>;
+  getTeamShareIdentity(): Promise<TeamShareIdentityDto>;
+  sealTeamShareOffer(botId: string, recipientUserId: number): Promise<TeamShareOfferEnvelopeDto>;
+  listWebhooks(): Promise<OrcaWebhookPublicDto[]>;
+  createWebhook(payload: Record<string, unknown>): Promise<OrcaWebhookCreatedDto>;
+  getTelegramLink(botId: string): Promise<OrcaTelegramLinkDto | null>;
+}
+
+export interface OrcaIdeClientPort {
+  invokeRpc<T = unknown>(req: OrcaRpcRequestEnvelope): Promise<OrcaRpcResponseEnvelope & { result?: T }>;
+  listRuns(): Promise<OrcaRunDto[]>;
+  listTasks(runId: string): Promise<OrcaTaskDto[]>;
+  listMailbox(runId: string): Promise<OrcaMailboxMessageDto[]>;
+  listDecisionGates(runId: string): Promise<OrcaDecisionGateDto[]>;
+  listHosts(): Promise<OrcaHostFederationDto[]>;
+  listWorktrees(): Promise<OrcaWorktreeDto[]>;
+  listDiffAnnotations(filePath?: string): Promise<OrcaDiffAnnotationDto[]>;
+  searchVault(query: string): Promise<OrcaVaultSearchHitDto[]>;
+  listPlugins(): Promise<OrcaPluginManifestDto[]>;
+  listArtifacts(): Promise<OrcaArtifactPublicView[]>;
+  getUsageSnapshots(): Promise<OrcaUsageQuotaSnapshotDto[]>;
+}
+
+export interface BrowserDesignModeClientPort {
+  captureDesignMode(req: BrowserDesignCaptureRequest): Promise<BrowserDesignCaptureResponse>;
+  handoffDesignToChat?(req: DesignModeChatHandoffDto): Promise<{ ok: boolean; message_id?: number }>;
+}
+

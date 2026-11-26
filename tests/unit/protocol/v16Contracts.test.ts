@@ -53,10 +53,10 @@ import {
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(testDir, '../../..');
 
-describe('Fabushi v1.6.11 Version & Package Alignment', () => {
-  it('aligns protocol version constant and all workspace package.json manifests to 1.6.11', () => {
-    expect(FABUSHI_PROTOCOL_VERSION).toBe('1.6.11');
-    expect(DEFAULT_APP_VERSION).toBe('1.6.11');
+describe('Fabushi v1.7.0 Version & Package Alignment', () => {
+  it('aligns protocol version constant and all workspace package.json manifests to 1.7.0', () => {
+    expect(FABUSHI_PROTOCOL_VERSION).toBe('1.7.0');
+    expect(DEFAULT_APP_VERSION).toBe('1.7.0');
 
     const rootPkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
       name: string;
@@ -73,10 +73,10 @@ describe('Fabushi v1.6.11 Version & Package Alignment', () => {
     ) as { version: string };
 
     expect(rootPkg.name).toBe('fabushi-web');
-    expect(rootPkg.version).toBe('1.6.11');
-    expect(protoPkg.version).toBe('1.6.11');
-    expect(serverPkg.version).toBe('1.6.11');
-    expect(webPkg.version).toBe('1.6.11');
+    expect(rootPkg.version).toBe('1.7.0');
+    expect(protoPkg.version).toBe('1.7.0');
+    expect(serverPkg.version).toBe('1.7.0');
+    expect(webPkg.version).toBe('1.7.0');
   });
 });
 
@@ -1380,7 +1380,7 @@ describe('Server Config Env Wiring & URL Normalization (apps/server/src/config.t
     try {
       // 1. Pure defaults
       const defCfg = loadServerConfig({ dataDir: path.join(tmpDir, 'defaults') }, {});
-      expect(defCfg.appVersion).toBe('1.6.11');
+      expect(defCfg.appVersion).toBe('1.7.0');
       expect(defCfg.cloudGatewayUrl).toBe('https://api.ombhrum.com');
       expect(defCfg.oauthGatewayUrl).toBe('https://api.ombhrum.com');
       expect(defCfg.aiGatewayUrl).toBe('https://ai.ombhrum.com');

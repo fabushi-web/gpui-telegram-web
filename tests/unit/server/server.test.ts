@@ -33,9 +33,6 @@ describe('@gpui-telegram/server — Full-Stack Integration & Adversarial Securit
       host: '127.0.0.1',
       dataDir,
       enableTestReset: true,
-      seedDemoData: false,
-      allowDemoAuth: false,
-      exposeDevOtpCode: false,
       smsWebhookUrl: smsWebhook.url,
       mailWebhookUrl: mailWebhook.url,
     });
@@ -51,7 +48,7 @@ describe('@gpui-telegram/server — Full-Stack Integration & Adversarial Securit
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it('serves v1.6.11 health/status aliases, rejects malformed percent-encoding with 400, disconnects WS on reset, and resets cleanly in <50ms', async () => {
+  it('serves v1.7.0 health/status aliases, rejects malformed percent-encoding with 400, disconnects WS on reset, and resets cleanly in <50ms', async () => {
     // Plain-text /health -> "OK"
     const plainHealth = await fetch(`${baseUrl}/health`);
     expect(plainHealth.status).toBe(200);
@@ -62,12 +59,12 @@ describe('@gpui-telegram/server — Full-Stack Integration & Adversarial Securit
       expect(health.status).toBe(200);
       expect(health.data.ok).toBe(true);
       expect(health.data.db).toBe('wal_ready');
-      expect(health.data.version).toBe('1.6.11');
+      expect(health.data.version).toBe('1.7.0');
     }
 
     const statusRes = await apiJson(baseUrl, 'GET', '/api/v1/status');
     expect(statusRes.status).toBe(200);
-    expect(statusRes.data.version).toBe('1.6.11');
+    expect(statusRes.data.version).toBe('1.7.0');
     expect(Array.isArray(statusRes.data.capabilities)).toBe(true);
 
     // Demo/sandbox quick-login endpoints are permanently removed (404 even with ENABLE_TEST_RESET=1)

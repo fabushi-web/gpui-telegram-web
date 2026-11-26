@@ -28,6 +28,7 @@ import {
   ensureChatReadAccess,
   ensureChatWriteAccess,
   getChatMemberIds,
+  getMessageById,
   getMessageReactions,
   parseOptionalNonNegativeInt,
   parseOptionalPositiveInt,
@@ -62,7 +63,17 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
   private readonly wss: WebSocketServer;
   private readonly clients = new Set<ConnectedClient>();
   private readonly pingInterval: NodeJS.Timeout;
-  private botTriggerHook?: (chatId: number, senderId: number, messageText: string) => void;
+  private botTriggerHook?: (
+    chatId: number,
+    senderId: number,
+    messageText: string,
+    meta?: {
+      messageId?: number;
+      replyToMsgId?: number;
+      replyToSenderId?: number | null;
+      quoteText?: string;
+    },
+  ) => void;
   private browserBridge?: BrowserControlBridge;
   private miniAppWebMcpHandlers?: MiniAppWebMcpHubHandlers;
   private codingHostHandlers?: CodingHostHubHandlers;
@@ -89,7 +100,19 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
     this.pingInterval.unref();
   }
 
-  setBotTriggerHook(hook: (chatId: number, senderId: number, messageText: string) => void): void {
+  setBotTriggerHook(
+    hook: (
+      chatId: number,
+      senderId: number,
+      messageText: string,
+      meta?: {
+        messageId?: number;
+        replyToMsgId?: number;
+        replyToSenderId?: number | null;
+        quoteText?: string;
+      },
+    ) => void,
+  ): void {
     this.botTriggerHook = hook;
   }
 
@@ -942,6 +965,7 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
           this.sendFrame(client.ws, { type: 'Ack', payload: ackPayload });
           if (
             !result.duplicate &&
+            !result.message.flags.is_scheduled &&
             result.message.content.type === 'Text' &&
             result.message.text
           ) {
@@ -956,11 +980,26 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
           }
           if (
             !result.duplicate &&
+            !result.message.flags.is_scheduled &&
             !p.skip_server_bot_reply &&
             result.message.text &&
             this.botTriggerHook
           ) {
-            this.botTriggerHook(chatId, client.userId, result.message.text);
+            let replyToSenderId: number | null = null;
+            if (replyToMsgId !== undefined) {
+              const targetRow = this.db
+                .prepare(
+                  `SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+                )
+                .get(chatId, replyToMsgId) as { sender_id: number } | undefined;
+              replyToSenderId = targetRow ? Number(targetRow.sender_id) : null;
+            }
+            this.botTriggerHook(chatId, client.userId, result.message.text, {
+              messageId: result.message.id,
+              replyToMsgId,
+              replyToSenderId,
+              quoteText: p.quote_text ?? undefined,
+            });
           }
           break;
         }
@@ -1047,6 +1086,10 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
           }
           const emoji = p.emoji.trim();
           ensureChatReadAccess(this.db, chatId, client.userId);
+          const existingMsg = getMessageById(this.db, chatId, msgId, client.userId);
+          if (!existingMsg) {
+            throw new ApiError(404, 'message_not_found', 'Message not found');
+          }
           const existing = this.db
             .prepare(
               `SELECT 1 FROM message_reactions WHERE chat_id = ? AND message_id = ? AND user_id = ? AND emoji = ?`,

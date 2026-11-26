@@ -2150,10 +2150,20 @@ export function registerOfficialMcpRoutes(
         if (limit === null) return textResult({ error: 'invalid_limit' }, true);
         const rows = db
           .prepare(
-            `SELECT message_id, sender_id, text_plain, date_ms FROM messages
-             WHERE chat_id = ? ORDER BY message_id DESC LIMIT ?`,
+            `SELECT m.message_id, m.sender_id, m.text_plain, m.date_ms
+             FROM messages m
+             LEFT JOIN user_chat_settings ucs ON ucs.chat_id = m.chat_id AND ucs.user_id = ?
+             WHERE m.chat_id = ?
+               AND m.deleted_for_everyone = 0
+               AND m.scheduled_at_ms IS NULL
+               AND m.message_id > COALESCE(ucs.cleared_up_to_msg_id, 0)
+               AND NOT EXISTS (
+                 SELECT 1 FROM message_user_deletions mud
+                 WHERE mud.chat_id = m.chat_id AND mud.message_id = m.message_id AND mud.user_id = ?
+               )
+             ORDER BY m.message_id DESC LIMIT ?`,
           )
-          .all(chatId, limit);
+          .all(verified.userId, chatId, verified.userId, limit);
         return textResult({ chat_id: chatId, messages: rows });
       }
 
@@ -2181,11 +2191,30 @@ export function registerOfficialMcpRoutes(
           .prepare(
             `SELECT m.chat_id, m.message_id, m.sender_id, m.text_plain, m.date_ms
              FROM messages m
-             INNER JOIN chat_members cm ON cm.chat_id = m.chat_id AND cm.user_id = ? AND cm.role != 'banned'
-             WHERE m.text_plain LIKE ?
+             INNER JOIN chat_members cm
+               ON cm.chat_id = m.chat_id
+              AND cm.user_id = ?
+              AND cm.role NOT IN ('banned', 'left', 'kicked')
+             LEFT JOIN user_chat_settings ucs
+               ON ucs.chat_id = m.chat_id
+              AND ucs.user_id = ?
+             WHERE m.deleted_for_everyone = 0
+               AND m.scheduled_at_ms IS NULL
+               AND m.message_id > COALESCE(ucs.cleared_up_to_msg_id, 0)
+               AND NOT EXISTS (
+                 SELECT 1 FROM message_user_deletions mud
+                 WHERE mud.chat_id = m.chat_id AND mud.message_id = m.message_id AND mud.user_id = ?
+               )
+               AND LOWER(m.text_plain) LIKE ? ESCAPE '\\'
              ORDER BY m.date_ms DESC LIMIT ?`,
           )
-          .all(verified.userId, `%${q}%`, limit);
+          .all(
+            verified.userId,
+            verified.userId,
+            verified.userId,
+            `%${q.toLowerCase().replace(/[\\%_]/g, '\\$&')}%`,
+            limit,
+          );
         return textResult({ hits: rows, total: rows.length });
       }
 

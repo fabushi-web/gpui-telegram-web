@@ -1068,13 +1068,30 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   router.get('/api/v1/webrtc/turn_credentials', handleTurnCredentials);
   router.get('/api/v1/webrtc/turn-credentials', handleTurnCredentials);
 
-  router.get('/api/v1/calls', (ctx) => {
+  const handleListCalls = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
+    const rawLimit = ctx.query.get('limit');
+    const parsedLimit = rawLimit ? Number(rawLimit) : 50;
+    const limit =
+      Number.isInteger(parsedLimit) && parsedLimit >= 1 && parsedLimit <= 100
+        ? parsedLimit
+        : 50;
+    const filter = (ctx.query.get('filter') ?? 'all').trim().toLowerCase();
+
+    const clauses: string[] = ['(caller_id = ? OR callee_id = ?)'];
+    const args: Array<string | number> = [auth.userId, auth.userId];
+    if (filter === 'video') {
+      clauses.push('is_video = 1');
+    } else if (filter === 'missed') {
+      clauses.push(`(state = 'failed' OR (state = 'ended' AND duration_secs = 0 AND callee_id = ?))`);
+      args.push(auth.userId);
+    }
+
     const rows = db
       .prepare(
-        `SELECT * FROM call_sessions WHERE caller_id = ? OR callee_id = ? ORDER BY started_at_ms DESC LIMIT 50`,
+        `SELECT * FROM call_sessions WHERE ${clauses.join(' AND ')} ORDER BY started_at_ms DESC LIMIT ?`,
       )
-      .all(auth.userId, auth.userId) as Array<Record<string, unknown>>;
+      .all(...args, limit) as Array<Record<string, unknown>>;
 
     const calls: CallSessionState[] = rows.map((r) => ({
       call_id: String(r.call_id),
@@ -1089,8 +1106,10 @@ export function registerMediaStoriesE2eeAndCallRoutes(
       started_at_ms: Number(r.started_at_ms),
       ended_at_ms: r.ended_at_ms ? Number(r.ended_at_ms) : undefined,
     }));
-    sendJson(ctx.res, 200, { calls });
-  });
+    sendJson(ctx.res, 200, { calls, total: calls.length });
+  };
+  router.get('/api/v1/calls', handleListCalls);
+  router.get('/api/v1/calls/history', handleListCalls);
 
   const handleStartCall = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);

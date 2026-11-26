@@ -15,6 +15,7 @@ export type MessageEntityKind =
   | 'code'
   | 'pre'
   | 'blockquote'
+  | 'expandable_blockquote'
   | 'url'
   | 'text_url'
   | 'mention'
@@ -35,6 +36,7 @@ export type WireMessageEntityType =
   | { type: 'Code' }
   | { type: 'Pre'; value: { language: string | null } }
   | { type: 'Blockquote'; value?: { collapsed?: boolean } }
+  | { type: 'ExpandableBlockquote'; value?: { collapsed?: boolean } }
   | { type: 'Url' }
   | { type: 'TextUrl'; value: { url: string } }
   | { type: 'Mention' }
@@ -162,6 +164,8 @@ export function toWireMessageEntityType(entity: MessageEntity): WireMessageEntit
       return { type: 'Pre', value: { language: entity.language ?? null } };
     case 'blockquote':
       return entity.collapsed ? { type: 'Blockquote', value: { collapsed: true } } : { type: 'Blockquote' };
+    case 'expandable_blockquote':
+      return { type: 'ExpandableBlockquote', value: { collapsed: entity.collapsed ?? true } };
     case 'url':
       return { type: 'Url' };
     case 'text_url':
@@ -206,6 +210,7 @@ const VALID_ENTITY_KINDS = new Set<MessageEntityKind>([
   'code',
   'pre',
   'blockquote',
+  'expandable_blockquote',
   'url',
   'text_url',
   'mention',
@@ -238,7 +243,12 @@ export function fromWireMessageEntity(
       language: typeof rec.language === 'string' ? rec.language : undefined,
       url: typeof rec.url === 'string' ? rec.url : undefined,
       documentId: rec.documentId !== undefined ? toSafeInt(rec.documentId, 0) : undefined,
-      collapsed: rec.collapsed !== undefined ? Boolean(rec.collapsed) : undefined,
+      collapsed:
+        rec.collapsed !== undefined
+          ? Boolean(rec.collapsed)
+          : kind === 'expandable_blockquote'
+            ? true
+            : undefined,
       seconds: rec.seconds !== undefined ? toSafeInt(rec.seconds, 0) : undefined,
     };
     normalized.entity_type = toWireMessageEntityType(normalized);
@@ -273,6 +283,10 @@ export function fromWireMessageEntity(
     case 'Blockquote':
       return makeEntity(safeOffset, safeLength, 'blockquote', {
         collapsed: val?.collapsed !== undefined ? Boolean(val.collapsed) : undefined,
+      });
+    case 'ExpandableBlockquote':
+      return makeEntity(safeOffset, safeLength, 'expandable_blockquote', {
+        collapsed: val?.collapsed !== undefined ? Boolean(val.collapsed) : true,
       });
     case 'Url':
       return makeEntity(safeOffset, safeLength, 'url');
@@ -731,9 +745,14 @@ function parseBlocksOutsideFences(chunk: string, state: InlineParseState): void 
     const line = lines[idx]!;
     if (/^>>?\s?/.test(line)) {
       const quoteLines: string[] = [];
-      const collapsed = /^>>\s?/.test(line);
-      while (idx < lines.length && /^>>?\s?/.test(lines[idx]!)) {
-        const stripped = lines[idx]!.replace(/^>>?\s?/, '');
+      const isExpandable = /^>>/.test(line);
+      while (
+        idx < lines.length &&
+        (isExpandable ? /^>>/.test(lines[idx]!) : /^>(?!>)/.test(lines[idx]!))
+      ) {
+        const stripped = isExpandable
+          ? lines[idx]!.replace(/^>>\s?/, '')
+          : lines[idx]!.replace(/^>\s?/, '');
         quoteLines.push(stripped);
         idx++;
       }
@@ -743,7 +762,15 @@ function parseBlocksOutsideFences(chunk: string, state: InlineParseState): void 
       parseInlineRange(joinedQuote, 0, joinedQuote.length, state);
       const quoteLen = state.out.length - quoteOffset;
       if (quoteLen > 0) {
-        state.entities.push(makeEntity(quoteOffset, quoteLen, 'blockquote', { collapsed }));
+        if (isExpandable) {
+          state.entities.push(
+            makeEntity(quoteOffset, quoteLen, 'expandable_blockquote', { collapsed: true }),
+          );
+        } else {
+          state.entities.push(
+            makeEntity(quoteOffset, quoteLen, 'blockquote', { collapsed: quoteLines.length > 4 }),
+          );
+        }
       }
       if (idx < lines.length) {
         state.out += '\n';
@@ -830,11 +857,11 @@ export function serializeEntitiesToMarkdown(
   const blockquoteRanges: Array<{ start: number; end: number; collapsed: boolean }> = [];
 
   clampedEntities.forEach((ent, idx) => {
-    if (ent.type === 'blockquote') {
+    if (ent.type === 'blockquote' || ent.type === 'expandable_blockquote') {
       blockquoteRanges.push({
         start: ent.offset,
         end: ent.offset + ent.length,
-        collapsed: Boolean(ent.collapsed),
+        collapsed: ent.type === 'expandable_blockquote' ? (ent.collapsed ?? true) : Boolean(ent.collapsed),
       });
       return;
     }
@@ -987,18 +1014,35 @@ export function renderEntitiesSegments(
   rawEntities: ReadonlyArray<MessageEntity | WireMessageEntity>,
 ): EntitySegment[] {
   if (!text) return [];
-  const entities = rawEntities
-    .map((e) => fromWireMessageEntity(e))
-    .filter((e) => e.length > 0 && e.offset >= 0 && e.offset + e.length <= text.length);
+  const clampedEntities: Array<{ ent: MessageEntity; start: number; end: number }> = [];
+  for (const raw of rawEntities) {
+    const ent = fromWireMessageEntity(raw);
+    if (ent.length <= 0 || ent.offset < 0 || ent.offset + ent.length > text.length) {
+      continue;
+    }
+    const start = clampUtf16Boundary(text, ent.offset);
+    const end = clampUtf16Boundary(text, ent.offset + ent.length);
+    if (end <= start) {
+      continue;
+    }
+    clampedEntities.push({
+      ent:
+        start === ent.offset && end - start === ent.length
+          ? ent
+          : { ...ent, offset: start, length: end - start },
+      start,
+      end,
+    });
+  }
 
-  if (entities.length === 0) {
+  if (clampedEntities.length === 0) {
     return [{ text, offset: 0, length: text.length, activeEntities: [] }];
   }
 
   const boundaries = new Set<number>([0, text.length]);
-  for (const ent of entities) {
-    boundaries.add(clampUtf16Boundary(text, ent.offset));
-    boundaries.add(clampUtf16Boundary(text, ent.offset + ent.length));
+  for (const item of clampedEntities) {
+    boundaries.add(item.start);
+    boundaries.add(item.end);
   }
 
   const sortedPoints = Array.from(boundaries).sort((a, b) => a - b);
@@ -1008,7 +1052,9 @@ export function renderEntitiesSegments(
     const start = sortedPoints[i]!;
     const end = sortedPoints[i + 1]!;
     if (end <= start) continue;
-    const active = entities.filter((e) => e.offset <= start && e.offset + e.length >= end);
+    const active = clampedEntities
+      .filter((item) => item.start <= start && item.end >= end)
+      .map((item) => item.ent);
     segments.push({
       text: text.slice(start, end),
       offset: start,
@@ -1058,8 +1104,15 @@ export function renderEntitiesToSafeHtml(
             break;
           }
           case 'blockquote':
-            html = `<blockquote>${html}</blockquote>`;
+            html = ent.collapsed
+              ? `<blockquote data-expandable="true" data-collapsed="true">${html}</blockquote>`
+              : `<blockquote>${html}</blockquote>`;
             break;
+          case 'expandable_blockquote': {
+            const isCollapsed = ent.collapsed === false ? 'false' : 'true';
+            html = `<blockquote data-expandable="true" data-collapsed="${isCollapsed}">${html}</blockquote>`;
+            break;
+          }
           case 'text_url':
           case 'url': {
             const candidate = ent.url ?? seg.text;

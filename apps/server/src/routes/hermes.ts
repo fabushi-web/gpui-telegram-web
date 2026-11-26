@@ -41,12 +41,33 @@ import {
   type RequestContext,
 } from '../utils/http.js';
 import type { RealtimeGatewayHub } from '../ws/hub.js';
+import { isChromiumBinaryAvailable, type BrowserControlBridge } from './browserControl.js';
+import type { CodingAgentBroker } from './codingAgents.js';
 import {
   getUserMagpieStateSnapshot,
   getUserMaskingConfig,
   runConfiguredLlmCompletion,
   upsertUserMagpieProvider,
 } from './magpie.js';
+
+export interface HermesRuntimeContext {
+  browserBridge?: BrowserControlBridge;
+  codingAgentBroker?: CodingAgentBroker;
+}
+
+export interface HermesSlashCommandResult {
+  ok: boolean;
+  error_code?: string;
+  http_status?: number;
+  command: string;
+  response_text: string;
+  session_id: string;
+  ui_effect: { kind: string; payload?: unknown };
+  task_id?: string;
+}
+
+const VISION_CAPABLE_MODEL_RE =
+  /(?:gpt-4o|gpt-4\.1|gpt-5|o1|o3|o4|claude-3|claude-4|claude-sonnet-4|claude-opus-4|gemini|qwen[-_]?vl|qwen2\.?5?-vl|llava|pixtral|vision)/i;
 
 export const HERMES_COMMAND_CATALOG: HermesCommandDescriptor[] = [
   // 1. Session (11)
@@ -431,15 +452,8 @@ export function executeSlashCommandInternal(
   sessionId?: string,
   chatId?: number | null,
   config?: ServerConfig,
-): {
-  ok: boolean;
-  error_code?: string;
-  http_status?: number;
-  command: string;
-  response_text: string;
-  session_id: string;
-  ui_effect: { kind: string; payload?: unknown };
-} {
+  runtime?: HermesRuntimeContext,
+): HermesSlashCommandResult {
   const trimmed = rawCommand.trim();
   const withoutSlash = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
   const spaceIdx = withoutSlash.indexOf(' ');
@@ -1284,8 +1298,292 @@ export function executeSlashCommandInternal(
       };
     }
 
+    case 'background': {
+      const prompt = argStr.trim();
+      if (!prompt) {
+        return {
+          ok: false,
+          error_code: 'missing_prompt',
+          http_status: 400,
+          command: 'background',
+          response_text: 'Usage: `/background <prompt>` — provide a non-empty prompt to enqueue a background task.',
+          session_id: session.session_id,
+          ui_effect: { kind: 'none' },
+        };
+      }
+      const taskId = `task_${crypto.randomBytes(6).toString('hex')}`;
+      const title = prompt.length > 72 ? `${prompt.slice(0, 71)}…` : prompt;
+      const taskObj = {
+        task_id: taskId,
+        title,
+        description: prompt,
+        state: 'queued',
+        progress: 0,
+        logs: [`[${new Date(now).toISOString()}] Queued via /background slash command`],
+        chat_id: chatId ?? undefined,
+        created_at_ms: now,
+        updated_at_ms: now,
+      };
+      db.prepare(
+        `INSERT INTO tasks (task_id, user_id, task_json, updated_at_ms) VALUES (?, ?, ?, ?)`,
+      ).run(taskId, userId, JSON.stringify(taskObj), now);
+      return {
+        ok: true,
+        command: 'background',
+        task_id: taskId,
+        response_text: `Queued background task \`${taskId}\`: ${title}`,
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_tasks', payload: { task_id: taskId } },
+      };
+    }
+
+    case 'browser': {
+      const tokenCntRow = db
+        .prepare(
+          `SELECT COUNT(*) AS cnt FROM browser_desktop_tokens WHERE user_id = ? AND revoked = 0`,
+        )
+        .get(userId) as { cnt: number };
+      const activeTokens = Number(tokenCntRow?.cnt ?? 0);
+      const chromiumAvailable = isChromiumBinaryAvailable();
+      const targetsCount = runtime?.browserBridge
+        ? runtime.browserBridge.listTargets(userId).length
+        : 0;
+      const headlessCount = runtime?.browserBridge
+        ? runtime.browserBridge.listHeadlessSessions(userId).length
+        : 0;
+      const controlMode = runtime?.browserBridge
+        ? runtime.browserBridge.getControlMode(userId).mode
+        : 'human';
+      return {
+        ok: true,
+        command: 'browser',
+        response_text: [
+          '**Browser Control Runtime**',
+          `• Mode: \`${controlMode}\``,
+          `• Chromium binary: \`${chromiumAvailable ? 'available' : 'unavailable'}\``,
+          `• Connected targets: ${targetsCount} · Headless sessions: ${headlessCount}`,
+          `• Active paired desktop tokens: ${activeTokens}`,
+        ].join('\n'),
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_browser' },
+      };
+    }
+
+    case 'terminal': {
+      const nodes = db
+        .prepare(`SELECT node_id, node_json FROM computer_nodes WHERE user_id = ?`)
+        .all(userId) as Array<{ node_id: string; node_json: string }>;
+      let onlineNodes = 0;
+      for (const n of nodes) {
+        try {
+          const parsed = JSON.parse(n.node_json) as { status?: string; online?: boolean };
+          if (parsed.online || parsed.status === 'online' || parsed.status === 'connected') {
+            onlineNodes += 1;
+          }
+        } catch {
+          // Ignore malformed node json
+        }
+      }
+      const cmdCntRow = db
+        .prepare(`SELECT COUNT(*) AS cnt FROM computer_commands WHERE user_id = ?`)
+        .get(userId) as { cnt: number };
+      const recentCommands = Number(cmdCntRow?.cnt ?? 0);
+
+      if (argStr.trim() && onlineNodes === 0) {
+        return {
+          ok: false,
+          error_code: 'node_offline',
+          http_status: 503,
+          command: 'terminal',
+          response_text:
+            'No online remote computer node is connected to execute terminal commands. Pair or connect a node in Remote Computer Workbench.',
+          session_id: session.session_id,
+          ui_effect: { kind: 'open_computer' },
+        };
+      }
+
+      return {
+        ok: true,
+        command: 'terminal',
+        response_text: [
+          '**Terminal & Remote Computer Status**',
+          `• Local server PTYs: 0 (stateless server — use Remote Computer Workbench or Orca IDE host)`,
+          `• Registered computer nodes: ${nodes.length} (${onlineNodes} online)`,
+          `• Recorded computer commands: ${recentCommands}`,
+        ].join('\n'),
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_computer' },
+      };
+    }
+
+    case 'subagents': {
+      const ownedBots = db
+        .prepare(`SELECT bot_user_id, bot_json FROM bots_registry WHERE owner_user_id = ?`)
+        .all(userId) as Array<{ bot_user_id: number; bot_json: string }>;
+      const botNames = ownedBots
+        .map((r) => {
+          try {
+            const b = JSON.parse(r.bot_json) as { username?: string };
+            return b.username ? `@${b.username}` : `bot_${r.bot_user_id}`;
+          } catch {
+            return `bot_${r.bot_user_id}`;
+          }
+        })
+        .slice(0, 8);
+      const hosts = runtime?.codingAgentBroker
+        ? runtime.codingAgentBroker.listHostsForUser(userId)
+        : [];
+      const childSessionsRow = db
+        .prepare(
+          `SELECT COUNT(*) AS cnt FROM hermes_sessions WHERE user_id = ? AND parent_session_id IS NOT NULL`,
+        )
+        .get(userId) as { cnt: number };
+      const allTasks = db
+        .prepare(`SELECT task_json FROM tasks WHERE user_id = ?`)
+        .all(userId) as Array<{ task_json: string }>;
+      let activeTasks = 0;
+      for (const t of allTasks) {
+        try {
+          const parsed = JSON.parse(t.task_json) as { state?: string };
+          if (parsed.state === 'queued' || parsed.state === 'running') {
+            activeTasks += 1;
+          }
+        } catch {
+          // Ignore corrupt task row
+        }
+      }
+      return {
+        ok: true,
+        command: 'subagents',
+        response_text: [
+          '**Subagents & Delegation Overview**',
+          `• Owned bots: ${ownedBots.length}${botNames.length > 0 ? ` (${botNames.join(', ')})` : ''}`,
+          `• Online coding agent hosts: ${hosts.length}`,
+          `• Branched child sessions: ${Number(childSessionsRow?.cnt ?? 0)}`,
+          `• Active background tasks: ${activeTasks}`,
+        ].join('\n'),
+        session_id: session.session_id,
+        ui_effect: { kind: 'none' },
+      };
+    }
+
+    case 'connections': {
+      const mcpServers = (
+        db.prepare(`SELECT COUNT(*) AS cnt FROM mcp_servers WHERE user_id = ?`).get(userId) as {
+          cnt: number;
+        }
+      ).cnt;
+      const mcpTokens = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM mcp_oauth_tokens WHERE user_id = ? AND revoked_at_ms IS NULL`,
+          )
+          .get(userId) as { cnt: number }
+      ).cnt;
+      const tailnetPeers = (
+        db.prepare(`SELECT COUNT(*) AS cnt FROM tailnet_peers WHERE user_id = ?`).get(userId) as {
+          cnt: number;
+        }
+      ).cnt;
+      const computerNodes = (
+        db.prepare(`SELECT COUNT(*) AS cnt FROM computer_nodes WHERE user_id = ?`).get(userId) as {
+          cnt: number;
+        }
+      ).cnt;
+      const browserTokens = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM browser_desktop_tokens WHERE user_id = ? AND revoked = 0`,
+          )
+          .get(userId) as { cnt: number }
+      ).cnt;
+      const remoteAssistDevices = (
+        db
+          .prepare(`SELECT COUNT(*) AS cnt FROM remote_assist_devices WHERE user_id = ?`)
+          .get(userId) as { cnt: number }
+      ).cnt;
+      const configuredProviders = magpieSnap
+        ? magpieSnap.providers.filter((p) => p.enabled && p.has_api_key).length
+        : 0;
+
+      return {
+        ok: true,
+        command: 'connections',
+        response_text: [
+          '**Active Connectors & Bridges**',
+          `• Magpie LLM providers configured: ${configuredProviders}`,
+          `• MCP servers registered: ${Number(mcpServers)} · OAuth MCP grants: ${Number(mcpTokens)}`,
+          `• Tailnet peers: ${Number(tailnetPeers)} · Computer nodes: ${Number(computerNodes)}`,
+          `• Browser bridge tokens: ${Number(browserTokens)} · Remote Assist devices: ${Number(remoteAssistDevices)}`,
+        ].join('\n'),
+        session_id: session.session_id,
+        ui_effect: { kind: 'none' },
+      };
+    }
+
+    case 'diff': {
+      const lastCp = session.checkpoints[session.checkpoints.length - 1];
+      if (!lastCp) {
+        return {
+          ok: true,
+          command: 'diff',
+          response_text: `No checkpoints recorded in session \`${session.session_id}\` (${session.messages.length} total messages). Use \`/checkpoint <label>\` to capture a snapshot. Git working-tree diffs require an attached Coding Agent host.`,
+          session_id: session.session_id,
+          ui_effect: { kind: 'show_diff' },
+        };
+      }
+      const delta = Math.max(0, session.messages.length - lastCp.message_count);
+      return {
+        ok: true,
+        command: 'diff',
+        response_text: `Session \`${session.session_id}\`: +${delta} message(s) since checkpoint \`${lastCp.id}\` ("${lastCp.label}", ${lastCp.message_count} -> ${session.messages.length} msgs).`,
+        session_id: session.session_id,
+        ui_effect: { kind: 'show_diff', payload: { checkpoint_id: lastCp.id, delta_messages: delta } },
+      };
+    }
+
+    case 'vision': {
+      const activeModel = magpieSnap?.active_model ?? '';
+      const hasVision =
+        Boolean(magpieSnap?.has_configured_provider) && VISION_CAPABLE_MODEL_RE.test(activeModel);
+      if (!hasVision) {
+        return {
+          ok: false,
+          error_code: 'vision_provider_unconfigured',
+          http_status: 501,
+          command: 'vision',
+          response_text:
+            'No vision-capable Magpie LLM provider/model is currently configured for multimodal image inspection.',
+          session_id: session.session_id,
+          ui_effect: { kind: 'open_magpie' },
+        };
+      }
+      return {
+        ok: true,
+        command: 'vision',
+        response_text: `Vision capability is ready via provider \`${magpieSnap!.active_provider}\` (model \`${activeModel}\`). Attach an image in chat or Hermes Studio to analyze it.`,
+        session_id: session.session_id,
+        ui_effect: { kind: 'none' },
+      };
+    }
+
+    case 'retry':
+    case 'btw':
+    case 'plan':
+      // Async LLM-backed commands require `executeSlashCommandAsync`
+      return {
+        ok: false,
+        error_code: 'provider_not_configured',
+        http_status: 503,
+        command: spec.name,
+        response_text: `Command \`/${spec.name}\` requires a configured Magpie LLM provider.`,
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_magpie' },
+      };
+
+    case 'reload-mcp':
     default:
-      // ZERO fake "Executed /cmd" stubs — honest 501 command_not_supported!
+      // ZERO fake "Executed /cmd" stubs — honest 501 command_not_supported (no live stdio/SSE MCP client runtime attached)!
       return {
         ok: false,
         error_code: 'command_not_supported',
@@ -1298,11 +1596,288 @@ export function executeSlashCommandInternal(
   }
 }
 
+export async function executeSlashCommandAsync(
+  db: DatabaseSync,
+  userId: number,
+  rawCommand: string,
+  sessionId?: string,
+  chatId?: number | null,
+  config?: ServerConfig,
+  runtime?: HermesRuntimeContext,
+): Promise<HermesSlashCommandResult> {
+  const trimmed = rawCommand.trim();
+  const withoutSlash = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+  const spaceIdx = withoutSlash.indexOf(' ');
+  const rawVerb = (spaceIdx === -1 ? withoutSlash : withoutSlash.slice(0, spaceIdx)).split('@')[0]!;
+  const argStr = spaceIdx === -1 ? '' : withoutSlash.slice(spaceIdx + 1).trim();
+
+  const spec = HERMES_COMMAND_CATALOG.find(
+    (c) =>
+      c.name.toLowerCase() === rawVerb.toLowerCase() ||
+      c.aliases.some((a) => a.toLowerCase() === rawVerb.toLowerCase()),
+  );
+
+  if (!spec || (spec.name !== 'retry' && spec.name !== 'btw' && spec.name !== 'plan')) {
+    return executeSlashCommandInternal(db, userId, rawCommand, sessionId, chatId, config, runtime);
+  }
+
+  const magpieSnap = config ? getUserMagpieStateSnapshot(db, config, userId) : null;
+  const session = getOrCreateHermesSession(
+    db,
+    userId,
+    sessionId,
+    chatId,
+    magpieSnap?.active_model ?? '',
+  );
+  const mem = getHermesMemoryState(db, userId);
+
+  if (spec.name === 'retry') {
+    let lastUserIdx = -1;
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      if (session.messages[i]?.role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx === -1) {
+      return {
+        ok: false,
+        error_code: 'no_turn_to_retry',
+        http_status: 400,
+        command: 'retry',
+        response_text: 'No previous user turn exists in this session to retry.',
+        session_id: session.session_id,
+        ui_effect: { kind: 'none' },
+      };
+    }
+    if (!config) {
+      return {
+        ok: false,
+        error_code: 'provider_not_configured',
+        http_status: 503,
+        command: 'retry',
+        response_text: 'Configure a Magpie LLM provider before running `/retry`.',
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_magpie' },
+      };
+    }
+
+    const retainedMessages = session.messages.slice(0, lastUserIdx + 1);
+    const llmMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: mem.soul },
+      ...retainedMessages
+        .slice(-10)
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+    ];
+
+    const llmRes = await runConfiguredLlmCompletion(db, config, userId, llmMessages, {
+      model: session.model || undefined,
+    });
+    if (!llmRes.usedUpstream || !llmRes.text) {
+      if (llmRes.error && llmRes.providerId) {
+        return {
+          ok: false,
+          error_code: 'llm_upstream_error',
+          http_status: 502,
+          command: 'retry',
+          response_text: `Regeneration failed via ${llmRes.providerId}: ${llmRes.error}`,
+          session_id: session.session_id,
+          ui_effect: { kind: 'none' },
+        };
+      }
+      return {
+        ok: false,
+        error_code: 'provider_not_configured',
+        http_status: 503,
+        command: 'retry',
+        response_text: 'Configure an active Magpie LLM provider before running `/retry`.',
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_magpie' },
+      };
+    }
+
+    const now = Date.now();
+    const updatedMessages: StoredHermesMessage[] = [
+      ...retainedMessages,
+      {
+        id: `hmsg_${crypto.randomBytes(6).toString('hex')}`,
+        role: 'assistant',
+        content: llmRes.text.trim(),
+        created_at_ms: now,
+      },
+    ];
+    db.prepare(
+      `UPDATE hermes_sessions SET messages_json = ?, updated_at_ms = ? WHERE session_id = ?`,
+    ).run(JSON.stringify(updatedMessages), now, session.session_id);
+
+    return {
+      ok: true,
+      command: 'retry',
+      response_text: llmRes.text.trim(),
+      session_id: session.session_id,
+      ui_effect: { kind: 'refresh_session' },
+    };
+  }
+
+  if (spec.name === 'btw') {
+    if (!argStr) {
+      return {
+        ok: false,
+        error_code: 'missing_question',
+        http_status: 400,
+        command: 'btw',
+        response_text: 'Usage: `/btw <question>` — ask an ephemeral side question without mutating session history.',
+        session_id: session.session_id,
+        ui_effect: { kind: 'none' },
+      };
+    }
+    if (!config) {
+      return {
+        ok: false,
+        error_code: 'provider_not_configured',
+        http_status: 503,
+        command: 'btw',
+        response_text: 'Configure an active Magpie LLM provider before running `/btw`.',
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_magpie' },
+      };
+    }
+
+    const recentContext = session.messages
+      .slice(-4)
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+    const sysPrompt = [
+      mem.soul,
+      mem.memory.raw ? `Memory:\n${mem.memory.raw}` : '',
+      'Answer the user side question concisely. This turn is ephemeral and will not be added to session history.',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const llmRes = await runConfiguredLlmCompletion(
+      db,
+      config,
+      userId,
+      [
+        { role: 'system', content: sysPrompt },
+        ...recentContext,
+        { role: 'user', content: argStr },
+      ],
+      { model: session.model || undefined },
+    );
+
+    if (!llmRes.usedUpstream || !llmRes.text) {
+      if (llmRes.error && llmRes.providerId) {
+        return {
+          ok: false,
+          error_code: 'llm_upstream_error',
+          http_status: 502,
+          command: 'btw',
+          response_text: `Side question failed via ${llmRes.providerId}: ${llmRes.error}`,
+          session_id: session.session_id,
+          ui_effect: { kind: 'none' },
+        };
+      }
+      return {
+        ok: false,
+        error_code: 'provider_not_configured',
+        http_status: 503,
+        command: 'btw',
+        response_text: 'Configure an active Magpie LLM provider before running `/btw`.',
+        session_id: session.session_id,
+        ui_effect: { kind: 'open_magpie' },
+      };
+    }
+
+    // Strictly ephemeral: DO NOT modify `hermes_sessions.messages_json`!
+    return {
+      ok: true,
+      command: 'btw',
+      response_text: llmRes.text.trim(),
+      session_id: session.session_id,
+      ui_effect: { kind: 'none' },
+    };
+  }
+
+  // `plan`
+  if (!argStr) {
+    return {
+      ok: false,
+      error_code: 'missing_goal',
+      http_status: 400,
+      command: 'plan',
+      response_text: 'Usage: `/plan <goal>` — provide a goal to generate a structured implementation plan.',
+      session_id: session.session_id,
+      ui_effect: { kind: 'none' },
+    };
+  }
+  if (!config) {
+    return {
+      ok: false,
+      error_code: 'provider_not_configured',
+      http_status: 503,
+      command: 'plan',
+      response_text: 'Configure an active Magpie LLM provider before running `/plan`.',
+      session_id: session.session_id,
+      ui_effect: { kind: 'open_magpie' },
+    };
+  }
+
+  const llmRes = await runConfiguredLlmCompletion(
+    db,
+    config,
+    userId,
+    [
+      {
+        role: 'system',
+        content:
+          'You are a pragmatic staff software architect. Produce a clear, numbered, actionable step-by-step plan with verification criteria.',
+      },
+      { role: 'user', content: argStr },
+    ],
+    { model: session.model || undefined },
+  );
+
+  if (!llmRes.usedUpstream || !llmRes.text) {
+    if (llmRes.error && llmRes.providerId) {
+      return {
+        ok: false,
+        error_code: 'llm_upstream_error',
+        http_status: 502,
+        command: 'plan',
+        response_text: `Planning failed via ${llmRes.providerId}: ${llmRes.error}`,
+        session_id: session.session_id,
+        ui_effect: { kind: 'none' },
+      };
+    }
+    return {
+      ok: false,
+      error_code: 'provider_not_configured',
+      http_status: 503,
+      command: 'plan',
+      response_text: 'Configure an active Magpie LLM provider before running `/plan`.',
+      session_id: session.session_id,
+      ui_effect: { kind: 'open_magpie' },
+    };
+  }
+
+  return {
+    ok: true,
+    command: 'plan',
+    response_text: llmRes.text.trim(),
+    session_id: session.session_id,
+    ui_effect: { kind: 'none' },
+  };
+}
+
 export function registerHermesStudioRoutes(
   router: HttpRouter,
   db: DatabaseSync,
   config: ServerConfig,
   hub: RealtimeGatewayHub,
+  runtime?: HermesRuntimeContext,
 ): void {
   const mountDual = (
     method: 'get' | 'post' | 'put' | 'patch' | 'delete',
@@ -1379,13 +1954,14 @@ export function registerHermesStudioRoutes(
       throw new ApiError(400, 'invalid_command', 'command is required');
     }
     const chatId = parseOptionalPositiveInt(body.chat_id, 'invalid_chat_id', 'chat_id must be a positive integer');
-    const result = executeSlashCommandInternal(
+    const result = await executeSlashCommandAsync(
       db,
       auth.userId,
       rawCmd,
       typeof body.session_id === 'string' ? body.session_id : undefined,
       chatId ?? null,
       config,
+      runtime,
     );
     if (!result.ok) {
       throw new ApiError(
@@ -1439,13 +2015,14 @@ export function registerHermesStudioRoutes(
 
     // Intercept slash commands cleanly without trajectory pollution
     if (rawPrompt.startsWith('/')) {
-      const slashRes = executeSlashCommandInternal(
+      const slashRes = await executeSlashCommandAsync(
         db,
         auth.userId,
         rawPrompt,
         typeof body.session_id === 'string' ? body.session_id : undefined,
         chatId ?? null,
         config,
+        runtime,
       );
       if (!slashRes.ok) {
         throw new ApiError(

@@ -52,6 +52,8 @@ export interface UserProfile {
   isBot: boolean;
   isVerified: boolean;
   isPremium: boolean;
+  isSupport?: boolean;
+  is_support?: boolean;
   status: 'online' | 'offline' | 'recently' | 'last_week' | 'last_month' | 'bot' | string;
   lastSeenMs?: number;
   colorIndex: number;
@@ -70,6 +72,7 @@ export interface UserProfileDto {
   is_bot: boolean;
   is_verified: boolean;
   is_premium: boolean;
+  is_support?: boolean;
   status: string;
   last_seen_ms?: number;
 }
@@ -91,6 +94,8 @@ export function mapUserDtoToDomain(dto: UserProfileDto): UserProfile {
     isBot: Boolean(dto.is_bot),
     isVerified: Boolean(dto.is_verified),
     isPremium: Boolean(dto.is_premium),
+    isSupport: Boolean(dto.is_support),
+    is_support: Boolean(dto.is_support),
     status: dto.status ?? 'recently',
     lastSeenMs: dto.last_seen_ms,
     colorIndex: peerAvatarColorIndex(dto.user_id),
@@ -808,6 +813,8 @@ export interface MessageItem {
   forwards?: number;
   ttl_seconds?: number;
   expires_at_ms?: number;
+  scheduled_at_ms?: number | null;
+  scheduledAtMs?: number | null;
   delivery_status?: 'sending' | 'sent' | 'read' | 'failed';
 }
 
@@ -1170,3 +1177,98 @@ export interface TurnCredentialsDto {
   ttl_seconds: number;
   expires_at: number;
 }
+
+// ============================================================================
+// Core Parity DTOs (v1.7.0: Inline Queries, Scheduled, Translate, Admin Log, Calls)
+// ============================================================================
+
+export interface InlineQueryResult {
+  type: 'article' | 'photo' | 'gif' | 'mpeg4_gif' | 'video' | 'audio' | 'voice' | 'document' | string;
+  id: string;
+  title?: string;
+  subtitle?: string;
+  description?: string;
+  summary?: string;
+  url?: string;
+  thumb_url?: string;
+  deep_link?: string;
+  creation_id?: string;
+  kind?: string;
+  author_display_name?: string;
+  rating_avg?: number;
+  rating_count?: number;
+  score?: number;
+  reason?: string;
+  input_message_content?: {
+    message_text: string;
+    parse_mode?: string;
+    disable_web_page_preview?: boolean;
+  };
+  reply_markup?: {
+    inline_keyboard?: InlineKeyboardButton[][];
+  };
+  mini_app?: {
+    bot_username: string;
+    short_name: string;
+    web_url?: string;
+  };
+  [key: string]: unknown;
+}
+
+export interface InlineQueryResponse {
+  ok: boolean;
+  query_id: string;
+  bot_user_id: number;
+  bot_username: string;
+  total: number;
+  results: InlineQueryResult[];
+  items?: InlineQueryResult[];
+  next_offset?: string;
+}
+
+export interface AnswerInlineQueryRequest {
+  inline_query_id: string;
+  results: InlineQueryResult[];
+  cache_time?: number;
+  is_personal?: boolean;
+  next_offset?: string;
+}
+
+export interface ScheduledMessageDto {
+  message_id: number;
+  chat_id: number;
+  sender_id: number;
+  topic_id?: number;
+  text?: string;
+  content: MessageContent;
+  scheduled_at_ms: number;
+  created_at_ms: number;
+  message?: MessageItem;
+}
+
+export interface TranslateMessageResponse {
+  ok: boolean;
+  chat_id: number;
+  message_id: number;
+  target_lang: string;
+  original_text: string;
+  translated_text: string;
+  provider_id?: string;
+  model?: string;
+}
+
+export interface AdminLogEventDto {
+  event_id: number;
+  chat_id: number;
+  actor_user_id: number;
+  actor?: UserProfileDto;
+  action: string;
+  target_user_id?: number | null;
+  target_user?: UserProfileDto | null;
+  target_message_id?: number | null;
+  details: Record<string, unknown>;
+  created_at_ms: number;
+}
+
+export type CallRecordDto = CallSessionState;
+

@@ -1,5 +1,5 @@
-/* Fabushi Web v1.6.11 — Standalone Offline-Capable Service Worker (Root & Subpath Safe) */
-const CACHE_NAME = 'fabushi-web-v5';
+/* Fabushi Web v1.7.0 — Standalone Offline-Capable Service Worker (Root & Subpath Safe) */
+const CACHE_NAME = 'fabushi-web-v6';
 
 function resolveScopedUrl(relPath) {
   const scope = (self.registration && self.registration.scope) || self.location.origin + '/';

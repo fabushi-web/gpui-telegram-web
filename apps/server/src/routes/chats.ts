@@ -4,6 +4,7 @@ import {
   E2EE_SAFETY_EMOJIS,
   escapeHtml,
   renderEntitiesToSafeHtml,
+  type AdminLogEventDto,
   type ChannelStatisticsDto,
   type ChatDetailDto,
   type ChatFolderDto,
@@ -21,9 +22,11 @@ import {
   getUserProfileDto,
   hydrateMessageRow,
   mapUserRowToDto,
+  parseBoundedQueryInt,
   parseOptionalNonNegativeInt,
   parseOptionalPositiveInt,
   purgeExpiredTtlMessages,
+  recordChatAdminLog,
   refreshChatLastMessage,
   validateSendAsPeerId,
 } from '../db/queries.js';
@@ -726,6 +729,22 @@ export function registerChatAndSocialRoutes(
       db.prepare(`UPDATE chats SET is_forum = ? WHERE chat_id = ?`).run(body.is_forum ? 1 : 0, chatId);
     }
 
+    const changedFields: Record<string, unknown> = {};
+    if (body.title !== undefined) changedFields.title = String(body.title).trim();
+    if (body.about !== undefined) changedFields.about = body.about;
+    if (body.username !== undefined) changedFields.username = body.username;
+    if (body.photo_file_id !== undefined) changedFields.photo_file_id = body.photo_file_id;
+    if (body.slow_mode_seconds !== undefined) changedFields.slow_mode_seconds = body.slow_mode_seconds;
+    if (body.is_forum !== undefined) changedFields.is_forum = Boolean(body.is_forum);
+    if (Object.keys(changedFields).length > 0) {
+      recordChatAdminLog(db, {
+        chatId,
+        actorUserId: auth.userId,
+        action: 'edit_chat_info',
+        details: changedFields,
+      });
+    }
+
     const detail = getChatDetailDto(db, chatId, auth.userId)!;
     hub.broadcastChatEphemeral(chatId, { type: 'ChatUpdated', data: detail });
     sendJson(ctx.res, 200, detail);
@@ -1002,6 +1021,12 @@ export function registerChatAndSocialRoutes(
         'ttl_seconds must be a non-negative integer',
       ) ?? 0;
     db.prepare(`UPDATE chats SET ttl_seconds = ? WHERE chat_id = ?`).run(ttlSeconds, chatId);
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'change_ttl',
+      details: { ttl_seconds: ttlSeconds },
+    });
     const purged = purgeExpiredTtlMessages(db, chatId);
     sendJson(ctx.res, 200, { ok: true, ttl_seconds: ttlSeconds, purged_count: purged.length });
   };
@@ -1021,9 +1046,15 @@ export function registerChatAndSocialRoutes(
              text_plain = '',
              content_json = '{"type":"Text","data":{"text":"","entities":[]}}',
              entities_json = '[]'
-         WHERE chat_id = ?`,
+         WHERE chat_id = ? AND scheduled_at_ms IS NULL`,
       ).run(chatId);
       refreshChatLastMessage(db, chatId);
+      recordChatAdminLog(db, {
+        chatId,
+        actorUserId: auth.userId,
+        action: 'clear_history',
+        details: { for_everyone: true },
+      });
     } else {
       const chatRow = db.prepare(`SELECT last_message_id FROM chats WHERE chat_id = ?`).get(chatId) as
         | { last_message_id: number }
@@ -1255,6 +1286,13 @@ export function registerChatAndSocialRoutes(
       ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
     `).run(chatId, topicId, title, iconColor, iconEmoji, auth.userId, now);
 
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'create_topic',
+      details: { topic_id: topicId, title },
+    });
+
     const dto: ForumTopicDto = {
       chat_id: chatId,
       topic_id: topicId,
@@ -1311,6 +1349,18 @@ export function registerChatAndSocialRoutes(
       .get(chatId, topicId) as Record<string, unknown> | undefined;
     if (!row) throw new ApiError(404, 'topic_not_found', 'Forum topic not found');
 
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'edit_topic',
+      details: {
+        topic_id: topicId,
+        title: String(row.title),
+        is_closed: Boolean(row.is_closed),
+        is_pinned: Boolean(row.is_pinned),
+      },
+    });
+
     const dto: ForumTopicDto = {
       chat_id: chatId,
       topic_id: topicId,
@@ -1339,6 +1389,12 @@ export function registerChatAndSocialRoutes(
       throw new ApiError(400, 'cannot_delete_general', 'Cannot delete #General forum topic');
     }
     db.prepare(`DELETE FROM forum_topics WHERE chat_id = ? AND topic_id = ?`).run(chatId, topicId);
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'delete_topic',
+      details: { topic_id: topicId },
+    });
     hub.broadcastChatEphemeral(chatId, { type: 'ForumTopicDeleted', data: { chat_id: chatId, topic_id: topicId } });
     sendJson(ctx.res, 200, { ok: true });
   });
@@ -1577,6 +1633,15 @@ export function registerChatAndSocialRoutes(
         added.push(uid);
       }
     }
+    if (added.length > 0) {
+      recordChatAdminLog(db, {
+        chatId,
+        actorUserId: auth.userId,
+        action: 'add_members',
+        targetUserId: added.length === 1 ? added[0]! : null,
+        details: { user_ids: added },
+      });
+    }
     sendJson(ctx.res, 200, { ok: true, added });
   });
 
@@ -1673,6 +1738,18 @@ export function registerChatAndSocialRoutes(
       hub.unsubscribeUserFromChat(targetUserId, chatId);
     }
 
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: role === 'banned' ? 'ban_member' : 'update_member_role',
+      targetUserId,
+      details: {
+        previous_role: targetRoleRow?.role ?? null,
+        role,
+        custom_title: customTitle ?? undefined,
+      },
+    });
+
     const u = getUserProfileDto(db, targetUserId);
     sendJson(ctx.res, 200, {
       user_id: targetUserId,
@@ -1734,6 +1811,13 @@ export function registerChatAndSocialRoutes(
 
     db.prepare(`DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?`).run(chatId, targetUserId);
     hub.unsubscribeUserFromChat(targetUserId, chatId);
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'remove_member',
+      targetUserId,
+      details: { previous_role: targetRoleRow.role },
+    });
     sendJson(ctx.res, 200, { ok: true });
   });
 
@@ -1834,6 +1918,13 @@ export function registerChatAndSocialRoutes(
       now,
     );
 
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'create_invite',
+      details: { invite_id: inviteId, code, title: inviteTitle || undefined },
+    });
+
     const dto: InviteLinkDto = {
       invite_id: inviteId,
       chat_id: chatId,
@@ -1862,12 +1953,127 @@ export function registerChatAndSocialRoutes(
         'Invite links are only supported for groups and channels',
       );
     }
-    db.prepare(`UPDATE chat_invite_links SET is_revoked = 1 WHERE chat_id = ? AND code = ?`).run(
-      chatId,
-      ctx.params.code!,
-    );
+    const del = db
+      .prepare(
+        `UPDATE chat_invite_links SET is_revoked = 1 WHERE chat_id = ? AND code = ? AND is_revoked = 0`,
+      )
+      .run(chatId, ctx.params.code!);
+    if (Number(del.changes) > 0) {
+      recordChatAdminLog(db, {
+        chatId,
+        actorUserId: auth.userId,
+        action: 'revoke_invite',
+        details: { code: ctx.params.code! },
+      });
+    }
     sendJson(ctx.res, 200, { ok: true, revoked: true });
   });
+
+  // 10b. Group / Channel Admin Log (`GET /api/v1/chats/:chatId/admin-log` & `/admin_log`)
+  const handleGetAdminLog = (ctx: RequestContext): void => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId ?? 0);
+    const access = ensureChatAdminAccess(db, chatId, auth.userId);
+    if (![1, 2, 3].includes(access.chatType)) {
+      throw new ApiError(
+        400,
+        'invalid_chat_type',
+        'Admin log is only available for groups, supergroups, and channels',
+      );
+    }
+
+    const limit = parseBoundedQueryInt(ctx.query.get('limit'), 50, 1, 100);
+    const beforeIdRaw = ctx.query.get('before_id');
+    const beforeId =
+      beforeIdRaw !== null && beforeIdRaw.trim() !== ''
+        ? parseOptionalPositiveInt(
+            Number(beforeIdRaw),
+            'invalid_before_id',
+            'before_id must be a positive integer',
+          )
+        : undefined;
+    const actionFilter = ctx.query.get('action')?.trim() || undefined;
+    const actorIdRaw = ctx.query.get('actor_id');
+    const actorId =
+      actorIdRaw !== null && actorIdRaw.trim() !== ''
+        ? parseOptionalPositiveInt(
+            Number(actorIdRaw),
+            'invalid_actor_id',
+            'actor_id must be a positive integer',
+          )
+        : undefined;
+
+    const clauses: string[] = ['chat_id = ?'];
+    const args: Array<string | number> = [chatId];
+    if (beforeId !== undefined) {
+      clauses.push('event_id < ?');
+      args.push(beforeId);
+    }
+    if (actionFilter) {
+      clauses.push('action = ?');
+      args.push(actionFilter);
+    }
+    if (actorId !== undefined) {
+      clauses.push('actor_user_id = ?');
+      args.push(actorId);
+    }
+
+    const totalRow = db
+      .prepare(`SELECT COUNT(*) AS cnt FROM chat_admin_log WHERE ${clauses.join(' AND ')}`)
+      .get(...args) as { cnt: number };
+
+    const rows = db
+      .prepare(
+        `SELECT * FROM chat_admin_log
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY event_id DESC
+         LIMIT ?`,
+      )
+      .all(...args, limit) as Array<Record<string, unknown>>;
+
+    const events: AdminLogEventDto[] = rows.map((r) => {
+      const actorUserId = Number(r.actor_user_id);
+      const targetUserId =
+        r.target_user_id !== null && r.target_user_id !== undefined
+          ? Number(r.target_user_id)
+          : null;
+      const targetMessageId =
+        r.target_message_id !== null && r.target_message_id !== undefined
+          ? Number(r.target_message_id)
+          : null;
+      let details: Record<string, unknown> = {};
+      if (typeof r.details_json === 'string' && r.details_json) {
+        try {
+          const parsed = JSON.parse(r.details_json) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            details = parsed as Record<string, unknown>;
+          }
+        } catch {
+          details = {};
+        }
+      }
+      return {
+        event_id: Number(r.event_id),
+        chat_id: Number(r.chat_id),
+        actor_user_id: actorUserId,
+        actor: getUserProfileDto(db, actorUserId) ?? undefined,
+        action: String(r.action),
+        target_user_id: targetUserId,
+        target_user: targetUserId ? getUserProfileDto(db, targetUserId) : null,
+        target_message_id: targetMessageId,
+        details,
+        created_at_ms: Number(r.created_at_ms),
+      };
+    });
+
+    sendJson(ctx.res, 200, {
+      chat_id: chatId,
+      events,
+      total: Number(totalRow.cnt),
+    });
+  };
+  router.get('/api/v1/chats/:chatId/admin-log', handleGetAdminLog);
+  router.get('/api/v1/chats/:chatId/admin_log', handleGetAdminLog);
 
   const handleJoinByInvite = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
@@ -1947,7 +2153,7 @@ export function registerChatAndSocialRoutes(
                 COALESCE(SUM(views), 0) AS sum_views,
                 COALESCE(SUM(forwards), 0) AS sum_forwards
          FROM messages
-         WHERE chat_id = ? AND deleted_for_everyone = 0`,
+         WHERE chat_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
       )
       .get(chatId) as { total: number; sum_views: number; sum_forwards: number };
     const reactionRows = db
@@ -1982,7 +2188,7 @@ export function registerChatAndSocialRoutes(
                 COALESCE(SUM(views), 0) AS views,
                 COUNT(DISTINCT sender_id) AS active_senders
          FROM messages
-         WHERE chat_id = ? AND deleted_for_everyone = 0 AND date_ms >= ?
+         WHERE chat_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL AND date_ms >= ?
          GROUP BY day_ms`,
       )
       .all(chatId, windowStart) as Array<{
@@ -2043,7 +2249,7 @@ export function registerChatAndSocialRoutes(
       .prepare(
         `SELECT COUNT(DISTINCT sender_id) AS cnt
          FROM messages
-         WHERE chat_id = ? AND deleted_for_everyone = 0 AND date_ms >= ?`,
+         WHERE chat_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL AND date_ms >= ?`,
       )
       .get(chatId, sevenDaysAgo) as { cnt: number };
 
@@ -2103,7 +2309,7 @@ export function registerChatAndSocialRoutes(
     const msgRows = db
       .prepare(
         `SELECT * FROM messages m
-         WHERE m.chat_id = ? AND m.message_id > ? AND m.deleted_for_everyone = 0
+         WHERE m.chat_id = ? AND m.message_id > ? AND m.deleted_for_everyone = 0 AND m.scheduled_at_ms IS NULL
            AND NOT EXISTS (
              SELECT 1 FROM message_user_deletions d
              WHERE d.user_id = ? AND d.chat_id = m.chat_id AND d.message_id = m.message_id

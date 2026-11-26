@@ -23,14 +23,19 @@ import {
 } from './routes/codingAgents.js';
 import { registerFabushiMiniAppRoutes } from './routes/fabushiMiniApp.js';
 import {
-  executeSlashCommandInternal,
+  executeSlashCommandAsync,
   getHermesMemoryState,
   registerHermesStudioRoutes,
 } from './routes/hermes.js';
 import { registerMagpieGatewayRoutes, runConfiguredLlmCompletion } from './routes/magpie.js';
 import { registerMediaStoriesE2eeAndCallRoutes } from './routes/media.js';
 import { registerMessageAndSearchRoutes } from './routes/messages.js';
-import { MultiAgentOrchestrator, registerMultiAgentRoutes } from './routes/multiAgent.js';
+import {
+  extractMentionTokens,
+  MultiAgentOrchestrator,
+  registerMultiAgentRoutes,
+  type BotMessageContext,
+} from './routes/multiAgent.js';
 import { createOfficialMcpRuntime, registerOfficialMcpRoutes } from './routes/officialMcp.js';
 import {
   createRemoteAssistRuntime,
@@ -61,6 +66,7 @@ import {
   ApiError,
   HttpRouter,
   markResponseAcceptsGzip,
+  readJsonBody,
   readRawBody,
   requireAuth,
   sendError,
@@ -120,6 +126,12 @@ const SERVER_STATUS_CAPABILITIES: readonly string[] = [
   'official_mcp_oauth21',
   'remote_control',
   'remote_assist',
+  'bot_inline_query',
+  'scheduled_messages',
+  'message_translate',
+  'admin_log',
+  'multi_agent_primary_fallback',
+  'protocol_v170_contracts',
 ];
 
 const RFC9110_HOST_HEADER_RE = /^(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(:\d{1,5})?$/;
@@ -172,7 +184,12 @@ export function createTelegramServer(
   }) as RealtimeGatewayHub;
 
   // Bot, Coding Agent, Multi-Agent Group & @HermesAgent conversational message hook
-  const runBotReplyNow = (chatId: number, senderId: number, text: string): void => {
+  const runBotReplyNow = (
+    chatId: number,
+    senderId: number,
+    text: string,
+    meta?: BotMessageContext,
+  ): void => {
     try {
       const chatMeta = db
         .prepare(`SELECT chat_type, peer_user_id FROM chats WHERE chat_id = ?`)
@@ -206,9 +223,7 @@ export function createTelegramServer(
             return;
           }
         } else {
-          const mentionTokens = Array.from(text.matchAll(/@([A-Za-z0-9_.-]+)/g)).map((m) =>
-            m[1]!.toLowerCase(),
-          );
+          const mentionTokens = extractMentionTokens(text);
           const targeted = codingBots.find((b) =>
             mentionTokens.includes(b.username.toLowerCase()),
           );
@@ -231,7 +246,7 @@ export function createTelegramServer(
 
       // 3. Group Chat Multi-Agent Orchestration (FloorControl, 5-Hop Budget, Reply Gate, Shared Workspace)
       if (Number(chatMeta.chat_type) !== 0) {
-        if (multiAgentOrchestrator.handleGroupMessage(chatId, senderId, text)) {
+        if (multiAgentOrchestrator.handleGroupMessage(chatId, senderId, text, meta)) {
           return;
         }
         return;
@@ -295,31 +310,43 @@ export function createTelegramServer(
             text: welcomeText,
           });
         } else if (trimmed.startsWith('/')) {
-          const slashRes = executeSlashCommandInternal(
-            db,
-            senderId,
-            trimmed,
-            undefined,
-            chatId,
-            config,
-          );
-          createMessageAtomic(db, deferredBotSink, {
-            chatId,
-            senderId: peerBotId,
-            text: slashRes.response_text,
-          });
+          void (async () => {
+            try {
+              if (shutdownAbort.signal.aborted) return;
+              const slashRes = await executeSlashCommandAsync(
+                db,
+                senderId,
+                trimmed,
+                undefined,
+                chatId,
+                config,
+                { browserBridge, codingAgentBroker },
+              );
+              if (shutdownAbort.signal.aborted) return;
+              createMessageAtomic(db, deferredBotSink, {
+                chatId,
+                senderId: peerBotId,
+                text: slashRes.response_text,
+              });
+            } catch {
+              // Ignore if DB closed during server teardown
+            }
+          })();
         } else {
           void (async () => {
             try {
               if (shutdownAbort.signal.aborted) return;
               const mem = getHermesMemoryState(db, senderId);
+              const userContent = meta?.quoteText?.trim()
+                ? `[Quoted message]: ${meta.quoteText.trim()}\n\n${trimmed}`
+                : trimmed;
               const llmRes = await runConfiguredLlmCompletion(
                 db,
                 config,
                 senderId,
                 [
                   { role: 'system', content: peerBot?.ai_persona || mem.soul },
-                  { role: 'user', content: trimmed },
+                  { role: 'user', content: userContent },
                 ],
                 { model: peerBot?.preferred_model || undefined },
               );
@@ -346,7 +373,12 @@ export function createTelegramServer(
     }
   };
 
-  const dispatchBotReplyIfApplicable = (chatId: number, senderId: number, text: string): void => {
+  const dispatchBotReplyIfApplicable = (
+    chatId: number,
+    senderId: number,
+    text: string,
+    meta?: BotMessageContext,
+  ): void => {
     // Ignore messages authored by bots themselves to prevent infinite loops
     try {
       const senderRow = db
@@ -356,7 +388,7 @@ export function createTelegramServer(
     } catch {
       return;
     }
-    runBotReplyNow(chatId, senderId, text);
+    runBotReplyNow(chatId, senderId, text, meta);
   };
 
   hub.setBotTriggerHook(dispatchBotReplyIfApplicable);
@@ -427,6 +459,67 @@ export function createTelegramServer(
       ok: true,
       reset: true,
       elapsed_ms: elapsedMs,
+    });
+  });
+
+  // Strictly gated test helper: returns 404 whenever ENABLE_TEST_RESET is disabled!
+  router.post('/api/v1/test/promote-support', async (ctx) => {
+    if (!config.enableTestReset) {
+      throw new ApiError(404, 'not_found', 'Route POST /api/v1/test/promote-support not found');
+    }
+    const body = await readJsonBody<{
+      user_id?: unknown;
+      username?: unknown;
+      is_support?: unknown;
+    }>(ctx.req);
+
+    if (body.is_support !== undefined && typeof body.is_support !== 'boolean') {
+      throw new ApiError(400, 'invalid_is_support', 'is_support must be a boolean');
+    }
+    const nextSupport = body.is_support === undefined ? true : body.is_support;
+
+    let targetRow: { user_id: number; username: string | null } | undefined;
+    if (body.user_id !== undefined && body.user_id !== null) {
+      if (
+        typeof body.user_id !== 'number' ||
+        !Number.isSafeInteger(body.user_id) ||
+        body.user_id <= 0
+      ) {
+        throw new ApiError(400, 'invalid_user', 'user_id must be a positive integer');
+      }
+      targetRow = db
+        .prepare(`SELECT user_id, username FROM users WHERE user_id = ?`)
+        .get(body.user_id) as { user_id: number; username: string | null } | undefined;
+    } else if (body.username !== undefined && body.username !== null) {
+      if (typeof body.username !== 'string' || !body.username.trim()) {
+        throw new ApiError(400, 'invalid_user', 'username must be a non-empty string');
+      }
+      const cleanUsername = body.username.trim().replace(/^@/, '');
+      if (!cleanUsername) {
+        throw new ApiError(400, 'invalid_user', 'username must be a non-empty string');
+      }
+      targetRow = db
+        .prepare(`SELECT user_id, username FROM users WHERE LOWER(username) = LOWER(?)`)
+        .get(cleanUsername) as { user_id: number; username: string | null } | undefined;
+    } else {
+      throw new ApiError(400, 'invalid_user', 'Either user_id or username is required');
+    }
+
+    if (!targetRow) {
+      throw new ApiError(404, 'user_not_found', 'Target user not found');
+    }
+
+    const now = Date.now();
+    db.prepare(`UPDATE users SET is_support = ?, updated_at_ms = ? WHERE user_id = ?`).run(
+      nextSupport ? 1 : 0,
+      now,
+      Number(targetRow.user_id),
+    );
+    sendJson(ctx.res, 200, {
+      ok: true,
+      user_id: Number(targetRow.user_id),
+      username: targetRow.username,
+      is_support: nextSupport,
     });
   });
 
@@ -521,7 +614,7 @@ export function createTelegramServer(
     (ctx, body) => handleCodingCallback(db, hub, codingAgentBroker, ctx, body),
   );
   registerFabushiMiniAppRoutes(router, db, config, hub);
-  registerHermesStudioRoutes(router, db, config, hub);
+  registerHermesStudioRoutes(router, db, config, hub, { browserBridge, codingAgentBroker });
   registerMagpieGatewayRoutes(router, db, config);
   registerMultiAgentRoutes(router, db, multiAgentOrchestrator);
   registerCodingAgentRoutes(router, db, codingAgentBroker);

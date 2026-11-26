@@ -181,6 +181,7 @@ export function mapUserRowToDto(row: Record<string, unknown>): UserProfileDto {
     is_bot: Boolean(row.is_bot),
     is_verified: Boolean(row.is_verified),
     is_premium: Boolean(row.is_premium),
+    is_support: Boolean(row.is_support),
     status: String(row.status ?? 'recently'),
     last_seen_ms: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
   };
@@ -423,7 +424,7 @@ export function refreshChatLastMessage(db: DatabaseSync, chatId: number): void {
     .prepare(
       `SELECT message_id, date_ms, text_plain, media_type
        FROM messages
-       WHERE chat_id = ? AND deleted_for_everyone = 0
+       WHERE chat_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL
        ORDER BY message_id DESC
        LIMIT 1`,
     )
@@ -504,6 +505,7 @@ export function getChatDetailDto(
          AND m.message_id > ?
          AND m.sender_id != ?
          AND m.deleted_for_everyone = 0
+         AND m.scheduled_at_ms IS NULL
          AND NOT EXISTS (
            SELECT 1 FROM message_user_deletions d
            WHERE d.user_id = ? AND d.chat_id = m.chat_id AND d.message_id = m.message_id
@@ -648,11 +650,17 @@ export function hydrateMessageRow(
     .prepare(`SELECT 1 FROM pinned_messages WHERE chat_id = ? AND message_id = ?`)
     .get(chatId, messageId);
 
+  const scheduledAtMs =
+    row.scheduled_at_ms !== null && row.scheduled_at_ms !== undefined
+      ? Number(row.scheduled_at_ms)
+      : undefined;
+
   const flags: MessageFlags = {
     ...baseFlags,
     is_out: senderId === viewerUserId,
     is_pinned: Boolean(isPinnedRow),
     is_edited: Boolean(baseFlags.is_edited || row.edit_date_ms),
+    is_scheduled: scheduledAtMs !== undefined,
     has_reactions: reactions.length > 0,
   };
 
@@ -699,6 +707,8 @@ export function hydrateMessageRow(
     forwards: Number(row.forwards ?? 0),
     ttl_seconds: row.ttl_seconds !== null && row.ttl_seconds !== undefined ? Number(row.ttl_seconds) : undefined,
     expires_at_ms: row.expires_at_ms !== null && row.expires_at_ms !== undefined ? Number(row.expires_at_ms) : undefined,
+    scheduled_at_ms: scheduledAtMs,
+    scheduledAtMs,
     delivery_status: 'sent',
   };
 }
@@ -708,11 +718,14 @@ export function getMessageById(
   chatId: number,
   messageId: number,
   viewerUserId: number,
+  options?: { includeScheduled?: boolean },
 ): MessageItem | null {
+  const scheduledFilter = options?.includeScheduled ? '' : 'AND m.scheduled_at_ms IS NULL';
   const row = db
     .prepare(
       `SELECT * FROM messages m
        WHERE m.chat_id = ? AND m.message_id = ? AND m.deleted_for_everyone = 0
+         ${scheduledFilter}
          AND m.message_id > COALESCE(
            (SELECT ucs.cleared_up_to_msg_id FROM user_chat_settings ucs WHERE ucs.user_id = ? AND ucs.chat_id = m.chat_id),
            0
@@ -1354,20 +1367,37 @@ export function enrichMessageWebPageAsync(
 
       const existing = db
         .prepare(
-          `SELECT sender_id, deleted_for_everyone, web_page_json FROM messages WHERE chat_id = ? AND message_id = ?`,
+          `SELECT sender_id, deleted_for_everyone, web_page_json, scheduled_at_ms
+           FROM messages
+           WHERE chat_id = ? AND message_id = ? AND scheduled_at_ms IS NULL`,
         )
         .get(chatId, messageId) as
-        | { sender_id: number; deleted_for_everyone: number; web_page_json: string | null }
+        | {
+            sender_id: number;
+            deleted_for_everyone: number;
+            web_page_json: string | null;
+            scheduled_at_ms: number | null;
+          }
         | undefined;
-      if (!existing || existing.deleted_for_everyone || existing.web_page_json !== null) {
+      if (
+        !existing ||
+        existing.deleted_for_everyone ||
+        existing.web_page_json !== null ||
+        existing.scheduled_at_ms !== null
+      ) {
         return;
       }
 
-      db.prepare(`UPDATE messages SET web_page_json = ? WHERE chat_id = ? AND message_id = ?`).run(
-        JSON.stringify(preview),
-        chatId,
-        messageId,
-      );
+      const upd = db
+        .prepare(
+          `UPDATE messages
+           SET web_page_json = ?
+           WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+        )
+        .run(JSON.stringify(preview), chatId, messageId);
+      if (Number(upd.changes) !== 1) {
+        return;
+      }
       const updated = getMessageById(db, chatId, messageId, Number(existing.sender_id));
       if (updated) {
         commitPtsEventAtomic(db, sink, chatId, {
@@ -1534,6 +1564,7 @@ export function createMessageAtomic(
         Number(existingDedup.chat_id),
         Number(existingDedup.message_id),
         params.senderId,
+        { includeScheduled: true },
       );
       if (existingMsg) {
         const payloadMismatch =
@@ -1562,7 +1593,11 @@ export function createMessageAtomic(
   let replyHeader: ReplyHeader | undefined;
   if (replyToMsgId !== undefined) {
     const targetRow = db
-      .prepare(`SELECT sender_id, text_plain FROM messages WHERE chat_id = ? AND message_id = ?`)
+      .prepare(
+        `SELECT sender_id, text_plain
+         FROM messages
+         WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+      )
       .get(params.chatId, replyToMsgId) as { sender_id: number; text_plain: string } | undefined;
     const senderDto = targetRow ? getUserProfileDto(db, Number(targetRow.sender_id)) : null;
     replyHeader = {
@@ -1582,13 +1617,15 @@ export function createMessageAtomic(
   const expiresAtMs =
     effectiveTtl && effectiveTtl > 0 ? now + effectiveTtl * 1000 : undefined;
 
-  const nextPts = Number(chatRow.pts) + 1;
+  const isFutureScheduled = scheduleAtMs !== undefined && scheduleAtMs > now;
+  const currentPts = Number(chatRow.pts);
+  const nextPts = isFutureScheduled ? currentPts : currentPts + 1;
   const flags: MessageFlags = {
     is_out: true,
     is_pinned: false,
     is_silent: Boolean(params.silent),
     is_edited: false,
-    is_scheduled: Boolean(scheduleAtMs),
+    is_scheduled: isFutureScheduled,
     media_unread: content.type === 'Voice' || content.type === 'VideoNote',
     has_reactions: false,
     no_forwards: false,
@@ -1608,8 +1645,8 @@ export function createMessageAtomic(
         chat_id, message_id, sender_id, send_as_peer_id, topic_id, date_ms,
         text_plain, media_type, content_json, entities_json, reply_to_json,
         forward_info_json, inline_keyboard_json, web_page_json, flags_json,
-        views, forwards, ttl_seconds, expires_at_ms, client_nonce
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
+        views, forwards, ttl_seconds, expires_at_ms, scheduled_at_ms, client_nonce
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
     `).run(
       params.chatId,
       msgId,
@@ -1628,38 +1665,46 @@ export function createMessageAtomic(
       JSON.stringify(flags),
       effectiveTtl ?? null,
       expiresAtMs ?? null,
+      isFutureScheduled ? scheduleAtMs : null,
       params.clientNonce !== undefined ? Math.trunc(params.clientNonce) : null,
     );
 
-    db.prepare(`
-      UPDATE chats
-      SET pts = ?, next_msg_id = ?, last_message_id = ?, last_message_date_ms = ?,
-          last_message_preview = ?, last_message_media_type = ?
-      WHERE chat_id = ?
-    `).run(
-      nextPts,
-      msgId + 1,
-      msgId,
-      now,
-      plainText.slice(0, 140),
-      mediaType,
-      params.chatId,
-    );
+    if (isFutureScheduled) {
+      db.prepare(`UPDATE chats SET next_msg_id = ? WHERE chat_id = ?`).run(
+        msgId + 1,
+        params.chatId,
+      );
+    } else {
+      db.prepare(`
+        UPDATE chats
+        SET pts = ?, next_msg_id = ?, last_message_id = ?, last_message_date_ms = ?,
+            last_message_preview = ?, last_message_media_type = ?
+        WHERE chat_id = ?
+      `).run(
+        nextPts,
+        msgId + 1,
+        msgId,
+        now,
+        plainText.slice(0, 140),
+        mediaType,
+        params.chatId,
+      );
 
-    // Advance sender's own read_inbox_max_id / read_outbox_max_id
-    db.prepare(`
-      INSERT INTO user_chat_settings (user_id, chat_id, read_inbox_max_id, read_outbox_max_id)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(user_id, chat_id) DO UPDATE SET
-        read_inbox_max_id = MAX(read_inbox_max_id, excluded.read_inbox_max_id),
-        read_outbox_max_id = MAX(read_outbox_max_id, excluded.read_outbox_max_id),
-        draft_json = NULL
-    `).run(params.senderId, params.chatId, msgId, msgId);
+      // Advance sender's own read_inbox_max_id / read_outbox_max_id
+      db.prepare(`
+        INSERT INTO user_chat_settings (user_id, chat_id, read_inbox_max_id, read_outbox_max_id)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, chat_id) DO UPDATE SET
+          read_inbox_max_id = MAX(read_inbox_max_id, excluded.read_inbox_max_id),
+          read_outbox_max_id = MAX(read_outbox_max_id, excluded.read_outbox_max_id),
+          draft_json = NULL
+      `).run(params.senderId, params.chatId, msgId, msgId);
 
-    if (topicId) {
-      db.prepare(
-        `UPDATE forum_topics SET last_message_id = ? WHERE chat_id = ? AND topic_id = ?`,
-      ).run(msgId, params.chatId, topicId);
+      if (topicId) {
+        db.prepare(
+          `UPDATE forum_topics SET last_message_id = ? WHERE chat_id = ? AND topic_id = ?`,
+        ).run(msgId, params.chatId, topicId);
+      }
     }
 
     if (params.clientNonce !== undefined && Number.isFinite(params.clientNonce)) {
@@ -1679,22 +1724,26 @@ export function createMessageAtomic(
       data: hydrated,
     };
 
-    db.prepare(`
-      INSERT INTO pts_events (chat_id, pts, pts_count, created_at_ms, event_json)
-      VALUES (?, ?, 1, ?, ?)
-    `).run(params.chatId, nextPts, now, JSON.stringify(updateEvent));
+    if (!isFutureScheduled) {
+      db.prepare(`
+        INSERT INTO pts_events (chat_id, pts, pts_count, created_at_ms, event_json)
+        VALUES (?, ?, 1, ?, ?)
+      `).run(params.chatId, nextPts, now, JSON.stringify(updateEvent));
+    }
 
     db.exec('COMMIT;');
 
-    const ptsUpdate: PtsUpdate = {
-      chat_id: params.chatId,
-      pts: nextPts,
-      pts_count: 1,
-      event: updateEvent,
-      timestamp_ms: now,
-      date: new Date(now).toISOString(),
-    };
-    sink?.broadcastChatPtsUpdate(params.chatId, ptsUpdate);
+    if (!isFutureScheduled) {
+      const ptsUpdate: PtsUpdate = {
+        chat_id: params.chatId,
+        pts: nextPts,
+        pts_count: 1,
+        event: updateEvent,
+        timestamp_ms: now,
+        date: new Date(now).toISOString(),
+      };
+      sink?.broadcastChatPtsUpdate(params.chatId, ptsUpdate);
+    }
 
     return {
       message: hydrated,
@@ -1705,6 +1754,209 @@ export function createMessageAtomic(
     db.exec('ROLLBACK;');
     throw err;
   }
+}
+
+/**
+ * Atomically delivers a scheduled message immediately (clearing `scheduled_at_ms`,
+ * updating `date_ms`, refreshing chat preview, advancing PTS, and broadcasting `NewMessage`).
+ */
+export function deliverScheduledMessageAtomic(
+  db: DatabaseSync,
+  sink: PtsBroadcastSink | null,
+  chatId: number,
+  messageId: number,
+): { message: MessageItem; pts: number } | null {
+  let delivered: {
+    message: MessageItem;
+    pts: number;
+    updateEvent: UpdateEvent;
+    now: number;
+  } | null = null;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const existing = db
+      .prepare(
+        `SELECT * FROM messages WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL`,
+      )
+      .get(chatId, messageId) as Record<string, unknown> | undefined;
+    if (!existing) {
+      db.exec('ROLLBACK;');
+      return null;
+    }
+
+    const chatRow = db
+      .prepare(`SELECT pts FROM chats WHERE chat_id = ?`)
+      .get(chatId) as { pts: number } | undefined;
+    if (!chatRow) {
+      db.exec('ROLLBACK;');
+      return null;
+    }
+
+    const now = Date.now();
+    const nextPts = Number(chatRow.pts) + 1;
+    const senderId = Number(existing.sender_id);
+    const topicId =
+      existing.topic_id !== null && existing.topic_id !== undefined
+        ? Number(existing.topic_id)
+        : undefined;
+    let flags: MessageFlags;
+    try {
+      flags = { ...(JSON.parse(String(existing.flags_json)) as MessageFlags), is_scheduled: false };
+    } catch {
+      flags = {
+        is_out: true,
+        is_pinned: false,
+        is_silent: false,
+        is_edited: false,
+        is_scheduled: false,
+        media_unread: false,
+        has_reactions: false,
+        no_forwards: false,
+        is_forwarded: false,
+      };
+    }
+
+    const upd = db
+      .prepare(
+        `UPDATE messages
+         SET scheduled_at_ms = NULL, date_ms = ?, flags_json = ?
+         WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL`,
+      )
+      .run(now, JSON.stringify(flags), chatId, messageId);
+    if (Number(upd.changes) !== 1) {
+      db.exec('ROLLBACK;');
+      return null;
+    }
+
+    db.prepare(`UPDATE chats SET pts = ? WHERE chat_id = ?`).run(nextPts, chatId);
+    refreshChatLastMessage(db, chatId);
+
+    db.prepare(`
+      INSERT INTO user_chat_settings (user_id, chat_id, read_inbox_max_id, read_outbox_max_id)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, chat_id) DO UPDATE SET
+        read_inbox_max_id = MAX(read_inbox_max_id, excluded.read_inbox_max_id),
+        read_outbox_max_id = MAX(read_outbox_max_id, excluded.read_outbox_max_id)
+    `).run(senderId, chatId, messageId, messageId);
+
+    if (topicId) {
+      db.prepare(
+        `UPDATE forum_topics SET last_message_id = ? WHERE chat_id = ? AND topic_id = ?`,
+      ).run(messageId, chatId, topicId);
+    }
+
+    const updatedRow = db
+      .prepare(`SELECT * FROM messages WHERE chat_id = ? AND message_id = ?`)
+      .get(chatId, messageId) as Record<string, unknown>;
+    const hydrated = hydrateMessageRow(db, updatedRow, senderId);
+    const updateEvent: UpdateEvent = {
+      type: 'NewMessage',
+      data: hydrated,
+    };
+
+    db.prepare(
+      `INSERT INTO pts_events (chat_id, pts, pts_count, created_at_ms, event_json)
+       VALUES (?, ?, 1, ?, ?)`,
+    ).run(chatId, nextPts, now, JSON.stringify(updateEvent));
+
+    db.exec('COMMIT;');
+    delivered = { message: hydrated, pts: nextPts, updateEvent, now };
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+
+  sink?.broadcastChatPtsUpdate(chatId, {
+    chat_id: chatId,
+    pts: delivered.pts,
+    pts_count: 1,
+    event: delivered.updateEvent,
+    timestamp_ms: delivered.now,
+    date: new Date(delivered.now).toISOString(),
+  });
+
+  return { message: delivered.message, pts: delivered.pts };
+}
+
+/**
+ * Flushes all due scheduled messages (`scheduled_at_ms <= now`) for a chat (or globally).
+ */
+export function flushDueScheduledMessages(
+  db: DatabaseSync,
+  sink: PtsBroadcastSink | null,
+  chatId?: number,
+): MessageItem[] {
+  const now = Date.now();
+  const dueRows = (
+    chatId !== undefined
+      ? db
+          .prepare(
+            `SELECT chat_id, message_id
+             FROM messages
+             WHERE chat_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL AND scheduled_at_ms <= ?
+             ORDER BY scheduled_at_ms ASC, message_id ASC`,
+          )
+          .all(chatId, now)
+      : db
+          .prepare(
+            `SELECT chat_id, message_id
+             FROM messages
+             WHERE deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL AND scheduled_at_ms <= ?
+             ORDER BY scheduled_at_ms ASC, message_id ASC`,
+          )
+          .all(now)
+  ) as Array<{ chat_id: number; message_id: number }>;
+
+  const delivered: MessageItem[] = [];
+  for (const row of dueRows) {
+    const res = deliverScheduledMessageAtomic(db, sink, Number(row.chat_id), Number(row.message_id));
+    if (res) {
+      delivered.push(res.message);
+    }
+  }
+  return delivered;
+}
+
+/**
+ * Records a genuine group/supergroup/channel admin action in `chat_admin_log`.
+ */
+export function recordChatAdminLog(
+  db: DatabaseSync,
+  params: {
+    chatId: number;
+    actorUserId: number;
+    action: string;
+    targetUserId?: number | null;
+    targetMessageId?: number | null;
+    details?: Record<string, unknown>;
+  },
+): number | null {
+  const chatRow = db
+    .prepare(`SELECT chat_type FROM chats WHERE chat_id = ?`)
+    .get(params.chatId) as { chat_type: number } | undefined;
+  if (!chatRow) return null;
+  const chatType = Number(chatRow.chat_type);
+  if (chatType !== 1 && chatType !== 2 && chatType !== 3) {
+    return null;
+  }
+  const now = Date.now();
+  const res = db
+    .prepare(
+      `INSERT INTO chat_admin_log (
+        chat_id, actor_user_id, action, target_user_id, target_message_id, details_json, created_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      params.chatId,
+      params.actorUserId,
+      params.action,
+      params.targetUserId ?? null,
+      params.targetMessageId ?? null,
+      JSON.stringify(params.details ?? {}),
+      now,
+    );
+  return Number(res.lastInsertRowid ?? 0);
 }
 
 /**
@@ -1907,7 +2159,10 @@ export function deleteMessagesAtomic(
     if ((access.chatType === 1 || access.chatType === 2) && !access.isAdmin) {
       for (const id of cleanIds) {
         const msgOwner = db
-          .prepare(`SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ?`)
+          .prepare(
+            `SELECT sender_id FROM messages
+             WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+          )
           .get(chatId, id) as { sender_id: number } | undefined;
         if (msgOwner && Number(msgOwner.sender_id) !== userId) {
           throw new ApiError(
@@ -1925,35 +2180,56 @@ export function deleteMessagesAtomic(
            text_plain = '',
            content_json = '{"type":"Text","data":{"text":"","entities":[]}}',
            entities_json = '[]'
-       WHERE chat_id = ? AND message_id = ?`,
+       WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
     );
+    const delPinStmt = db.prepare(`DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?`);
+    const deletedIds: number[] = [];
     for (const id of cleanIds) {
-      stmt.run(chatId, id);
-      db.prepare(`DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?`).run(chatId, id);
+      const upd = stmt.run(chatId, id);
+      if (Number(upd.changes) > 0) {
+        deletedIds.push(id);
+        delPinStmt.run(chatId, id);
+      }
     }
-
-    refreshChatLastMessage(db, chatId);
 
     const tombstone: DeleteTombstone = {
       chat_id: chatId,
-      message_ids: cleanIds,
+      message_ids: deletedIds,
       deleted_at: new Date(now).toISOString(),
       for_everyone: true,
       timestamp_ms: now,
     };
+
+    if (deletedIds.length === 0) {
+      const chatRow = db.prepare(`SELECT pts FROM chats WHERE chat_id = ?`).get(chatId) as
+        | { pts: number }
+        | undefined;
+      return { pts: chatRow ? Number(chatRow.pts) : 0, deletedIds, tombstone };
+    }
+
+    refreshChatLastMessage(db, chatId);
+
     const ptsUpdate = commitPtsEventAtomic(db, sink, chatId, {
       type: 'DeleteMessages',
       data: tombstone,
     });
-    return { pts: ptsUpdate.pts, deletedIds: cleanIds, tombstone };
+    return { pts: ptsUpdate.pts, deletedIds, tombstone };
   }
 
   // Per-user local visibility hide ("Delete for me") — other chat participants STILL see the message!
+  const checkDeliveredStmt = db.prepare(
+    `SELECT 1 FROM messages
+     WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+  );
   const ins = db.prepare(
     `INSERT OR IGNORE INTO message_user_deletions (user_id, chat_id, message_id) VALUES (?, ?, ?)`,
   );
+  const deletedIds: number[] = [];
   for (const id of cleanIds) {
-    ins.run(userId, chatId, id);
+    if (checkDeliveredStmt.get(chatId, id)) {
+      ins.run(userId, chatId, id);
+      deletedIds.push(id);
+    }
   }
   const chatRow = db.prepare(`SELECT pts FROM chats WHERE chat_id = ?`).get(chatId) as
     | { pts: number }
@@ -1961,16 +2237,18 @@ export function deleteMessagesAtomic(
   const currentPts = chatRow ? Number(chatRow.pts) : 0;
   const tombstone: DeleteTombstone = {
     chat_id: chatId,
-    message_ids: cleanIds,
+    message_ids: deletedIds,
     deleted_at: new Date(now).toISOString(),
     for_everyone: false,
     timestamp_ms: now,
   };
-  sink?.sendToUser(userId, {
-    type: 'Update',
-    payload: { type: 'DeleteMessages', data: tombstone },
-  });
-  return { pts: currentPts, deletedIds: cleanIds, tombstone };
+  if (deletedIds.length > 0) {
+    sink?.sendToUser(userId, {
+      type: 'Update',
+      payload: { type: 'DeleteMessages', data: tombstone },
+    });
+  }
+  return { pts: currentPts, deletedIds, tombstone };
 }
 
 export function recomputePollState(

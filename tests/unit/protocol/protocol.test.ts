@@ -43,14 +43,14 @@ import {
 } from '@gpui-telegram/protocol';
 
 describe('@gpui-telegram/protocol — Canonical DOM IDs & Domain Mappers', () => {
-  it('exports all 150 unique canonical DOM IDs without leading # and domain DTO mappers', () => {
-    expect(FABUSHI_PROTOCOL_VERSION).toBe('1.6.11');
+  it('exports all 187 unique canonical DOM IDs without leading # and domain DTO mappers', () => {
+    expect(FABUSHI_PROTOCOL_VERSION).toBe('1.7.0');
 
     const entries = Object.entries(DOM_IDS);
-    expect(entries.length).toBe(150);
+    expect(entries.length).toBe(187);
 
     const uniqueValues = new Set(entries.map(([, v]) => v));
-    expect(uniqueValues.size).toBe(150);
+    expect(uniqueValues.size).toBe(187);
 
     for (const [, val] of entries) {
       expect(val.startsWith('#')).toBe(false);

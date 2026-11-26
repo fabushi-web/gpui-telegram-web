@@ -58,9 +58,6 @@ describe('@gpui-telegram/server — M2 Security, Split-Key V2, User Vault, Devic
       host: '127.0.0.1',
       dataDir,
       enableTestReset: true,
-      seedDemoData: false,
-      allowDemoAuth: false,
-      exposeDevOtpCode: false,
       mailWebhookUrl: mailWebhook.url,
     });
     const started = await server.start();
@@ -3065,7 +3062,7 @@ describe('@gpui-telegram/server — M2 Security, Split-Key V2, User Vault, Devic
       const stubUpPort = (stubUp.address() as net.AddressInfo).port;
       const updDir = createUniqueTestDir('m2-iter4-upd');
       const updServer = createTelegramServer(
-        { port: 0, host: '127.0.0.1', dataDir: updDir, enableTestReset: false, seedDemoData: false },
+        { port: 0, host: '127.0.0.1', dataDir: updDir, enableTestReset: false },
         {
           updates: {
             manifestUpstreamUrl: `http://127.0.0.1:${stubUpPort}/latest-mac.json`,

@@ -1,6 +1,6 @@
 {
   "name": "@gpui-telegram/web",
-  "version": "1.6.11",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "scripts": {

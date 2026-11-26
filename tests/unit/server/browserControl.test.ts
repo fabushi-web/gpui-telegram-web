@@ -125,9 +125,6 @@ describe('@gpui-telegram/server — F17 Browser Control Bridge, Headless CDP/Fal
       host: '127.0.0.1',
       dataDir,
       enableTestReset: true,
-      seedDemoData: false,
-      allowDemoAuth: false,
-      exposeDevOtpCode: false,
     });
     const info = await server.start();
     baseUrl = info.baseUrl;

@@ -22,12 +22,14 @@ import {
   computeUserGlobalDifference,
   createMessageAtomic,
   deleteMessagesAtomic,
+  deliverScheduledMessageAtomic,
   editMessageAtomic,
   enrichMessageWebPageAsync,
   ensureChatAdminAccess,
   ensureChatMembership,
   ensureChatReadAccess,
   ensureChatWriteAccess,
+  flushDueScheduledMessages,
   getChatDetailDto,
   getMessageById,
   getMessageReactions,
@@ -40,6 +42,7 @@ import {
   parseOptionalPositiveInt,
   purgeExpiredTtlMessages,
   recomputePollState,
+  recordChatAdminLog,
   storeWalletIdempotency,
   validateSendAsPeerId,
   validateWireMessageContent,
@@ -60,11 +63,13 @@ import {
 import type { ServerConfig } from '../config.js';
 import type { RealtimeGatewayHub } from '../ws/hub.js';
 import { runConfiguredLlmCompletion } from './magpie.js';
+import type { BotMessageContext } from './multiAgent.js';
 
 export type BotMessageInterceptor = (
   chatId: number,
   senderId: number,
   text: string,
+  meta?: BotMessageContext,
 ) => void;
 
 function parsePositiveSafeIntNonce(raw: unknown): number | undefined {
@@ -219,6 +224,7 @@ export function registerMessageAndSearchRoutes(
     const chatId = Number(ctx.params.chatId ?? ctx.query.get('chat_id') ?? 0);
     ensureChatReadAccess(db, chatId, auth.userId);
     purgeExpiredTtlMessages(db, chatId);
+    flushDueScheduledMessages(db, hub, chatId);
 
     const limit = parseBoundedQueryInt(ctx.query.get('limit'), 50, 1, 200);
     const beforeId = ctx.query.get('before_id') ? Number(ctx.query.get('before_id')) : undefined;
@@ -236,6 +242,7 @@ export function registerMessageAndSearchRoutes(
       'm.chat_id = ?',
       'm.message_id > ?',
       'm.deleted_for_everyone = 0',
+      'm.scheduled_at_ms IS NULL',
       'NOT EXISTS (SELECT 1 FROM message_user_deletions d WHERE d.user_id = ? AND d.chat_id = m.chat_id AND d.message_id = m.message_id)',
     ];
     const args: Array<string | number> = [chatId, clearedUpTo, auth.userId];
@@ -458,7 +465,12 @@ export function registerMessageAndSearchRoutes(
       ttlSeconds,
     });
 
-    if (!result.duplicate && result.message.content.type === 'Text' && result.message.text) {
+    if (
+      !result.duplicate &&
+      !result.message.flags.is_scheduled &&
+      result.message.content.type === 'Text' &&
+      result.message.text
+    ) {
       enrichMessageWebPageAsync(
         db,
         hub,
@@ -469,8 +481,27 @@ export function registerMessageAndSearchRoutes(
       );
     }
 
-    if (!result.duplicate && !body.skip_server_bot_reply && result.message.text) {
-      onBotMessage(chatId, auth.userId, result.message.text);
+    if (
+      !result.duplicate &&
+      !result.message.flags.is_scheduled &&
+      !body.skip_server_bot_reply &&
+      result.message.text
+    ) {
+      let replyToSenderId: number | null = null;
+      if (replyToMsgId !== undefined) {
+        const targetRow = db
+          .prepare(
+            `SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+          )
+          .get(chatId, replyToMsgId) as { sender_id: number } | undefined;
+        replyToSenderId = targetRow ? Number(targetRow.sender_id) : null;
+      }
+      onBotMessage(chatId, auth.userId, result.message.text, {
+        messageId: result.message.id,
+        replyToMsgId,
+        replyToSenderId,
+        quoteText,
+      });
     }
 
     sendJson(ctx.res, result.duplicate ? 200 : 201, {
@@ -679,6 +710,15 @@ export function registerMessageAndSearchRoutes(
     const forEveryone = ctx.query.get('for_everyone') === 'true' || ctx.query.get('revoke') === 'true';
 
     const res = deleteMessagesAtomic(db, hub, chatId, auth.userId, [messageId], forEveryone);
+    if (forEveryone && res.deletedIds.length > 0) {
+      recordChatAdminLog(db, {
+        chatId,
+        actorUserId: auth.userId,
+        action: 'delete_messages',
+        targetMessageId: messageId,
+        details: { message_ids: res.deletedIds, for_everyone: true },
+      });
+    }
     sendJson(ctx.res, 200, { ok: true, pts: res.pts, tombstone: res.tombstone });
   });
 
@@ -695,14 +735,24 @@ export function registerMessageAndSearchRoutes(
     if (body.message_ids !== undefined && !Array.isArray(body.message_ids)) {
       throw new ApiError(400, 'invalid_message_ids', 'message_ids must be an array');
     }
+    const forEveryone = Boolean(body.for_everyone ?? body.revoke);
     const res = deleteMessagesAtomic(
       db,
       hub,
       chatId,
       auth.userId,
       body.message_ids ?? [],
-      Boolean(body.for_everyone ?? body.revoke),
+      forEveryone,
     );
+    if (forEveryone && res.deletedIds.length > 0) {
+      recordChatAdminLog(db, {
+        chatId,
+        actorUserId: auth.userId,
+        action: 'delete_messages',
+        targetMessageId: res.deletedIds[0] ?? null,
+        details: { message_ids: res.deletedIds, for_everyone: true },
+      });
+    }
     sendJson(ctx.res, 200, { ok: true, deleted_ids: res.deletedIds, pts: res.pts });
   };
   router.post('/api/v1/chats/:chatId/messages/delete-batch', handleDeleteBatch);
@@ -925,6 +975,14 @@ export function registerMessageAndSearchRoutes(
       VALUES (?, ?, ?, ?, ?)
     `).run(chatId, messageId, msg.topic_id ?? 0, auth.userId, Date.now());
 
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'pin_message',
+      targetMessageId: messageId,
+      details: { message_id: messageId },
+    });
+
     const pinRows = db
       .prepare(`SELECT message_id FROM pinned_messages WHERE chat_id = ? ORDER BY pinned_at_ms DESC`)
       .all(chatId) as Array<{ message_id: number }>;
@@ -946,6 +1004,13 @@ export function registerMessageAndSearchRoutes(
     ensureChatAdminAccess(db, chatId, auth.userId);
 
     db.prepare(`DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?`).run(chatId, messageId);
+    recordChatAdminLog(db, {
+      chatId,
+      actorUserId: auth.userId,
+      action: 'unpin_message',
+      targetMessageId: messageId,
+      details: { message_id: messageId },
+    });
     const pinRows = db
       .prepare(`SELECT message_id FROM pinned_messages WHERE chat_id = ? ORDER BY pinned_at_ms DESC`)
       .all(chatId) as Array<{ message_id: number }>;
@@ -1112,6 +1177,10 @@ export function registerMessageAndSearchRoutes(
     const chatId = Number(ctx.params.chatId);
     const messageId = Number(ctx.params.messageId);
     ensureChatReadAccess(db, chatId, auth.userId);
+    const existingMsg = getMessageById(db, chatId, messageId, auth.userId);
+    if (!existingMsg) {
+      throw new ApiError(404, 'message_not_found', 'Message not found');
+    }
 
     const { reactions, details } = getMessageReactions(db, chatId, messageId, auth.userId);
     const reactors = details.flatMap((d) =>
@@ -1142,6 +1211,11 @@ export function registerMessageAndSearchRoutes(
       (typeof body.action !== 'string' || !['toggle', 'add', 'remove'].includes(body.action))
     ) {
       throw new ApiError(400, 'invalid_action', 'action must be one of toggle, add, remove');
+    }
+
+    const existingMsg = getMessageById(db, chatId, messageId, auth.userId);
+    if (!existingMsg) {
+      throw new ApiError(404, 'message_not_found', 'Message not found');
     }
 
     const exists = db
@@ -1947,6 +2021,7 @@ export function registerMessageAndSearchRoutes(
     // Matching Messages (parameterized SQLite LIKE ... ESCAPE '\' supporting 1-char, 2-char, and phrase CJK!)
     const msgClauses: string[] = [
       'm.deleted_for_everyone = 0',
+      'm.scheduled_at_ms IS NULL',
       'EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = m.chat_id AND cm.user_id = ? AND cm.role != \'banned\')',
       'm.message_id > COALESCE((SELECT ucs.cleared_up_to_msg_id FROM user_chat_settings ucs WHERE ucs.user_id = ? AND ucs.chat_id = m.chat_id), 0)',
       'NOT EXISTS (SELECT 1 FROM message_user_deletions d WHERE d.user_id = ? AND d.chat_id = m.chat_id AND d.message_id = m.message_id)',
@@ -2102,4 +2177,288 @@ export function registerMessageAndSearchRoutes(
         : '请先在 Magpie LLM 网关配置并启用可用的模型提供商后再使用 AI 写作助手。',
     );
   });
+
+  // Scheduled Messages Lifecycle (`GET`, `DELETE`, `POST .../send-now`)
+  const handleListScheduledMessages = (ctx: RequestContext): void => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId ?? 0);
+    const access = ensureChatReadAccess(db, chatId, auth.userId);
+    if (!access.isMember) {
+      throw new ApiError(403, 'forbidden', 'Chat membership required to inspect scheduled messages');
+    }
+    flushDueScheduledMessages(db, hub, chatId);
+
+    const rows = (
+      access.isAdmin
+        ? db
+            .prepare(
+              `SELECT * FROM messages
+               WHERE chat_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL
+               ORDER BY scheduled_at_ms ASC, message_id ASC`,
+            )
+            .all(chatId)
+        : db
+            .prepare(
+              `SELECT * FROM messages
+               WHERE chat_id = ? AND sender_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL
+               ORDER BY scheduled_at_ms ASC, message_id ASC`,
+            )
+            .all(chatId, auth.userId)
+    ) as Array<Record<string, unknown>>;
+
+    const messages = rows.map((r) => hydrateMessageRow(db, r, auth.userId));
+    const scheduled = messages.map((m) => ({
+      message_id: m.id,
+      chat_id: m.chat_id,
+      sender_id: m.sender_id,
+      topic_id: m.topic_id,
+      text: m.text,
+      content: m.content,
+      scheduled_at_ms: m.scheduled_at_ms ?? 0,
+      created_at_ms: m.date_ms ?? 0,
+      message: m,
+    }));
+
+    sendJson(ctx.res, 200, {
+      chat_id: chatId,
+      messages,
+      scheduled,
+      total: scheduled.length,
+    });
+  };
+  router.get('/api/v1/chats/:chatId/scheduled-messages', handleListScheduledMessages);
+  router.get('/api/v1/chats/:chatId/scheduled', handleListScheduledMessages);
+
+  const handleCancelScheduledMessage = (ctx: RequestContext): void => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId ?? 0);
+    const messageId = Number(ctx.params.messageId ?? 0);
+    const access = ensureChatMembership(db, chatId, auth.userId);
+
+    const row = db
+      .prepare(
+        `SELECT sender_id FROM messages
+         WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL`,
+      )
+      .get(chatId, messageId) as { sender_id: number } | undefined;
+    if (!row) {
+      throw new ApiError(404, 'scheduled_message_not_found', 'Scheduled message not found');
+    }
+    if (Number(row.sender_id) !== auth.userId && !access.isAdmin) {
+      throw new ApiError(
+        403,
+        'forbidden',
+        'Only the sender or a chat admin can cancel a scheduled message',
+      );
+    }
+
+    db.prepare(
+      `UPDATE messages
+       SET deleted_for_everyone = 1, scheduled_at_ms = NULL, text_plain = '',
+           content_json = '{"type":"Text","data":{"text":"","entities":[]}}', entities_json = '[]'
+       WHERE chat_id = ? AND message_id = ?`,
+    ).run(chatId, messageId);
+
+    sendJson(ctx.res, 200, { ok: true, chat_id: chatId, message_id: messageId });
+  };
+  router.delete('/api/v1/chats/:chatId/scheduled-messages/:messageId', handleCancelScheduledMessage);
+  router.delete('/api/v1/chats/:chatId/scheduled/:messageId', handleCancelScheduledMessage);
+
+  const handleSendScheduledNow = (ctx: RequestContext): void => {
+    const auth = requireAuth(db, ctx);
+    const chatId = Number(ctx.params.chatId ?? 0);
+    const messageId = Number(ctx.params.messageId ?? 0);
+    const access = ensureChatWriteAccess(db, chatId, auth.userId);
+
+    const row = db
+      .prepare(
+        `SELECT sender_id, reply_to_json FROM messages
+         WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NOT NULL`,
+      )
+      .get(chatId, messageId) as { sender_id: number; reply_to_json: string | null } | undefined;
+    if (!row) {
+      throw new ApiError(404, 'scheduled_message_not_found', 'Scheduled message not found');
+    }
+    if (Number(row.sender_id) !== auth.userId && !access.isAdmin) {
+      throw new ApiError(
+        403,
+        'forbidden',
+        'Only the sender or a chat admin can deliver a scheduled message immediately',
+      );
+    }
+
+    const delivered = deliverScheduledMessageAtomic(db, hub, chatId, messageId);
+    if (!delivered) {
+      throw new ApiError(404, 'scheduled_message_not_found', 'Scheduled message not found');
+    }
+
+    if (delivered.message.text) {
+      let replyToMsgId: number | undefined;
+      let replyToSenderId: number | null = null;
+      let quoteText: string | undefined;
+      if (delivered.message.reply_to) {
+        replyToMsgId = delivered.message.reply_to.reply_to_msg_id;
+        quoteText = delivered.message.reply_to.quote_text;
+        const targetRow = db
+          .prepare(
+            `SELECT sender_id FROM messages
+             WHERE chat_id = ? AND message_id = ? AND deleted_for_everyone = 0 AND scheduled_at_ms IS NULL`,
+          )
+          .get(chatId, replyToMsgId) as { sender_id: number } | undefined;
+        replyToSenderId = targetRow ? Number(targetRow.sender_id) : null;
+      }
+      onBotMessage(chatId, Number(row.sender_id), delivered.message.text, {
+        messageId: delivered.message.id,
+        replyToMsgId,
+        replyToSenderId,
+        quoteText,
+      });
+    }
+
+    sendJson(ctx.res, 200, {
+      ok: true,
+      message: delivered.message,
+      pts: delivered.pts,
+    });
+  };
+  router.post('/api/v1/chats/:chatId/scheduled-messages/:messageId/send-now', handleSendScheduledNow);
+  router.post('/api/v1/chats/:chatId/scheduled/:messageId/send-now', handleSendScheduledNow);
+
+  // Per-Message Inline Translation (Magpie LLM backed; honest 503 when unconfigured)
+  const handleTranslateMessage = async (ctx: RequestContext): Promise<void> => {
+    const auth = requireAuth(db, ctx);
+    const body = await readJsonBody<{
+      chat_id?: unknown;
+      target_lang?: unknown;
+      target_language?: unknown;
+      to_lang?: unknown;
+    }>(ctx.req);
+
+    const parseRoutePosInt = (
+      raw: string | undefined,
+      code: string,
+      msg: string,
+    ): number | undefined => {
+      if (raw === undefined) return undefined;
+      if (!/^\d+$/.test(raw.trim())) {
+        throw new ApiError(400, code, msg);
+      }
+      return parseOptionalPositiveInt(Number(raw.trim()), code, msg);
+    };
+
+    const messageId = parseRoutePosInt(
+      ctx.params.messageId,
+      'invalid_message_id',
+      'messageId must be a positive integer',
+    );
+    if (messageId === undefined) {
+      throw new ApiError(400, 'invalid_message_id', 'messageId must be a positive integer');
+    }
+
+    let chatId: number | undefined;
+    if (ctx.params.chatId !== undefined) {
+      chatId = parseRoutePosInt(
+        ctx.params.chatId,
+        'invalid_chat_id',
+        'chatId must be a positive integer',
+      );
+    } else if (body.chat_id !== undefined) {
+      chatId = parseOptionalPositiveInt(
+        body.chat_id,
+        'invalid_chat_id',
+        'chat_id must be a positive integer',
+      );
+    } else {
+      const lookupRow = db
+        .prepare(
+          `SELECT m.chat_id FROM messages m
+           WHERE m.message_id = ? AND m.deleted_for_everyone = 0 AND m.scheduled_at_ms IS NULL
+             AND EXISTS (
+               SELECT 1 FROM chat_members cm
+               WHERE cm.chat_id = m.chat_id AND cm.user_id = ? AND cm.role NOT IN ('banned', 'left', 'kicked')
+             )
+           ORDER BY m.date_ms DESC
+           LIMIT 1`,
+        )
+        .get(messageId, auth.userId) as { chat_id: number } | undefined;
+      if (!lookupRow) {
+        throw new ApiError(404, 'message_not_found', 'Message not found');
+      }
+      chatId = Number(lookupRow.chat_id);
+    }
+    if (chatId === undefined) {
+      throw new ApiError(400, 'invalid_chat_id', 'chatId is required');
+    }
+
+    ensureChatReadAccess(db, chatId, auth.userId);
+
+    const msg = getMessageById(db, chatId, messageId, auth.userId);
+    if (!msg) {
+      throw new ApiError(404, 'message_not_found', 'Message not found');
+    }
+
+    const originalText = (msg.text ?? '').trim();
+    if (!originalText) {
+      throw new ApiError(400, 'empty_text', 'Message has no translatable text');
+    }
+
+    const rawLang = body.target_lang ?? body.target_language ?? body.to_lang ?? 'en';
+    if (typeof rawLang !== 'string' || !rawLang.trim() || rawLang.trim().length > 32) {
+      throw new ApiError(400, 'invalid_target_lang', 'target_lang must be a valid language code');
+    }
+    const targetLang = rawLang.trim();
+
+    if (!config) {
+      throw new ApiError(
+        503,
+        'provider_not_configured',
+        'Configure an AI provider in Magpie LLM Gateway before translating messages.',
+        { needs_provider_selection: true, action: 'hermes:open_ai_providers' },
+      );
+    }
+
+    const llmRes = await runConfiguredLlmCompletion(
+      db,
+      config,
+      auth.userId,
+      [
+        {
+          role: 'system',
+          content: `Translate the user's message accurately and naturally into language "${targetLang}". Output ONLY the translated text with no commentary or quotes.`,
+        },
+        { role: 'user', content: originalText },
+      ],
+    );
+
+    if (llmRes.usedUpstream && llmRes.text) {
+      sendJson(ctx.res, 200, {
+        ok: true,
+        chat_id: chatId,
+        message_id: messageId,
+        target_lang: targetLang,
+        original_text: originalText,
+        translated_text: llmRes.text.trim(),
+        provider_id: llmRes.providerId,
+        model: llmRes.model,
+      });
+      return;
+    }
+
+    if (llmRes.error && llmRes.providerId) {
+      throw new ApiError(
+        502,
+        'translation_upstream_error',
+        `Translation failed via ${llmRes.providerId}: ${llmRes.error}`,
+      );
+    }
+
+    throw new ApiError(
+      503,
+      'provider_not_configured',
+      'Configure an AI provider in Magpie LLM Gateway before translating messages.',
+      { needs_provider_selection: true, action: 'hermes:open_ai_providers' },
+    );
+  };
+  router.post('/api/v1/chats/:chatId/messages/:messageId/translate', handleTranslateMessage);
+  router.post('/api/v1/messages/:messageId/translate', handleTranslateMessage);
 }

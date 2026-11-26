@@ -1,8 +1,8 @@
 {
   "name": "fabushi-web",
-  "version": "1.6.11",
+  "version": "1.7.0",
   "private": true,
-  "description": "Fabushi Web v1.6.11 — Protocol-aligned TypeScript full-stack web edition of bhrumom/gpui-telegram v1.6.11",
+  "description": "Fabushi Web v1.7.0 — Protocol-aligned TypeScript full-stack web edition of bhrumom/gpui-telegram v1.7.0",
   "type": "module",
   "engines": {
     "node": ">=22.13.0"
@@ -18,6 +18,7 @@
     "start": "node apps/server/dist/index.js",
     "typecheck": "npm run build --workspace=@gpui-telegram/protocol && npm run build --workspace=@gpui-telegram/server && tsc -p packages/protocol/tsconfig.json --noEmit && tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit && tsc -p tsconfig.base.json --noEmit",
     "test:unit": "vitest run --maxWorkers=2",
+    "test:e2e": "npm --prefix e2e run test",
     "deploy:pages": "node scripts/deploy-gh-pages.mjs"
   },
   "devDependencies": {

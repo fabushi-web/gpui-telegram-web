@@ -90,9 +90,6 @@ describe('@gpui-telegram/server — Social, Stories, E2EE PreKeys, Calls, BotFat
       dataDir,
       webDistDir,
       enableTestReset: true,
-      seedDemoData: false,
-      allowDemoAuth: false,
-      exposeDevOtpCode: false,
     });
     const info = await server.start();
     baseUrl = info.baseUrl;

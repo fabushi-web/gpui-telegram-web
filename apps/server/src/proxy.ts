@@ -103,15 +103,19 @@ function resolveProxyBrowserWs(
 
 /**
  * Determines whether a WebSocket upgrade path should be forwarded to `UPSTREAM_SERVER_URL`.
- * Forwards `/api/v1/ws` and `/api/v1/tailnet/derp`; keeps `/api/v1/browser/ws` local by
- * default unless `PROXY_BROWSER_WS=1` (or `{ proxyBrowserWs: true }`).
+ * Forwards `/api/v1/ws`, `/api/v1/tailnet/derp`, and `/api/v1/orca/wake`; keeps `/api/v1/browser/ws`
+ * local by default unless `PROXY_BROWSER_WS=1` (or `{ proxyBrowserWs: true }`).
  */
 export function shouldProxyWebSocketPathname(
   pathnameOrUrl: string,
   optionsOrEnv?: boolean | ProxyWebSocketOptions | NodeJS.ProcessEnv,
 ): boolean {
   const cleanPath = extractPathname(pathnameOrUrl);
-  if (cleanPath === '/api/v1/ws' || cleanPath === '/api/v1/tailnet/derp') {
+  if (
+    cleanPath === '/api/v1/ws' ||
+    cleanPath === '/api/v1/tailnet/derp' ||
+    cleanPath === '/api/v1/orca/wake'
+  ) {
     return true;
   }
   if (cleanPath === '/api/v1/browser/ws') {
@@ -215,7 +219,7 @@ export function proxyHttpRequest(
 }
 
 /**
- * Transparently tunnels WebSocket upgrades (`/api/v1/ws`, `/api/v1/tailnet/derp`, etc.)
+ * Transparently tunnels WebSocket upgrades (`/api/v1/ws`, `/api/v1/tailnet/derp`, `/api/v1/orca/wake`, etc.)
  * to `UPSTREAM_SERVER_URL` over raw TCP or TLS socket piping.
  */
 export function proxyWebSocketUpgrade(

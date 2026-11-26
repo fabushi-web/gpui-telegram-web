@@ -3,10 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
+  CREATOR_STUDIO_BOT_USER_ID,
   escapeHtml,
   extractWebMcpPageError,
+  formatCreationDeepLink,
+  parseCreationKind,
   resolveGrokBotAvatar,
+  sanitizeRecommendationReason,
   type BotRegistryEntry,
+  type InlineQueryResult,
   type MiniAppControlMode,
   type MiniAppEntry,
   type MiniAppLaunchContext,
@@ -1365,6 +1370,377 @@ export function registerBotsMiniAppsAndFabushiRoutes(
     sendJson(ctx.res, 200, { ok: true, bot_token: newToken });
   });
 
+  // MUST register static `/api/v1/bots/inline-query` BEFORE wildcard `/api/v1/bots/:botId`!
+  router.get('/api/v1/bots/inline-query', (ctx) => {
+    const auth = requireAuth(db, ctx);
+    const rawBot = (
+      ctx.query.get('bot') ??
+      ctx.query.get('bot_username') ??
+      ctx.query.get('bot_id') ??
+      ''
+    )
+      .trim()
+      .replace(/^@/, '');
+    if (!rawBot) {
+      throw new ApiError(400, 'missing_bot', 'Query parameter bot (or bot_username / bot_id) is required');
+    }
+
+    const rawLimit = ctx.query.get('limit');
+    let limit = 10;
+    if (rawLimit !== null && rawLimit.trim() !== '') {
+      const parsed = Number(rawLimit);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) {
+        throw new ApiError(400, 'invalid_limit', 'limit must be an integer between 1 and 50');
+      }
+      limit = parsed;
+    }
+
+    const rawKind = ctx.query.get('kind')?.trim() ?? '';
+    const filterKind = rawKind ? parseCreationKind(rawKind) : null;
+    if (rawKind && !filterKind) {
+      throw new ApiError(400, 'invalid_kind', `Unsupported creation kind: ${rawKind}`);
+    }
+
+    const rawChatId = ctx.query.get('chat_id');
+    let chatId: number | null = null;
+    if (rawChatId !== null && rawChatId.trim() !== '') {
+      const parsedChatId = parsePositiveIdParam(rawChatId);
+      if (!parsedChatId) {
+        throw new ApiError(400, 'invalid_chat_id', 'chat_id must be a positive integer');
+      }
+      ensureChatReadAccess(db, parsedChatId, auth.userId);
+      chatId = parsedChatId;
+    }
+
+    const queryText = (ctx.query.get('query') ?? ctx.query.get('q') ?? '').trim();
+    const genreFilter = (ctx.query.get('genre') ?? '').trim().toLowerCase();
+    const offsetStr = (ctx.query.get('offset') ?? '').trim();
+    const requestedQueryId = (ctx.query.get('query_id') ?? '').trim();
+
+    const rows = db
+      .prepare(`SELECT bot_user_id, owner_user_id, bot_json FROM bots_registry`)
+      .all() as Array<{ bot_user_id: number; owner_user_id: number; bot_json: string }>;
+    const found = rows
+      .map((r) => ({
+        botUserId: Number(r.bot_user_id),
+        ownerUserId: Number(r.owner_user_id),
+        entry: JSON.parse(r.bot_json) as BotRegistryEntry,
+      }))
+      .find(
+        (b) =>
+          String(b.entry.bot_user_id) === rawBot ||
+          b.entry.username.toLowerCase() === rawBot.toLowerCase(),
+      );
+
+    if (
+      !found ||
+      !isBotVisibleToUser(db, auth.userId, found.botUserId, found.ownerUserId, found.entry)
+    ) {
+      throw new ApiError(404, 'bot_not_found', 'Bot not found');
+    }
+    if (!found.entry.is_inline) {
+      throw new ApiError(400, 'inline_not_enabled', 'Bot does not have inline queries enabled');
+    }
+
+    const now = Date.now();
+    // 1. If caller supplied a specific query_id, return its answered results (strict ownership & bot check)
+    if (requestedQueryId) {
+      const answeredRow = db
+        .prepare(
+          `SELECT query_id, user_id, results_json, next_offset
+           FROM bot_inline_queries
+           WHERE query_id = ? AND bot_user_id = ? AND answered_at_ms IS NOT NULL`,
+        )
+        .get(requestedQueryId, found.botUserId) as
+        | {
+            query_id: string;
+            user_id: number;
+            results_json: string | null;
+            next_offset: string | null;
+          }
+        | undefined;
+      if (
+        answeredRow &&
+        (Number(answeredRow.user_id) === auth.userId || Number(answeredRow.user_id) === 0)
+      ) {
+        let parsedResults: InlineQueryResult[] = [];
+        if (answeredRow.results_json) {
+          try {
+            const arr = JSON.parse(answeredRow.results_json) as unknown;
+            if (Array.isArray(arr)) parsedResults = arr as InlineQueryResult[];
+          } catch {
+            parsedResults = [];
+          }
+        }
+        const sliced = parsedResults.slice(0, limit);
+        sendJson(ctx.res, 200, {
+          ok: true,
+          query_id: answeredRow.query_id,
+          bot_user_id: found.botUserId,
+          bot_username: found.entry.username,
+          total: sliced.length,
+          results: sliced,
+          items: sliced,
+          next_offset: answeredRow.next_offset ?? '',
+        });
+        return;
+      }
+    }
+
+    // 2. Mint a fresh inline query record and enqueue Telegram Bot API `inline_query` update for custom bots
+    const queryId = `iq_${crypto.randomBytes(8).toString('hex')}`;
+    db.prepare(
+      `INSERT INTO bot_inline_queries (
+        query_id, bot_user_id, user_id, chat_id, query_text, offset_str, created_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(queryId, found.botUserId, auth.userId, chatId, queryText, offsetStr, now);
+
+    if (found.botUserId >= 800_000) {
+      const updatePayload = {
+        inline_query: {
+          id: queryId,
+          from: {
+            id: auth.userId,
+            is_bot: false,
+            username: auth.username,
+          },
+          query: queryText,
+          offset: offsetStr,
+        },
+      };
+      db.prepare(
+        `INSERT INTO bot_api_updates (bot_user_id, payload_json, created_at_ms) VALUES (?, ?, ?)`,
+      ).run(found.botUserId, JSON.stringify(updatePayload), now);
+    }
+
+    const results: InlineQueryResult[] = [];
+    let nextOffset = '';
+
+    // 3. Check cached/answered results for this custom bot & query_text
+    const cachedRow = db
+      .prepare(
+        `SELECT results_json, next_offset, cache_time, is_personal, user_id, answered_at_ms
+         FROM bot_inline_queries
+         WHERE bot_user_id = ? AND query_text = ? AND answered_at_ms IS NOT NULL
+         ORDER BY answered_at_ms DESC
+         LIMIT 1`,
+      )
+      .get(found.botUserId, queryText) as
+      | {
+          results_json: string | null;
+          next_offset: string | null;
+          cache_time: number | null;
+          is_personal: number;
+          user_id: number;
+          answered_at_ms: number;
+        }
+      | undefined;
+
+    if (cachedRow && cachedRow.results_json) {
+      const cacheSecs = Number(cachedRow.cache_time ?? 0);
+      const personalAllowed =
+        Number(cachedRow.is_personal) === 0 || Number(cachedRow.user_id) === auth.userId;
+      const cacheValid = cacheSecs > 0 && now - Number(cachedRow.answered_at_ms) <= cacheSecs * 1000;
+      if (personalAllowed && cacheValid) {
+        try {
+          const arr = JSON.parse(cachedRow.results_json) as unknown;
+          if (Array.isArray(arr)) {
+            for (const item of arr as InlineQueryResult[]) {
+              results.push(item);
+            }
+            nextOffset = cachedRow.next_offset ?? '';
+          }
+        } catch {
+          // Ignore corrupt cache row
+        }
+      }
+    }
+
+    const isOfficialCatalogBot =
+      Boolean(found.entry.is_official) ||
+      found.botUserId === 777002 ||
+      found.botUserId === 777000 ||
+      found.botUserId === CREATOR_STUDIO_BOT_USER_ID;
+
+    // 4. Gracefully query `public_catalog_entries` ONLY for official catalog bots when table exists (ZERO draft/private leakage!)
+    if (isOfficialCatalogBot) {
+      const hasPublicCatalog = Boolean(
+        db
+          .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'public_catalog_entries'`)
+          .get(),
+      );
+      if (hasPublicCatalog) {
+        const cols = new Set(
+          (db.prepare(`PRAGMA table_info(public_catalog_entries)`).all() as Array<{ name: string }>).map(
+            (c) => c.name,
+          ),
+        );
+        if (cols.has('creation_id') && cols.has('title') && cols.has('kind')) {
+          const wherePredicates: string[] = [];
+          if (cols.has('visibility')) {
+            wherePredicates.push(`LOWER(COALESCE(visibility, '')) = 'public'`);
+          }
+          if (cols.has('review_status')) {
+            wherePredicates.push(`LOWER(COALESCE(review_status, '')) = 'approved'`);
+          }
+          if (cols.has('is_published')) {
+            wherePredicates.push(`is_published = 1`);
+          }
+          if (cols.has('is_public')) {
+            wherePredicates.push(`is_public = 1`);
+          }
+          if (cols.has('deleted_at_ms')) {
+            wherePredicates.push(`deleted_at_ms IS NULL`);
+          }
+          const whereClause =
+            wherePredicates.length > 0 ? `WHERE ${wherePredicates.join(' AND ')}` : '';
+          const orderByClause = cols.has('updated_at_ms')
+            ? 'ORDER BY updated_at_ms DESC'
+            : cols.has('published_at_ms')
+              ? 'ORDER BY published_at_ms DESC'
+              : '';
+          const catalogRows = db
+            .prepare(`SELECT * FROM public_catalog_entries ${whereClause} ${orderByClause} LIMIT 100`)
+            .all() as Array<Record<string, unknown>>;
+          const qLower = queryText.toLowerCase();
+          for (const r of catalogRows) {
+            const kind = parseCreationKind(String(r.kind ?? '')) ?? 'app';
+            if (filterKind && kind !== filterKind) continue;
+            const title = String(r.title ?? '');
+            const subtitle = String(r.subtitle ?? '');
+            const summary = String(r.summary ?? r.description ?? '');
+            const genresRaw = String(r.genres_json ?? r.genres ?? '[]');
+            let genres: string[] = [];
+            try {
+              const parsedGenres = JSON.parse(genresRaw);
+              if (Array.isArray(parsedGenres)) {
+                genres = parsedGenres.filter((g): g is string => typeof g === 'string');
+              }
+            } catch {
+              genres = [];
+            }
+            if (genreFilter && !genres.some((g) => g.toLowerCase().includes(genreFilter))) {
+              continue;
+            }
+            const haystack = `${title} ${subtitle} ${summary} ${kind} ${genres.join(' ')}`.toLowerCase();
+            if (qLower && !haystack.includes(qLower)) continue;
+            const creationId = String(r.creation_id ?? '').trim();
+            let deepLink = typeof r.deep_link === 'string' && r.deep_link.trim() ? r.deep_link.trim() : '';
+            if (!deepLink) {
+              try {
+                deepLink = formatCreationDeepLink(kind, creationId);
+              } catch {
+                continue;
+              }
+            }
+            const safeReason = sanitizeRecommendationReason(String(r.reason ?? ''));
+            results.push({
+              type: 'article',
+              id: `cat_${creationId}`,
+              creation_id: creationId,
+              kind,
+              title,
+              subtitle,
+              description: summary,
+              summary,
+              author_display_name: String(r.author_display_name ?? 'Creator'),
+              rating_avg: Number(r.rating_avg ?? 0),
+              rating_count: Number(r.rating_count ?? 0),
+              score: Number(r.rating_avg ?? 0),
+              reason: safeReason,
+              deep_link: deepLink,
+              input_message_content: {
+                message_text: `${title}\n${summary ? `${summary}\n` : ''}${deepLink}`,
+              },
+              reply_markup: {
+                inline_keyboard: [[{ text: 'Open in Catalog', url: deepLink }]],
+              },
+            });
+          }
+        }
+      }
+    }
+
+    // 5. Include published public MiniApps belonging to the queried bot (or official public MiniApps for official catalog bots)
+    if (!filterKind || filterKind === 'app') {
+      const miniAppRows = (
+        isOfficialCatalogBot
+          ? db.prepare(`SELECT app_id, bot_user_id, bot_username, short_name, app_json FROM mini_apps`).all()
+          : db
+              .prepare(
+                `SELECT app_id, bot_user_id, bot_username, short_name, app_json FROM mini_apps WHERE bot_user_id = ?`,
+              )
+              .all(found.botUserId)
+      ) as Array<{
+        app_id: string;
+        bot_user_id: number;
+        bot_username: string;
+        short_name: string;
+        app_json: string;
+      }>;
+
+      const qLower = queryText.toLowerCase();
+      for (const row of miniAppRows) {
+        try {
+          const app = JSON.parse(row.app_json) as MiniAppEntry;
+          const ownerBotRow = db
+            .prepare(`SELECT owner_user_id, bot_json FROM bots_registry WHERE bot_user_id = ?`)
+            .get(Number(row.bot_user_id)) as { owner_user_id: number; bot_json: string } | undefined;
+          if (!ownerBotRow) continue;
+          const ownerEntry = JSON.parse(ownerBotRow.bot_json) as BotRegistryEntry;
+          // Strict zero-leak: never surface MiniApps belonging to private bots invisible to caller
+          if (
+            !isBotVisibleToUser(
+              db,
+              auth.userId,
+              Number(row.bot_user_id),
+              Number(ownerBotRow.owner_user_id),
+              ownerEntry,
+            )
+          ) {
+            continue;
+          }
+          const hay = `${app.title} ${app.description} ${app.short_name} ${app.bot_username}`.toLowerCase();
+          if (qLower && !hay.includes(qLower)) continue;
+          results.push({
+            type: 'article',
+            id: `app_${app.app_id}`,
+            title: app.title,
+            description: app.description,
+            url: app.web_url,
+            input_message_content: {
+              message_text: `${app.title} — ${app.description} (@${app.bot_username} / ${app.short_name})`,
+            },
+            mini_app: {
+              bot_username: app.bot_username,
+              short_name: app.short_name,
+              web_url: app.web_url,
+            },
+          });
+        } catch {
+          // Skip malformed miniapp entry
+        }
+      }
+    }
+
+    const numericOffset = /^\d+$/.test(offsetStr) ? Number(offsetStr) : 0;
+    const paged = results.slice(numericOffset, numericOffset + limit);
+    if (!nextOffset && numericOffset + limit < results.length) {
+      nextOffset = String(numericOffset + limit);
+    }
+
+    sendJson(ctx.res, 200, {
+      ok: true,
+      query_id: queryId,
+      bot_user_id: found.botUserId,
+      bot_username: found.entry.username,
+      total: paged.length,
+      results: paged,
+      items: paged,
+      next_offset: nextOffset,
+    });
+  });
+
   router.get('/api/v1/bots/:botId', (ctx) => {
     const auth = requireAuth(db, ctx);
     const param = ctx.params.botId!.replace(/^@/, '');
@@ -2056,6 +2432,195 @@ export function registerBotsMiniAppsAndFabushiRoutes(
           result: { inline_message_id: `imsg_${crypto.randomBytes(6).toString('hex')}` },
         });
         return;
+
+      case 'answerInlineQuery': {
+        const rawInlineQueryId = body.inline_query_id;
+        if (
+          typeof rawInlineQueryId !== 'string' ||
+          !rawInlineQueryId.trim() ||
+          rawInlineQueryId.trim().length > 128
+        ) {
+          sendJson(ctx.res, 400, {
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: inline_query_id must be a non-empty string (<= 128 chars)',
+          });
+          return;
+        }
+        const inlineQueryId = rawInlineQueryId.trim();
+
+        let rawResults: unknown = body.results;
+        if (typeof rawResults === 'string') {
+          try {
+            rawResults = JSON.parse(rawResults);
+          } catch {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: results must be a valid JSON array',
+            });
+            return;
+          }
+        }
+        if (!Array.isArray(rawResults)) {
+          sendJson(ctx.res, 400, {
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: results must be an array',
+          });
+          return;
+        }
+        if (rawResults.length > 50) {
+          sendJson(ctx.res, 400, {
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: RESULTS_TOO_MUCH (max 50 results)',
+          });
+          return;
+        }
+
+        const seenIds = new Set<string>();
+        const validatedResults: InlineQueryResult[] = [];
+        for (const item of rawResults) {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: every inline result must be a JSON object',
+            });
+            return;
+          }
+          const rec = item as Record<string, unknown>;
+          if (typeof rec.id !== 'string' || !rec.id.trim()) {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: inline result id must be a non-empty string',
+            });
+            return;
+          }
+          const idBytes = Buffer.byteLength(rec.id, 'utf8');
+          if (idBytes > 64) {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: inline result id exceeds 64 bytes',
+            });
+            return;
+          }
+          if (seenIds.has(rec.id)) {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: RESULT_ID_DUPLICATE',
+            });
+            return;
+          }
+          seenIds.add(rec.id);
+
+          if (typeof rec.type !== 'string' || !rec.type.trim() || rec.type.trim().length > 32) {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: inline result type must be a non-empty string (<= 32 chars)',
+            });
+            return;
+          }
+          validatedResults.push(rec as InlineQueryResult);
+        }
+
+        let cacheTime = 300;
+        if (body.cache_time !== undefined) {
+          if (
+            typeof body.cache_time !== 'number' ||
+            !Number.isInteger(body.cache_time) ||
+            body.cache_time < 0
+          ) {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: cache_time must be a non-negative integer',
+            });
+            return;
+          }
+          cacheTime = body.cache_time;
+        }
+
+        let isPersonal = false;
+        if (body.is_personal !== undefined) {
+          if (typeof body.is_personal !== 'boolean') {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: is_personal must be a boolean',
+            });
+            return;
+          }
+          isPersonal = body.is_personal;
+        }
+
+        let nextOffset = '';
+        if (body.next_offset !== undefined) {
+          if (typeof body.next_offset !== 'string' || Buffer.byteLength(body.next_offset, 'utf8') > 64) {
+            sendJson(ctx.res, 400, {
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: next_offset must be a string <= 64 bytes',
+            });
+            return;
+          }
+          nextOffset = body.next_offset;
+        }
+
+        const existingQuery = db
+          .prepare(`SELECT query_id, bot_user_id FROM bot_inline_queries WHERE query_id = ?`)
+          .get(inlineQueryId) as { query_id: string; bot_user_id: number } | undefined;
+
+        if (existingQuery && Number(existingQuery.bot_user_id) !== bot.bot_user_id) {
+          sendJson(ctx.res, 403, {
+            ok: false,
+            error_code: 403,
+            description: 'Forbidden: inline_query_id belongs to another bot',
+          });
+          return;
+        }
+
+        const now = Date.now();
+        if (existingQuery) {
+          db.prepare(
+            `UPDATE bot_inline_queries
+             SET results_json = ?, next_offset = ?, cache_time = ?, is_personal = ?, answered_at_ms = ?
+             WHERE query_id = ? AND bot_user_id = ?`,
+          ).run(
+            JSON.stringify(validatedResults),
+            nextOffset,
+            cacheTime,
+            isPersonal ? 1 : 0,
+            now,
+            inlineQueryId,
+            bot.bot_user_id,
+          );
+        } else {
+          db.prepare(
+            `INSERT INTO bot_inline_queries (
+              query_id, bot_user_id, user_id, chat_id, query_text, offset_str,
+              results_json, next_offset, cache_time, is_personal, answered_at_ms, created_at_ms
+            ) VALUES (?, ?, 0, NULL, '', '', ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            inlineQueryId,
+            bot.bot_user_id,
+            JSON.stringify(validatedResults),
+            nextOffset,
+            cacheTime,
+            isPersonal ? 1 : 0,
+            now,
+            now,
+          );
+        }
+
+        sendJson(ctx.res, 200, { ok: true, result: true });
+        return;
+      }
 
       default:
         // ZERO stub `{ ok: true, result: true }` for unknown Bot API methods!

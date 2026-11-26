@@ -1,7 +1,7 @@
 {
-  "name": "Fabushi Web v1.6.11",
+  "name": "Fabushi Web v1.7.0",
   "short_name": "Fabushi Web",
-  "description": "Fabushi Web v1.6.11 — High-performance bilingual web client with E2EE Vault & Secret Chats, WebRTC Calls, Fabushi 3D WASM + WebMCP Mini Apps, and AI Workspaces.",
+  "description": "Fabushi Web v1.7.0 — High-performance bilingual web client with E2EE Vault & Secret Chats, WebRTC Calls, Fabushi 3D WASM + WebMCP Mini Apps, and AI Workspaces.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
