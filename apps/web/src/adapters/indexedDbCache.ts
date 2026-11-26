@@ -17,8 +17,8 @@ export interface PersistedOutboxRecord extends PendingOutboxItem {
   accountId: string;
 }
 
-const IDB_NAME = 'gpui_telegram_idb_v1';
-const IDB_VERSION = 1;
+export const IDB_NAME = 'gpui_telegram_idb_v1';
+export const IDB_VERSION = 2;
 
 const STORE_CHATS = 'chats';
 const STORE_MESSAGES = 'messages';
@@ -27,9 +27,11 @@ const STORE_OUTBOX = 'outbox';
 const STORE_DRAFTS = 'drafts';
 const STORE_E2EE = 'e2ee_keys';
 const STORE_CLOUD = 'cloud_storage';
+const STORE_CREATIONS = 'creations';
+const STORE_COMMUNITY_CACHE = 'community_cache';
 const STORE_KV = 'kv';
 
-const ALL_STORES = [
+export const ALL_STORES = [
   STORE_CHATS,
   STORE_MESSAGES,
   STORE_PTS,
@@ -37,10 +39,12 @@ const ALL_STORES = [
   STORE_DRAFTS,
   STORE_E2EE,
   STORE_CLOUD,
+  STORE_CREATIONS,
+  STORE_COMMUNITY_CACHE,
   STORE_KV,
 ] as const;
 
-type StoreName = (typeof ALL_STORES)[number];
+export type StoreName = (typeof ALL_STORES)[number];
 
 class IndexedDbCacheService {
   private dbPromise: Promise<IDBDatabase | null> | null = null;
@@ -302,12 +306,76 @@ class IndexedDbCacheService {
     await this.set(STORE_CLOUD, scopeKey, bag);
   }
 
+  public async deleteByPrefix(store: StoreName, prefix: string): Promise<void> {
+    const fullPrefix = `${store}::${prefix}`;
+    for (const k of Array.from(this.memoryFallback.keys())) {
+      if (k.startsWith(fullPrefix)) {
+        this.memoryFallback.delete(k);
+      }
+    }
+    const db = await this.openDb();
+    if (!db) return;
+
+    await new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(store, 'readwrite');
+        const os = tx.objectStore(store);
+        const cursorReq = os.openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) return;
+          if (String(cursor.key).startsWith(prefix)) {
+            cursor.delete();
+          }
+          cursor.continue();
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  }
+
+  public async saveCreations<T>(accountId: string, scope: string, value: T): Promise<void> {
+    await this.set(STORE_CREATIONS, `${accountId}:${scope}`, value);
+  }
+
+  public async loadCreations<T>(accountId: string, scope: string): Promise<T | undefined> {
+    return this.get<T>(STORE_CREATIONS, `${accountId}:${scope}`);
+  }
+
+  public async saveCommunityCache<T>(accountId: string, scope: string, value: T): Promise<void> {
+    await this.set(STORE_COMMUNITY_CACHE, `${accountId}:${scope}`, value);
+  }
+
+  public async loadCommunityCache<T>(accountId: string, scope: string): Promise<T | undefined> {
+    return this.get<T>(STORE_COMMUNITY_CACHE, `${accountId}:${scope}`);
+  }
+
   public async getKv<T>(key: string): Promise<T | undefined> {
     return this.get<T>(STORE_KV, key);
   }
 
   public async setKv<T>(key: string, value: T): Promise<void> {
     await this.set(STORE_KV, key, value);
+  }
+
+  public async clearAccountData(accountId: string): Promise<void> {
+    if (!accountId) return;
+    const prefix = `${accountId}:`;
+    await Promise.all([
+      this.delete(STORE_CHATS, `list:${accountId}`),
+      this.deleteByPrefix(STORE_MESSAGES, prefix),
+      this.deleteByPrefix(STORE_PTS, prefix),
+      this.deleteByPrefix(STORE_OUTBOX, prefix),
+      this.deleteByPrefix(STORE_DRAFTS, prefix),
+      this.deleteByPrefix(STORE_E2EE, prefix),
+      this.deleteByPrefix(STORE_CLOUD, prefix),
+      this.deleteByPrefix(STORE_CREATIONS, prefix),
+      this.deleteByPrefix(STORE_COMMUNITY_CACHE, prefix),
+      this.deleteByPrefix(STORE_KV, prefix),
+    ]);
   }
 
   public async clearAll(): Promise<void> {

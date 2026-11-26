@@ -10,7 +10,7 @@ import type { LocaleCode } from '../i18n';
 
 export const BROADCAST_SYNC_CHANNEL_NAME = 'gpui-telegram-web-sync';
 
-export type SyncThemeName = 'night' | 'tinted' | 'day' | 'classic';
+export type SyncThemeName = 'night' | 'tinted' | 'day' | 'classic' | 'system';
 
 export type BroadcastSyncPayload =
   | {

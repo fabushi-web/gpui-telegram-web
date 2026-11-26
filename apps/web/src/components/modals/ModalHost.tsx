@@ -8,6 +8,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore, type ModalId } from '../../store/useUiStore';
+import { CallsHistoryModal } from './CallsHistoryModal';
 import { ContactsModal } from './ContactsModal';
 import { CreateBotModal } from './CreateBotModal';
 import { CreateChannelModal } from './CreateChannelModal';
@@ -375,7 +376,8 @@ export const ModalHost: React.FC = () => {
     modalKey === 'create_topic' ||
     modalKey === 'folder_editor' ||
     modalKey === 'reaction_details' ||
-    modalKey === 'passcode_setup';
+    modalKey === 'passcode_setup' ||
+    modalKey === 'calls_history';
 
   useEffect(() => {
     const onOpenShortcuts = () => {
@@ -464,6 +466,8 @@ export const ModalHost: React.FC = () => {
       return <ReactionDetailsModal onClose={closeModal} />;
     case 'passcode_setup':
       return <PasscodeSetupModal onClose={closeModal} />;
+    case 'calls_history':
+      return <CallsHistoryModal onClose={closeModal} />;
     default:
       return null;
   }

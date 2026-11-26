@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Fabushi Web v1.6.11 — Responsive 4-Tier Shell, Top Banners & 2-Layer Toasts
+   Fabushi Web v1.7.0 — Responsive 4-Tier Shell, Floating Pill & 2-Layer Toasts
    Breakpoints:
      1. >= 1276px : 3-column docked (Left [260..424px | 64px], Middle flex-1, Right [320px])
      2. 926-1275px: 2-column docked (Left + Middle) + Slide-over Right Drawer
@@ -114,7 +114,6 @@
   background-color: var(--tg-bg-stage);
 }
 
-#connection-status-banner,
 #top-call-bar,
 #top-audio-player-bar,
 #remote-takeover-banner,
@@ -133,15 +132,98 @@
   flex-shrink: 0;
 }
 
-#connection-status-banner[data-state="reconnecting"],
-#connection-status-banner[data-state="connecting"] {
-  background-color: var(--tg-warning-soft);
-  color: var(--tg-warning);
+/* v1.6.13 Non-Layout-Shifting Floating Bottom-Left Connection Pill */
+#connection-status-banner,
+.tg-connection-pill {
+  position: fixed;
+  bottom: 14px;
+  left: 14px;
+  z-index: 25;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  max-width: calc(100vw - 28px);
+  padding: 6px 12px;
+  border-radius: 999px;
+  background-color: rgba(36, 36, 36, 0.92);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-md);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  animation: tgFadeIn var(--tg-duration-fast) var(--tg-ease-out);
+}
+
+:root[data-theme="day"] #connection-status-banner,
+:root[data-theme="classic"] #connection-status-banner {
+  background-color: rgba(31, 31, 31, 0.86);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.tg-connection-pill-main {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.tg-connection-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background-color: var(--tg-accent);
+  flex-shrink: 0;
+}
+
+#connection-status-banner[data-state="reconnecting"] .tg-connection-pill-dot,
+#connection-status-banner[data-state="connecting"] .tg-connection-pill-dot,
+#connection-status-banner[data-state="updating"] .tg-connection-pill-dot {
+  background-color: var(--tg-warning);
 }
 
 #connection-status-banner[data-state="offline"] {
-  background-color: var(--tg-danger-soft);
-  color: var(--tg-danger);
+  border-color: rgba(255, 69, 58, 0.42);
+}
+
+#connection-status-banner[data-state="offline"] .tg-connection-pill-dot {
+  background-color: var(--tg-danger);
+}
+
+.tg-connection-pill-label {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tg-connection-pill-outbox {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tg-connection-pill-retry {
+  padding: 3px 9px;
+  font-size: 11.5px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  flex-shrink: 0;
+}
+
+.tg-connection-pill-retry:hover {
+  background-color: rgba(255, 255, 255, 0.22);
 }
 
 #top-call-bar {
@@ -493,6 +575,15 @@
   #chat-context-menu,
   .tg-context-menu {
     max-width: calc(100vw - 16px);
+  }
+
+  #app-shell[data-mobile-pane="left"] #connection-status-banner,
+  #app-shell[data-mobile-pane="workspace"] #connection-status-banner {
+    bottom: 66px;
+  }
+
+  #app-shell[data-mobile-pane="middle"] #connection-status-banner {
+    bottom: 72px;
   }
 }
 

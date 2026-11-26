@@ -5,6 +5,11 @@ import { t } from '../../i18n';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
+import {
+  CONNECTING_BANNER_GRACE_MS,
+  CONNECTING_BANNER_TIMER_BUFFER_MS,
+  evaluateConnectionBannerVisibility,
+} from '../../utils/coreParityM1B';
 
 export interface ConnectionBannerProps {
   className?: string;
@@ -20,6 +25,8 @@ export const ConnectionBanner: React.FC<ConnectionBannerProps> = ({ className })
   const [browserOfflineEvent, setBrowserOfflineEvent] = useState<boolean>(
     () => typeof navigator !== 'undefined' && navigator.onLine === false,
   );
+  const [transientStartedAtMs, setTransientStartedAtMs] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [retrying, setRetrying] = useState<boolean>(false);
 
   useEffect(() => {
@@ -35,18 +42,40 @@ export const ConnectionBanner: React.FC<ConnectionBannerProps> = ({ className })
     };
   }, []);
 
-  // Must be hidden / unmounted when WebSocket is connected and no explicit offline event is active (F3-01)
-  if (connectionState === 'connected' && !browserOfflineEvent) {
+  const isTransient =
+    !browserOfflineEvent &&
+    (connectionState === 'connecting' ||
+      connectionState === 'reconnecting' ||
+      connectionState === 'updating' ||
+      (connectionState === 'disconnected' && pendingOutboxCount === 0));
+
+  useEffect(() => {
+    if (!isTransient) {
+      setTransientStartedAtMs(null);
+      return;
+    }
+    const started = Date.now();
+    setTransientStartedAtMs((prev) => prev ?? started);
+    setNowMs(started);
+    const timer = setTimeout(() => {
+      setNowMs(Date.now());
+    }, CONNECTING_BANNER_GRACE_MS + CONNECTING_BANNER_TIMER_BUFFER_MS);
+    return () => clearTimeout(timer);
+  }, [isTransient]);
+
+  const evaluation = evaluateConnectionBannerVisibility({
+    connectionState,
+    browserOfflineEvent,
+    transientStartedAtMs,
+    nowMs,
+    pendingOutboxCount,
+  });
+
+  if (!evaluation.visible) {
     return null;
   }
 
-  const isOffline =
-    browserOfflineEvent || (connectionState === 'disconnected' && pendingOutboxCount > 0);
-  const bannerState: 'offline' | 'reconnecting' | 'connecting' = isOffline
-    ? 'offline'
-    : connectionState === 'reconnecting'
-      ? 'reconnecting'
-      : 'connecting';
+  const bannerState = evaluation.state;
 
   const handleRetryNow = async (): Promise<void> => {
     setRetrying(true);
@@ -63,12 +92,16 @@ export const ConnectionBanner: React.FC<ConnectionBannerProps> = ({ className })
   let statusLabel: string;
   if (bannerState === 'offline') {
     statusLabel =
-      language === 'zh-CN'
-        ? '离线 — 消息已加入待发队列'
-        : 'Offline — queued in outbox';
+      pendingOutboxCount > 0
+        ? language === 'zh-CN'
+          ? '离线 — 消息已加入待发队列'
+          : 'Offline — queued in outbox'
+        : language === 'zh-CN'
+          ? '等待网络…'
+          : 'Waiting for network…';
   } else if (bannerState === 'reconnecting') {
     statusLabel = t('sync.reconnecting', language);
-  } else if (connectionState === 'updating') {
+  } else if (bannerState === 'updating') {
     statusLabel = t('sync.updating', language);
   } else {
     statusLabel = t('sync.connecting', language);
@@ -80,31 +113,14 @@ export const ConnectionBanner: React.FC<ConnectionBannerProps> = ({ className })
       role="status"
       aria-live="polite"
       data-state={bannerState}
-      className={className}
+      data-testid="connection-status-pill"
+      className={className ? `tg-connection-pill ${className}` : 'tg-connection-pill'}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-        <span
-          aria-hidden="true"
-          style={{
-            width: '8px',
-            height: '8px',
-            borderRadius: '50%',
-            backgroundColor: 'currentColor',
-            flexShrink: 0,
-          }}
-        />
-        <span style={{ fontWeight: 600 }}>{statusLabel}</span>
+      <div className="tg-connection-pill-main">
+        <span aria-hidden="true" className="tg-connection-pill-dot" />
+        <span className="tg-connection-pill-label">{statusLabel}</span>
         {pendingOutboxCount > 0 && (
-          <span
-            data-testid="pending-outbox-badge"
-            style={{
-              padding: '2px 8px',
-              borderRadius: 'var(--tg-radius-pill)',
-              backgroundColor: 'rgba(0, 0, 0, 0.14)',
-              fontSize: '11.5px',
-              fontWeight: 600,
-            }}
-          >
+          <span data-testid="pending-outbox-badge" className="tg-connection-pill-outbox">
             {t('sync.pendingOutbox', language, { count: pendingOutboxCount })}
           </span>
         )}
@@ -114,8 +130,7 @@ export const ConnectionBanner: React.FC<ConnectionBannerProps> = ({ className })
         type="button"
         disabled={retrying}
         onClick={() => void handleRetryNow()}
-        className="tg-btn tg-btn--secondary"
-        style={{ padding: '4px 10px', fontSize: '12px', flexShrink: 0 }}
+        className="tg-btn tg-btn--secondary tg-connection-pill-retry"
       >
         {language === 'zh-CN' ? '立即重试' : 'Retry Now'}
       </button>

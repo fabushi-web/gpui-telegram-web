@@ -16,9 +16,10 @@ import {
   type BotRegistryEntry,
   type ChatSummary,
   type GifResultDto,
+  type InlineQueryResult,
   type StickerItemDto,
 } from '@gpui-telegram/protocol';
-import { formatDurationClock } from '../../i18n';
+import { formatDurationClock, t } from '../../i18n';
 import {
   startRoundVideoRecording,
   startVoiceRecording,
@@ -30,6 +31,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore } from '../../store/useUiStore';
+import { parseInlineBotQueryInput } from '../../utils/coreParityM1B';
 
 export interface CanonicalComposerHandle {
   handleIncomingFiles: (files: File[]) => Promise<void>;
@@ -140,6 +142,7 @@ export const CanonicalComposer = React.forwardRef<
   const lastTypingSentAtRef = useRef<number>(0);
 
   const sendByEnter = useSettingsStore((s) => s.sendByEnter);
+  const language = useSettingsStore((s) => s.language);
   const imeFsmRef = useRef<ImeSafetyFsm>(new ImeSafetyFsm({ sendByEnter }));
 
   useEffect(() => {
@@ -172,6 +175,7 @@ export const CanonicalComposer = React.forwardRef<
   const loadStickersAndGifs = useChatStore((s) => s.loadStickersAndGifs);
   const searchGifs = useChatStore((s) => s.searchGifs);
   const runAiComposeAssist = useChatStore((s) => s.runAiComposeAssist);
+  const queryBotInline = useChatStore((s) => s.queryBotInline);
 
   const composerPopover = useUiStore((s) => s.composerPopover);
   const setComposerPopover = useUiStore((s) => s.setComposerPopover);
@@ -208,6 +212,92 @@ export const CanonicalComposer = React.forwardRef<
   const [recordMode, setRecordMode] = useState<'voice' | 'round_video'>('voice');
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordingElapsedSec, setRecordingElapsedSec] = useState<number>(0);
+
+  // @botusername <query> Inline Bot Query Popup state
+  const parsedInlineQuery = useMemo(() => parseInlineBotQueryInput(text), [text]);
+  const [inlineQueryResults, setInlineQueryResults] = useState<InlineQueryResult[]>([]);
+  const [inlineQueryLoading, setInlineQueryLoading] = useState<boolean>(false);
+  const [inlineQueryDismissed, setInlineQueryDismissed] = useState<boolean>(false);
+  const [inlineQuerySelectedIdx, setInlineQuerySelectedIdx] = useState<number>(0);
+  const inlineQuerySeqRef = useRef<number>(0);
+
+  useEffect(() => {
+    setInlineQueryDismissed(false);
+    setInlineQuerySelectedIdx(0);
+    if (!parsedInlineQuery) {
+      inlineQuerySeqRef.current += 1;
+      setInlineQueryResults([]);
+      setInlineQueryLoading(false);
+      return;
+    }
+
+    const seq = ++inlineQuerySeqRef.current;
+    setInlineQueryLoading(true);
+    const timer = window.setTimeout(() => {
+      void queryBotInline({
+        bot: parsedInlineQuery.botUsername,
+        query: parsedInlineQuery.query,
+        chatId: chat.chatId,
+        limit: 12,
+      })
+        .then((res) => {
+          if (seq !== inlineQuerySeqRef.current) return;
+          setInlineQueryResults(res.results ?? res.items ?? []);
+          setInlineQueryLoading(false);
+        })
+        .catch(() => {
+          if (seq !== inlineQuerySeqRef.current) return;
+          setInlineQueryResults([]);
+          setInlineQueryLoading(false);
+        });
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [parsedInlineQuery?.botUsername, parsedInlineQuery?.query, chat.chatId, queryBotInline]);
+
+  // Listen for SwitchInline / SwitchInlineCurrentChat prefill events from inline keyboard buttons
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onPrefillInline = (ev: Event): void => {
+      const detail = (ev as CustomEvent<{ chatId?: number; botUsername: string; query?: string }>)
+        .detail;
+      if (!detail?.botUsername) return;
+      if (detail.chatId !== undefined && detail.chatId !== chat.chatId) return;
+      const uname = detail.botUsername.replace(/^@/, '');
+      const nextText = `@${uname} ${detail.query ?? ''}`;
+      setText(nextText);
+      setInlineQueryDismissed(false);
+      window.requestAnimationFrame(() => textareaRef.current?.focus());
+    };
+    window.addEventListener('fabushi:prefill-inline-query', onPrefillInline);
+    return () => window.removeEventListener('fabushi:prefill-inline-query', onPrefillInline);
+  }, [chat.chatId]);
+
+  const showInlineQueryPopup = Boolean(
+    parsedInlineQuery &&
+      !inlineQueryDismissed &&
+      (inlineQueryLoading || inlineQueryResults.length > 0),
+  );
+
+  const handleSelectInlineResult = useCallback(
+    async (item: InlineQueryResult) => {
+      const sendPayloadText =
+        item.input_message_content?.message_text?.trim() ||
+        [item.title, item.description, item.url].filter(Boolean).join('\n').trim();
+      if (!sendPayloadText) return;
+      setText('');
+      setInlineQueryResults([]);
+      setInlineQueryDismissed(true);
+      await saveDraft(chat.chatId, '');
+      await sendText(chat.chatId, sendPayloadText, {
+        topicId: activeTopicId ?? undefined,
+      });
+      onSentScrollToBottom?.();
+    },
+    [activeTopicId, chat.chatId, onSentScrollToBottom, saveDraft, sendText],
+  );
 
   // Sync text when switching chats
   useEffect(() => {
@@ -416,6 +506,7 @@ export const CanonicalComposer = React.forwardRef<
 
   // Autocomplete candidates for `/command` (including all 13 Coding Agent commands) and `@mention`
   const autocompleteCandidates = useMemo<AutocompleteCandidate[]>(() => {
+    if (parsedInlineQuery && !inlineQueryDismissed) return [];
     if (!text) return [];
 
     // Slash command at start of input
@@ -498,7 +589,19 @@ export const CanonicalComposer = React.forwardRef<
     }
 
     return [];
-  }, [botMeta, bots, chat.chatId, chat.isGroup, chat.isSupergroup, hermesCommands, membersByChat, peersById, text]);
+  }, [
+    botMeta,
+    bots,
+    chat.chatId,
+    chat.isGroup,
+    chat.isSupergroup,
+    hermesCommands,
+    inlineQueryDismissed,
+    membersByChat,
+    parsedInlineQuery,
+    peersById,
+    text,
+  ]);
 
   const applyAutocomplete = (candidate: AutocompleteCandidate) => {
     let nextText = text;
@@ -1043,6 +1146,82 @@ export const CanonicalComposer = React.forwardRef<
           >
             🔗 Link
           </button>
+        </div>
+      )}
+
+      {/* @botusername <query> Inline Bot Query Results Popup */}
+      {showInlineQueryPopup && parsedInlineQuery && (
+        <div
+          id="composer-inline-query-popup"
+          data-testid="inline-query-results"
+          role="listbox"
+          aria-label={`Inline results for @${parsedInlineQuery.botUsername}`}
+          className="tg-inline-query-popup"
+        >
+          <div className="tg-inline-query-header">
+            <strong style={{ color: 'var(--tg-accent)' }}>
+              @{parsedInlineQuery.botUsername} {parsedInlineQuery.query}
+            </strong>
+            <span>
+              {inlineQueryLoading
+                ? t('inlineQuery.loading', language)
+                : `${inlineQueryResults.length}`}
+            </span>
+          </div>
+          <div className="tg-inline-query-list">
+            {inlineQueryLoading && inlineQueryResults.length === 0 ? (
+              <div style={{ padding: '12px', fontSize: '12.5px', color: 'var(--tg-text-secondary)' }}>
+                {t('inlineQuery.loading', language)}
+              </div>
+            ) : inlineQueryResults.length === 0 ? (
+              <div style={{ padding: '12px', fontSize: '12.5px', color: 'var(--tg-text-secondary)' }}>
+                {t('inlineQuery.empty', language)}
+              </div>
+            ) : (
+              inlineQueryResults.map((item, idx) => {
+                const selected = idx === inlineQuerySelectedIdx;
+                return (
+                  <button
+                    key={item.id || `iq-${idx}`}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    data-testid="inline-query-result-item"
+                    onMouseDown={(ev) => ev.preventDefault()}
+                    onClick={() => void handleSelectInlineResult(item)}
+                    className={`tg-inline-query-item ${selected ? 'is-selected' : ''}`.trim()}
+                  >
+                    <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+                      <div
+                        style={{
+                          fontSize: '13px',
+                          fontWeight: 600,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {item.title || item.input_message_content?.message_text || item.id}
+                      </div>
+                      {(item.subtitle || item.description || item.summary) && (
+                        <div
+                          style={{
+                            fontSize: '12px',
+                            color: 'var(--tg-text-secondary)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {item.subtitle || item.description || item.summary}
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
 
@@ -1722,6 +1901,31 @@ export const CanonicalComposer = React.forwardRef<
                     }
                   }
 
+                  if (
+                    showInlineQueryPopup &&
+                    inlineQueryResults.length > 0 &&
+                    !imeFsmRef.current.isComposingOrCommitted()
+                  ) {
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setInlineQuerySelectedIdx((i) => (i + 1) % inlineQueryResults.length);
+                      return;
+                    }
+                    if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setInlineQuerySelectedIdx(
+                        (i) => (i - 1 + inlineQueryResults.length) % inlineQueryResults.length,
+                      );
+                      return;
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setInlineQueryDismissed(true);
+                      return;
+                    }
+                  }
+
                   if (autocompleteCandidates.length > 0) {
                     if (e.key === 'ArrowDown') {
                       e.preventDefault();
@@ -1769,6 +1973,12 @@ export const CanonicalComposer = React.forwardRef<
                   }
 
                   if (e.key === 'Escape') {
+                    if (showInlineQueryPopup) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setInlineQueryDismissed(true);
+                      return;
+                    }
                     if (composerPopover) {
                       e.preventDefault();
                       e.stopPropagation();
@@ -1826,6 +2036,22 @@ export const CanonicalComposer = React.forwardRef<
                       },
                       { text, sendByEnter },
                     );
+
+                    if (
+                      action !== 'ImeCandidateChosen' &&
+                      !imeFsmRef.current.isComposingOrCommitted() &&
+                      showInlineQueryPopup &&
+                      inlineQueryResults.length > 0 &&
+                      !e.shiftKey &&
+                      !isMod
+                    ) {
+                      e.preventDefault();
+                      const chosen = inlineQueryResults[inlineQuerySelectedIdx];
+                      if (chosen) {
+                        void handleSelectInlineResult(chosen);
+                      }
+                      return;
+                    }
 
                     if (
                       action !== 'ImeCandidateChosen' &&

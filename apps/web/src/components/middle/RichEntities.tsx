@@ -17,6 +17,7 @@ export interface RichEntitiesProps {
   webPage?: WebPagePreview;
   chatId?: number;
   suppressAutoPreview?: boolean;
+  isOutgoing?: boolean;
   onRunBotCommand?: (command: string) => void;
 }
 
@@ -27,6 +28,7 @@ interface TopLevelSlice {
   text: string;
   language?: string;
   collapsed?: boolean;
+  isExpandable?: boolean;
   entities: MessageEntity[];
 }
 
@@ -68,7 +70,9 @@ function partitionBlocksAndInlines(
   normalizedEntities: MessageEntity[],
 ): TopLevelSlice[] {
   const blockEntities = normalizedEntities
-    .filter((e) => e.type === 'pre' || e.type === 'blockquote')
+    .filter(
+      (e) => e.type === 'pre' || e.type === 'blockquote' || e.type === 'expandable_blockquote',
+    )
     .map((e) => {
       const start = clampUtf16Boundary(text, e.offset);
       const end = clampUtf16Boundary(text, e.offset + e.length);
@@ -110,15 +114,25 @@ function partitionBlocksAndInlines(
     }
 
     const blockEnd = block.offset + block.length;
+    const isExpandable = block.type === 'expandable_blockquote';
     slices.push({
       kind: block.type === 'pre' ? 'pre' : 'blockquote',
       start: block.offset,
       end: blockEnd,
       text: text.slice(block.offset, blockEnd),
       language: block.language,
-      collapsed: block.collapsed,
+      collapsed: isExpandable ? (block.collapsed ?? true) : Boolean(block.collapsed),
+      isExpandable,
       entities: shiftEntities(
-        normalizedEntities.filter((e) => e !== block && e.type !== block.type),
+        normalizedEntities.filter(
+          (e) =>
+            e !== block &&
+            e.type !== block.type &&
+            !(
+              (block.type === 'blockquote' || block.type === 'expandable_blockquote') &&
+              (e.type === 'blockquote' || e.type === 'expandable_blockquote')
+            ),
+        ),
         block.offset,
         blockEnd,
       ),
@@ -256,37 +270,41 @@ const CollapsibleBlockquote: React.FC<{
   content: React.ReactNode;
   rawText: string;
   initiallyCollapsed?: boolean;
-}> = ({ content, rawText, initiallyCollapsed }) => {
+  isExpandable?: boolean;
+  isOutgoing?: boolean;
+}> = ({ content, rawText, initiallyCollapsed, isExpandable, isOutgoing }) => {
   const lineCount = rawText.split('\n').length;
-  const isCollapsible = Boolean(initiallyCollapsed) || lineCount >= 2 || rawText.length > 64;
+  const isCollapsible = Boolean(isExpandable || initiallyCollapsed || lineCount > 4);
   const [collapsed, setCollapsed] = useState<boolean>(
-    Boolean(initiallyCollapsed) || lineCount >= 4 || rawText.length > 160,
+    isExpandable ? (initiallyCollapsed ?? true) : Boolean(initiallyCollapsed || lineCount > 4),
   );
 
   return (
     <blockquote
       data-testid="blockquote"
+      data-expandable={isExpandable ? 'true' : undefined}
       data-collapsible={isCollapsible ? 'true' : undefined}
       data-collapsed={collapsed ? 'true' : 'false'}
       aria-expanded={!collapsed}
+      className="tg-rich-blockquote"
       onClick={(e) => {
         if (!isCollapsible) return;
         e.stopPropagation();
         setCollapsed((v) => !v);
       }}
       style={{
-        margin: '6px 0',
+        margin: '4px 0',
         padding: '6px 10px',
-        borderLeft: '3px solid var(--tg-accent, #3390EC)',
+        borderLeft: '2.5px solid currentColor',
         borderRadius: '4px 8px 8px 4px',
-        backgroundColor: 'rgba(51, 144, 236, 0.1)',
+        backgroundColor: 'var(--tg-bubble-quote-bg, rgba(128, 128, 128, 0.14))',
         position: 'relative',
         cursor: isCollapsible ? 'pointer' : 'default',
       }}
     >
       <div
         style={{
-          maxHeight: collapsed ? '42px' : 'none',
+          maxHeight: collapsed ? '5.6em' : 'none',
           overflow: collapsed ? 'hidden' : 'visible',
           whiteSpace: 'pre-wrap',
         }}
@@ -306,9 +324,9 @@ const CollapsibleBlockquote: React.FC<{
             marginTop: '4px',
             padding: '1px 6px',
             borderRadius: '4px',
-            border: 'none',
-            backgroundColor: 'rgba(51, 144, 236, 0.16)',
-            color: 'var(--tg-accent, #3390EC)',
+            border: '1px solid var(--tg-hairline-border)',
+            backgroundColor: isOutgoing ? 'rgba(255, 255, 255, 0.14)' : 'var(--tg-bg-hover)',
+            color: 'inherit',
             fontSize: '11px',
             fontWeight: 600,
             cursor: 'pointer',
@@ -327,6 +345,7 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
   webPage,
   chatId,
   suppressAutoPreview = false,
+  isOutgoing = false,
   onRunBotCommand,
 }) => {
   const [revealedSpoilers, setRevealedSpoilers] = useState<Record<string, boolean>>({});
@@ -657,6 +676,8 @@ export const RichEntities: React.FC<RichEntitiesProps> = ({
               key={`bq-${slice.start}-${idx}`}
               rawText={slice.text}
               initiallyCollapsed={slice.collapsed}
+              isExpandable={slice.isExpandable}
+              isOutgoing={isOutgoing}
               content={renderInlineSegments(slice.text, slice.entities, slice.start)}
             />
           );

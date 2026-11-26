@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   extractPlainTextFromContent,
   peerAvatarColorIndex,
@@ -6,9 +7,11 @@ import {
   type MessageItem,
   type ReactionDetail,
 } from '@gpui-telegram/protocol';
+import { t } from '../../i18n';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
+import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore } from '../../store/useUiStore';
 import { GrokBotAvatar, resolveBotHueName } from '../common/GrokBotAvatar';
 import { MessageCards } from './MessageCards';
@@ -125,11 +128,23 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   const toggleReaction = useChatStore((s) => s.toggleReaction);
   const fetchReactionDetails = useChatStore((s) => s.fetchReactionDetails);
   const closePoll = useChatStore((s) => s.closePoll);
+  const translatedMessagesByKey = useChatStore((s) => s.translatedMessagesByKey);
+  const translatingMessageKeys = useChatStore((s) => s.translatingMessageKeys);
+  const translationErrorByKey = useChatStore((s) => s.translationErrorByKey);
+  const translateMessage = useChatStore((s) => s.translateMessage);
+  const clearMessageTranslation = useChatStore((s) => s.clearMessageTranslation);
 
+  const language = useSettingsStore((s) => s.language);
   const bots = useAiWorkspaceStore((s) => s.bots);
   const openModal = useUiStore((s) => s.openModal);
+  const openSettings = useUiStore((s) => s.openSettings);
   const pushToast = useUiStore((s) => s.pushToast);
   const currentUser = useAuthStore((s) => s.currentUser);
+
+  const translationKey = `${message.chat_id}:${message.id}`;
+  const translationResult = translatedMessagesByKey[translationKey];
+  const isTranslating = Boolean(translatingMessageKeys[translationKey]);
+  const translationError = translationErrorByKey[translationKey];
 
   const [hovered, setHovered] = useState<boolean>(false);
   const [stripBelow, setStripBelow] = useState<boolean>(false);
@@ -618,6 +633,75 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         {/* Primary Rich Message Content / Cards */}
         <MessageCards message={message} peerUserId={chat.peerUserId} />
 
+        {/* Inline Per-Message Translation Block (live Magpie API / honest 503 guidance) */}
+        {(isTranslating || translationResult || translationError) && (
+          <div data-testid="message-translation" className="tg-message-translation">
+            {isTranslating ? (
+              <span>🌐 {t('message.translating', language)}</span>
+            ) : translationResult ? (
+              <>
+                <div className="tg-message-translation-head">
+                  <span>
+                    🌐 {t('message.translatedLabel', language)} ({translationResult.target_lang})
+                  </span>
+                  <button
+                    type="button"
+                    className="tg-message-translation-dismiss"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      clearMessageTranslation(message.chat_id, message.id);
+                    }}
+                  >
+                    {t('message.hideTranslation', language)}
+                  </button>
+                </div>
+                <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                  {translationResult.translated_text}
+                </div>
+              </>
+            ) : translationError ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <div className="tg-message-translation-head">
+                  <span>
+                    ⚠️{' '}
+                    {translationError.needsProviderConfig
+                      ? t('message.translateUnconfigured', language)
+                      : translationError.message}
+                  </span>
+                  <button
+                    type="button"
+                    className="tg-message-translation-dismiss"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      clearMessageTranslation(message.chat_id, message.id);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+                {translationError.needsProviderConfig && (
+                  <button
+                    type="button"
+                    data-testid="btn-translate-open-magpie"
+                    className="tg-btn tg-btn--secondary"
+                    style={{
+                      alignSelf: 'flex-start',
+                      padding: '3px 9px',
+                      fontSize: '11.5px',
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openSettings('magpie_gateway');
+                    }}
+                  >
+                    {t('message.configureAiProvider', language)}
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </div>
+        )}
+
         {/* Reaction Counter Chips (Trap #10: data-testid="reaction-chip") */}
         {visibleReactions.length > 0 && (
           <div
@@ -832,72 +916,78 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       </div>
 
       {/* Viewport-Clamped 8x4 = 32 Emoji Reaction Picker (Trap #10: data-testid="reaction-picker") */}
-      {pickerPos && (
-        <div
-          role="dialog"
-          aria-label="Choose a reaction"
-          data-testid="reaction-picker"
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            position: 'fixed',
-            left: `${pickerPos.x}px`,
-            top: `${pickerPos.y}px`,
-            padding: '8px',
-            borderRadius: '12px',
-            backgroundColor: 'var(--tg-bg-elevated)',
-            border: '1px solid var(--tg-hairline-border)',
-            boxShadow: 'inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-lg)',
-            zIndex: 1350,
-            display: 'grid',
-            gridTemplateColumns: 'repeat(8, 34px)',
-            gap: '4px',
-          }}
-        >
-          {EXTENDED_32_REACTION_EMOJIS.map((emoji) => (
-            <button
-              key={emoji}
-              type="button"
-              data-reaction-option={emoji}
-              aria-label={`Emoji ${emoji}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setPickerPos(null);
-                setHovered(false);
-                void toggleReaction(message.chat_id, message.id, emoji);
-              }}
+      {pickerPos &&
+        (() => {
+          const pickerEl = (
+            <div
+              role="dialog"
+              aria-label="Choose a reaction"
+              data-testid="reaction-picker"
+              onClick={(e) => e.stopPropagation()}
               style={{
-                width: '34px',
-                height: '34px',
-                borderRadius: '8px',
-                backgroundColor: 'transparent',
-                fontSize: '19px',
-                lineHeight: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
+                position: 'fixed',
+                left: `${pickerPos.x}px`,
+                top: `${pickerPos.y}px`,
+                padding: '8px',
+                borderRadius: '12px',
+                backgroundColor: 'var(--tg-bg-elevated)',
+                border: '1px solid var(--tg-hairline-border)',
+                boxShadow: 'inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-lg)',
+                zIndex: 1350,
+                display: 'grid',
+                gridTemplateColumns: 'repeat(8, 34px)',
+                gap: '4px',
               }}
             >
-              {emoji}
-            </button>
-          ))}
-        </div>
-      )}
+              {EXTENDED_32_REACTION_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  data-reaction-option={emoji}
+                  aria-label={`Emoji ${emoji}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPickerPos(null);
+                    setHovered(false);
+                    void toggleReaction(message.chat_id, message.id, emoji);
+                  }}
+                  style={{
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '8px',
+                    backgroundColor: 'transparent',
+                    fontSize: '19px',
+                    lineHeight: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          );
+          return typeof document !== 'undefined' ? createPortal(pickerEl, document.body) : pickerEl;
+        })()}
 
       {/* Viewport-Clamped Message Context Menu */}
-      {ctxMenuPos && (
-        <div
-          id="message-context-menu"
-          role="menu"
-          data-testid="context-menu"
-          aria-label="Message actions"
-          className="tg-context-menu"
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            left: `${ctxMenuPos.x}px`,
-            top: `${ctxMenuPos.y}px`,
-            width: '226px',
-          }}
-        >
+      {ctxMenuPos &&
+        (() => {
+          const menuEl = (
+            <div
+              id="message-context-menu"
+              role="menu"
+              data-testid="context-menu"
+              aria-label="Message actions"
+              className="tg-context-menu"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                left: `${ctxMenuPos.x}px`,
+                top: `${ctxMenuPos.y}px`,
+                width: '226px',
+              }}
+            >
           <button
             type="button"
             role="menuitem"
@@ -1019,6 +1109,31 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             ⧉ Copy Text · 复制文本
           </button>
 
+          {plainBodyText.trim().length > 0 && (
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="ctx-translate-message"
+              onClick={() => {
+                setCtxMenuPos(null);
+                if (translationResult || translationError) {
+                  clearMessageTranslation(message.chat_id, message.id);
+                  return;
+                }
+                const hasCjk = /[\u4e00-\u9fff]/.test(plainBodyText);
+                const targetLang =
+                  language === 'zh-CN' ? (hasCjk ? 'en' : 'zh-CN') : hasCjk ? 'en' : 'zh-CN';
+                void translateMessage(message.chat_id, message.id, targetLang).catch(() => undefined);
+              }}
+              className="tg-context-menu-item"
+            >
+              🌐{' '}
+              {translationResult
+                ? t('message.hideTranslation', language)
+                : t('message.translate', language)}
+            </button>
+          )}
+
           {visibleReactions.length > 0 && (
             <button
               type="button"
@@ -1049,15 +1164,19 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           >
             🗑 Delete · 删除
           </button>
-        </div>
-      )}
+            </div>
+          );
+          return typeof document !== 'undefined' ? createPortal(menuEl, document.body) : menuEl;
+        })()}
 
       {/* Reactor List Popover */}
-      {reactorModalPos && (
-        <div
-          role="dialog"
-          aria-label="Reactions"
-          data-testid="reactor-list-popover"
+      {reactorModalPos &&
+        (() => {
+          const reactorEl = (
+            <div
+              role="dialog"
+              aria-label="Reactions"
+              data-testid="reactor-list-popover"
           onClick={(e) => e.stopPropagation()}
           style={{
             position: 'fixed',
@@ -1163,8 +1282,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               });
             })}
           </div>
-        </div>
-      )}
+            </div>
+          );
+          return typeof document !== 'undefined' ? createPortal(reactorEl, document.body) : reactorEl;
+        })()}
     </div>
   );
 };

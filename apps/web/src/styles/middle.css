@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Fabushi Web v1.6.11 — Middle Stage, Centered 76px Apple Header,
+   Fabushi Web v1.7.0 — Middle Stage, Centered 76px Apple Header,
    Apple Compose Stage, Bot Pre-Start Bar, Gradient Bubbles & Capsule Composer
    ========================================================================== */
 
@@ -787,4 +787,200 @@
   background-color: var(--tg-bg-elevated);
   border: 1px solid var(--tg-hairline-border);
   box-shadow: inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-sm);
+}
+
+/* v1.6.13 Alternating Shimmering History Skeleton (#stage-loading-history-skeleton) */
+.tg-stage-skeleton {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 10px;
+  width: 100%;
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 0 4px 12px;
+}
+
+.tg-stage-skeleton-row {
+  display: flex;
+  width: 100%;
+}
+
+.tg-stage-skeleton-row.is-incoming {
+  justify-content: flex-start;
+}
+
+.tg-stage-skeleton-row.is-outgoing {
+  justify-content: flex-end;
+}
+
+.tg-stage-skeleton-bubble {
+  padding: 12px 14px;
+  border-radius: 17px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tg-stage-skeleton-bubble.is-incoming {
+  background-color: rgba(255, 255, 255, 0.085);
+}
+
+.tg-stage-skeleton-bubble.is-outgoing {
+  background-color: var(--tg-accent-soft);
+}
+
+:root[data-theme="day"] .tg-stage-skeleton-bubble.is-incoming,
+:root[data-theme="classic"] .tg-stage-skeleton-bubble.is-incoming {
+  background-color: rgba(0, 0, 0, 0.065);
+}
+
+.tg-stage-skeleton-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.16);
+}
+
+.tg-stage-skeleton-line--short {
+  height: 9px;
+  opacity: 0.72;
+}
+
+:root[data-theme="day"] .tg-stage-skeleton-line,
+:root[data-theme="classic"] .tg-stage-skeleton-line {
+  background-color: rgba(0, 0, 0, 0.12);
+}
+
+/* Inline Message Translation Block inside MessageBubble */
+.tg-message-translation {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--tg-hairline-border);
+  font-size: 12.5px;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tg-message-bubble.is-outgoing .tg-message-translation {
+  border-top-color: rgba(255, 255, 255, 0.28);
+  color: rgba(255, 255, 255, 0.94);
+}
+
+.tg-message-translation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.tg-message-translation-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+/* Inline Bot Query Results Popup (#composer-inline-query-popup) */
+#composer-inline-query-popup,
+.tg-inline-query-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 36;
+  max-height: min(320px, 46vh);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background-color: var(--tg-bg-surface);
+  border: 1px solid var(--tg-hairline-border);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-md);
+  overflow: hidden;
+}
+
+.tg-inline-query-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--tg-hairline-border);
+  font-size: 12px;
+  color: var(--tg-text-secondary);
+}
+
+.tg-inline-query-list {
+  overflow-y: auto;
+  max-height: 260px;
+  display: flex;
+  flex-direction: column;
+}
+
+.tg-inline-query-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  border-bottom: 1px solid var(--tg-hairline-border);
+  background: transparent;
+  color: var(--tg-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.tg-inline-query-item:last-child {
+  border-bottom: none;
+}
+
+.tg-inline-query-item:hover,
+.tg-inline-query-item.is-selected {
+  background-color: var(--tg-accent-soft);
+}
+
+/* Scheduled Messages Drawer */
+.tg-scheduled-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--tg-z-modal, 220);
+  background-color: var(--tg-bg-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.tg-scheduled-drawer {
+  width: min(460px, 94vw);
+  max-height: 80dvh;
+  border-radius: var(--tg-radius-lg);
+  background-color: var(--tg-bg-surface);
+  border: 1px solid var(--tg-hairline-border);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tg-scheduled-item-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--tg-hairline-border);
+}
+
+.tg-scheduled-item-row:last-child {
+  border-bottom: none;
 }

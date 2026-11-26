@@ -8,7 +8,7 @@ import {
   type PendingDeviceSyncItem,
 } from '@gpui-telegram/protocol';
 import { indexedDbCache } from '../../adapters';
-import { type LocaleCode } from '../../i18n';
+import { t, type LocaleCode } from '../../i18n';
 import {
   bytesToBase64,
   deriveSplitKeyV2,
@@ -16,13 +16,16 @@ import {
   generateRandomSaltB64,
   generateVaultRootKey,
   sealRootKeyForDevice,
+  wrapRecoveryRootKey,
   wrapVaultRootKey,
 } from '../../services/splitKeyCrypto';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import {
+  INTERFACE_SCALE_PRESETS,
   NON_PURPLE_ACCENT_SWATCHES,
+  requestNotificationPermission,
   useSettingsStore,
   type ThemeName,
 } from '../../store/useSettingsStore';
@@ -80,6 +83,12 @@ const THEME_OPTIONS: ReadonlyArray<{
   { id: 'tinted', labelEn: 'Tinted (Graphite)', labelZh: '冷色石墨 (Tinted)', swatch: '#15191E' },
   { id: 'day', labelEn: 'Day (Clean Light)', labelZh: '日间浅色 (Day)', swatch: '#FFFFFF' },
   { id: 'classic', labelEn: 'Classic', labelZh: '经典 (Classic)', swatch: '#E8F0E4' },
+  {
+    id: 'system',
+    labelEn: 'Follow System',
+    labelZh: '跟随系统 (System)',
+    swatch: 'linear-gradient(135deg, #0E0E0E 50%, #FFFFFF 50%)',
+  },
 ];
 
 const WALLPAPER_PRESETS: ReadonlyArray<{
@@ -412,9 +421,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
         DEFAULT_ARGON2_KDF_PARAMS,
       );
       const rootKey = generateVaultRootKey();
-      const wrappedRoot = await wrapVaultRootKey(rootKey, derived.vaultWrapKeyBytes);
+      const wrappedRoot = await wrapVaultRootKey(
+        rootKey,
+        derived.vaultWrapKeyBytes,
+        currentUser?.userId,
+      );
       const recoveryKey = generateVaultRootKey();
-      const recoveryWrapped = await wrapVaultRootKey(rootKey, recoveryKey);
+      const recoveryWrapped =
+        currentUser?.userId !== undefined
+          ? await wrapRecoveryRootKey(recoveryKey, rootKey, currentUser.userId)
+          : await wrapVaultRootKey(rootKey, recoveryKey);
       await saveVaultEnvelope({
         key_version: (vaultEnvelope?.key_version ?? 0) + 1,
         kdf_alg: USER_VAULT_KDF_ALG_SPLIT_KEY_V2,
@@ -471,7 +487,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
     setVaultBusy(true);
     try {
       const rootKey = generateVaultRootKey();
-      const sealed = await sealRootKeyForDevice(rootKey, item.device_public_key_b64);
+      const sealed = await sealRootKeyForDevice(
+        rootKey,
+        item.device_public_key_b64,
+        currentUser ? { requestId: item.request_id, userId: currentUser.userId } : undefined,
+      );
       await approveDeviceSync(item.request_id, sealed);
       pushToast(`Approved device sync for ${item.device_name}`, 'success');
     } catch (err) {
@@ -522,7 +542,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
         <header className="tg-settings-topbar">
           <div className="tg-ai-row">
             <strong>⚙️ {isZh ? '系统设置' : 'Settings'}</strong>
-            <span className="tg-ai-badge tg-ai-badge--accent">Fabushi Web v1.6.11</span>
+            <span className="tg-ai-badge tg-ai-badge--accent">Fabushi Web v1.7.0</span>
           </div>
           <div className="tg-ai-row">
             <button
@@ -554,7 +574,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                   {displayName}
                 </div>
                 <div className="tg-ai-workspace__subtitle">
-                  {currentUser?.username ? `@${currentUser.username}` : 'Fabushi v1.6.11'}
+                  {currentUser?.username ? `@${currentUser.username}` : 'Fabushi v1.7.0'}
                 </div>
               </div>
             </div>
@@ -585,7 +605,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
             {currentSection === 'root' && (
               <div className="tg-ai-card">
                 <h3 className="tg-ai-card__title">
-                  ✨ {isZh ? '法布施 Web · v1.6.11 概览' : 'Fabushi Web · v1.6.11 Overview'}
+                  ✨ {isZh ? '法布施 Web · v1.7.0 概览' : 'Fabushi Web · v1.7.0 Overview'}
                 </h3>
                 <p className="tg-ai-workspace__subtitle" style={{ margin: 0, lineHeight: 1.6 }}>
                   {isZh
@@ -720,6 +740,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                       <button
                         key={hex}
                         type="button"
+                        data-accent-swatch="true"
                         aria-label={`Accent ${hex}`}
                         onClick={() => setAccentColor(hex)}
                         style={{
@@ -766,12 +787,27 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
 
                 <label className="tg-ai-field">
                   <span>
-                    {isZh ? '界面缩放' : 'UI Scale'}: {uiScale}%
+                    {t('settings.interfaceScale', language)}: {uiScale}%
                   </span>
+                  <div className="tg-ai-row" style={{ marginBottom: 4 }}>
+                    {INTERFACE_SCALE_PRESETS.map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        id={`settings-scale-btn-${pct}`}
+                        data-testid={`settings-scale-btn-${pct}`}
+                        className={`tg-btn ${uiScale === pct ? 'tg-btn--primary' : 'tg-btn--secondary'}`}
+                        style={{ padding: '4px 10px', fontSize: 12 }}
+                        onClick={() => setUiScale(pct)}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
                   <input
                     type="range"
-                    min={80}
-                    max={140}
+                    min={50}
+                    max={300}
                     step={5}
                     value={uiScale}
                     onChange={(e) => setUiScale(Number(e.target.value))}
@@ -922,6 +958,39 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                     onClick={() => setNotificationsEnabled(!notificationsEnabled)}
                   />
                 </div>
+                {typeof Notification !== 'undefined' && (
+                  <div
+                    className="tg-settings-switch-row"
+                    style={{ fontSize: 12, color: 'var(--tg-text-secondary)' }}
+                  >
+                    <span>
+                      {Notification.permission === 'granted'
+                        ? t('settings.notifPermissionGranted', language)
+                        : Notification.permission === 'denied'
+                          ? t('settings.notifPermissionDenied', language)
+                          : t('settings.notifPermissionDefault', language)}
+                    </span>
+                    {Notification.permission === 'default' && (
+                      <button
+                        type="button"
+                        className="tg-btn tg-btn--secondary"
+                        style={{ padding: '4px 10px', fontSize: 12 }}
+                        onClick={() => {
+                          void requestNotificationPermission().then((perm) => {
+                            pushToast(
+                              perm === 'granted'
+                                ? t('settings.notifPermissionGranted', language)
+                                : t('settings.notifPermissionDenied', language),
+                              perm === 'granted' ? 'success' : 'warning',
+                            );
+                          });
+                        }}
+                      >
+                        {t('settings.requestPermission', language)}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="tg-settings-switch-row">
                   <span>{isZh ? '消息提示音' : 'Notification Sound'}</span>
                   <button
@@ -1968,7 +2037,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                       const snap = await probeServerHealth(serverUrlDraft.trim());
                       pushToast(
                         snap.status === 'online'
-                          ? `Online (${snap.version || '1.6.11'})`
+                          ? `Online (${snap.version || '1.7.0'})`
                           : `Offline: ${snap.error || 'unreachable'}`,
                         snap.status === 'online' ? 'success' : 'error',
                       );
@@ -2051,16 +2120,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
               </div>
             )}
 
-            {/* ABOUT & SHORTCUTS (Fabushi Web v1.6.11 Branding) */}
+            {/* ABOUT & SHORTCUTS (Fabushi Web v1.7.0 Branding) */}
             {currentSection === 'about' && (
               <div className="tg-ai-card">
                 <h3 className="tg-ai-card__title">
-                  ℹ️ {isZh ? '法布施 Web · v1.6.11' : 'Fabushi Web · v1.6.11'}
+                  ℹ️ {isZh ? '法布施 Web · v1.7.0' : 'Fabushi Web · v1.7.0'}
                 </h3>
                 <p className="tg-ai-workspace__subtitle" style={{ margin: 0, lineHeight: 1.6 }}>
                   {isZh
-                    ? '全面对齐桌面端 Fabushi v1.6.11 的生产级全栈 Web 客户端：零假数据架构、Split-Key V2 零知识端到端保险库与 X25519 设备信任环、Apple Messages & Muse 无紫暗色设计、每用户 ChaCha20 加密隔离 Magpie v1.6 与实时 models.dev 目录、统一 Fabushi/Hermes 智能体与 Coding Agent Bots、官方 OAuth 2.1 远程 MCP (/mcp)、UU 级远程协助、内置 Chromium 浏览器脚本蒸馏与自动化应用商店，以及 3D 法布施 WASM + WebMCP 小程序。'
-                    : 'Production full-stack web edition aligned 100% with desktop Fabushi v1.6.11: zero fake data, Split-Key V2 E2EE User Vault & X25519 Device Trust Ring, Apple Messages & Muse zero-purple design, per-user ChaCha20-encrypted Magpie v1.6 + live models.dev catalog, unified Fabushi/Hermes Multi-Agent runtime & Coding Agent Bots, Official OAuth 2.1 Remote MCP (/mcp), UU-Parity Remote Assist, Built-in Chromium Browser Script Distillation & Automation App Store, and 3D Fabushi WASM + WebMCP Mini Apps.'}
+                    ? '全面对齐桌面端 Fabushi v1.7.0 的生产级全栈 Web 客户端：零假数据架构、Split-Key V2 Argon2id + ChaCha20-Poly1305 零知识端到端保险库与 X25519 设备信任环、Apple Messages & Muse 无紫暗色设计、每用户 ChaCha20 加密隔离 Magpie v1.6 与实时 models.dev 目录、统一 Fabushi/Hermes 智能体与 Coding Agent Bots、官方 OAuth 2.1 远程 MCP (/mcp)、UU 级远程协助、内置 Chromium 浏览器脚本蒸馏与自动化应用商店，以及 3D 法布施 WASM + WebMCP 小程序。'
+                    : 'Production full-stack web edition aligned 100% with desktop Fabushi v1.7.0: zero fake data, Split-Key V2 Argon2id + ChaCha20-Poly1305 E2EE User Vault & X25519 Device Trust Ring, Apple Messages & Muse zero-purple design, per-user ChaCha20-encrypted Magpie v1.6 + live models.dev catalog, unified Fabushi/Hermes Multi-Agent runtime & Coding Agent Bots, Official OAuth 2.1 Remote MCP (/mcp), UU-Parity Remote Assist, Built-in Chromium Browser Script Distillation & Automation App Store, and 3D Fabushi WASM + WebMCP Mini Apps.'}
                 </p>
                 <div className="tg-ai-row">
                   <button

@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   DOM_IDS,
+  extractPlainTextFromContent,
   peerAvatarColorIndex,
   type BotRegistryEntry,
   type ChatSummary,
 } from '@gpui-telegram/protocol';
 import { getClientAdapter } from '../../adapters';
+import { t } from '../../i18n';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
@@ -63,6 +66,10 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
   const clearChatHistory = useChatStore((s) => s.clearChatHistory);
   const deleteOrLeaveChat = useChatStore((s) => s.deleteOrLeaveChat);
   const exportChatHistory = useChatStore((s) => s.exportChatHistory);
+  const scheduledMessagesByChat = useChatStore((s) => s.scheduledMessagesByChat);
+  const loadScheduledMessages = useChatStore((s) => s.loadScheduledMessages);
+  const cancelScheduledMessage = useChatStore((s) => s.cancelScheduledMessage);
+  const sendScheduledMessageNow = useChatStore((s) => s.sendScheduledMessageNow);
 
   const inChatSearchOpen = useUiStore((s) => s.inChatSearchOpen);
   const isRightOpen = useUiStore((s) => s.isRightOpen);
@@ -80,30 +87,54 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
   const [moreMenuPos, setMoreMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [ttlMenuPos, setTtlMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState<boolean>(false);
+  const [scheduledDrawerOpen, setScheduledDrawerOpen] = useState<boolean>(false);
+  const [scheduledBusyId, setScheduledBusyId] = useState<number | null>(null);
   const moreBtnRef = useRef<HTMLButtonElement | null>(null);
   const ttlBtnRef = useRef<HTMLButtonElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
+  const ttlMenuRef = useRef<HTMLDivElement | null>(null);
+  const scheduledItems = scheduledMessagesByChat[chat.chatId] ?? [];
+
+  const renderOverlay = (node: React.ReactNode): React.ReactNode =>
+    typeof document !== 'undefined' && document.body ? createPortal(node, document.body) : node;
 
   useEffect(() => {
     if (!moreMenuPos && !ttlMenuPos) return;
     const close = (e: MouseEvent) => {
-      if (moreBtnRef.current && moreBtnRef.current.contains(e.target as Node)) return;
-      if (ttlBtnRef.current && ttlBtnRef.current.contains(e.target as Node)) return;
+      const target = e.target as Node | null;
+      if (target && moreBtnRef.current?.contains(target)) return;
+      if (target && ttlBtnRef.current?.contains(target)) return;
+      if (target && moreMenuRef.current?.contains(target)) return;
+      if (target && ttlMenuRef.current?.contains(target)) return;
       setMoreMenuPos(null);
       setTtlMenuPos(null);
     };
-    const onEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setMoreMenuPos(null);
-        setTtlMenuPos(null);
-      }
-    };
     window.addEventListener('click', close);
-    window.addEventListener('keydown', onEsc);
     return () => {
       window.removeEventListener('click', close);
-      window.removeEventListener('keydown', onEsc);
     };
   }, [moreMenuPos, ttlMenuPos]);
+
+  useEffect(() => {
+    if (!moreMenuPos && !ttlMenuPos && !scheduledDrawerOpen && !deleteDialogOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (moreMenuPos || ttlMenuPos) {
+        setMoreMenuPos(null);
+        setTtlMenuPos(null);
+      } else if (deleteDialogOpen) {
+        setDeleteDialogOpen(false);
+      } else if (scheduledDrawerOpen) {
+        setScheduledDrawerOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [moreMenuPos, ttlMenuPos, scheduledDrawerOpen, deleteDialogOpen]);
 
   const typingUsers = typingByChat[chat.chatId] ?? [];
   const isTyping = typingUsers.length > 0;
@@ -117,7 +148,11 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
   const peerUser = chat.peerUserId !== undefined ? peersById[chat.peerUserId] : undefined;
   const botActivity = botActivityByChat[chat.chatId];
   const hasFreshBotActivity = Boolean(
-    isBot && botActivity && botActivity.state && botActivity.state !== 'idle' && Date.now() - botActivity.updatedAtMs < 45_000,
+    (isBot || chat.isGroup || chat.isSupergroup) &&
+      botActivity &&
+      botActivity.state &&
+      botActivity.state !== 'idle' &&
+      Date.now() - botActivity.updatedAtMs < 45_000,
   );
 
   let statusText = '';
@@ -374,6 +409,33 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
       {/* Right Zone: Floating Translucent Actions Pill (#topbar-right-actions-pill) */}
       <div className="tg-chat-header-right">
         <div id="topbar-right-actions-pill" className="tg-chat-header-actions">
+          {scheduledItems.length > 0 && (
+            <button
+              id="btn-scheduled-messages"
+              type="button"
+              data-testid="btn-scheduled-messages"
+              aria-label={t('scheduled.title', language)}
+              title={t('scheduled.count', language, { count: scheduledItems.length })}
+              onClick={() => {
+                setScheduledDrawerOpen(true);
+                void loadScheduledMessages(chat.chatId).catch(() => []);
+              }}
+              className="tg-icon-btn"
+              style={{
+                height: '32px',
+                padding: '0 8px',
+                borderRadius: '999px',
+                fontSize: '12px',
+                fontWeight: 600,
+                gap: '4px',
+                color: 'var(--tg-accent)',
+              }}
+            >
+              <span aria-hidden="true">📅</span>
+              <span>{scheduledItems.length}</span>
+            </button>
+          )}
+
           <button
             id={DOM_IDS.BTN_IN_CHAT_SEARCH}
             type="button"
@@ -445,54 +507,58 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
       </div>
 
       {/* Explicit Secret Chat TTL Menu (Trap #15: role="menu" / role="menuitem") */}
-      {ttlMenuPos && (
-        <div
-          role="menu"
-          data-testid="secret-ttl-menu"
-          aria-label="Self-Destruct Timer (TTL)"
-          className="tg-context-menu"
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            left: `${ttlMenuPos.x}px`,
-            top: `${ttlMenuPos.y}px`,
-            minWidth: '176px',
-          }}
-        >
-          {ttlChoices.map((choice) => {
-            const active = (chat.ttlSeconds ?? 0) === choice.secs;
-            return (
-              <button
-                key={choice.secs}
-                type="button"
-                role="menuitem"
-                aria-label={`Self-Destruct ${choice.label}`}
-                onClick={() => {
-                  setTtlMenuPos(null);
-                  void setChatTtl(chat.chatId, choice.secs);
-                }}
-                className="tg-context-menu-item"
-                style={{
-                  justifyContent: 'space-between',
-                  color: active ? 'var(--tg-accent)' : undefined,
-                  fontWeight: active ? 600 : 400,
-                }}
-              >
-                <span>⏱ {choice.label}</span>
-                {active && <span>✓</span>}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      {ttlMenuPos &&
+        renderOverlay(
+          <div
+            ref={ttlMenuRef}
+            role="menu"
+            data-testid="secret-ttl-menu"
+            aria-label="Self-Destruct Timer (TTL)"
+            className="tg-context-menu"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              left: `${ttlMenuPos.x}px`,
+              top: `${ttlMenuPos.y}px`,
+              minWidth: '176px',
+            }}
+          >
+            {ttlChoices.map((choice) => {
+              const active = (chat.ttlSeconds ?? 0) === choice.secs;
+              return (
+                <button
+                  key={choice.secs}
+                  type="button"
+                  role="menuitem"
+                  aria-label={`Self-Destruct ${choice.label}`}
+                  onClick={() => {
+                    setTtlMenuPos(null);
+                    void setChatTtl(chat.chatId, choice.secs);
+                  }}
+                  className="tg-context-menu-item"
+                  style={{
+                    justifyContent: 'space-between',
+                    color: active ? 'var(--tg-accent)' : undefined,
+                    fontWeight: active ? 600 : 400,
+                  }}
+                >
+                  <span>⏱ {choice.label}</span>
+                  {active && <span>✓</span>}
+                </button>
+              );
+            })}
+          </div>,
+        )}
 
       {/* Viewport-Clamped Chat More Menu */}
-      {moreMenuPos && (
-        <div
-          role="menu"
-          data-testid="context-menu"
-          aria-label="Chat options"
-          className="tg-context-menu"
-          onClick={(e) => e.stopPropagation()}
+      {moreMenuPos &&
+        renderOverlay(
+          <div
+            ref={moreMenuRef}
+            role="menu"
+            data-testid="context-menu"
+            aria-label="Chat options"
+            className="tg-context-menu"
+            onClick={(e) => e.stopPropagation()}
           style={{
             left: `${moreMenuPos.x}px`,
             top: `${moreMenuPos.y}px`,
@@ -598,6 +664,21 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
             💳 Create Invoice · 创建账单
           </button>
 
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="chat-more-scheduled"
+            onClick={() => {
+              setMoreMenuPos(null);
+              setScheduledDrawerOpen(true);
+              void loadScheduledMessages(chat.chatId).catch(() => []);
+            }}
+            className="tg-context-menu-item"
+          >
+            📅 {t('scheduled.title', language)}
+            {scheduledItems.length > 0 ? ` (${scheduledItems.length})` : ''}
+          </button>
+
           {/* Non-colliding data-testid; canonical #btn-export-chat-json / html live visibly in RightColumn (Trap #14) */}
           <button
             type="button"
@@ -683,15 +764,19 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
           >
             🗑 {chat.isGroup || chat.isChannel ? 'Leave Chat' : 'Delete Chat'}
           </button>
-        </div>
-      )}
+        </div>,
+        )}
 
       {/* Confirmation dialog before deleting/leaving active chat */}
-      {deleteDialogOpen && (
-        <div
-          className="tg-modal-overlay"
-          onClick={() => setDeleteDialogOpen(false)}
-        >
+      {deleteDialogOpen &&
+        renderOverlay(
+          <div
+            className="tg-modal-overlay"
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteDialogOpen(false);
+            }}
+          >
           <div
             role="dialog"
             aria-modal="true"
@@ -735,8 +820,157 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
               </button>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+        )}
+      {/* Scheduled Messages Drawer */}
+      {scheduledDrawerOpen &&
+        renderOverlay(
+          <div
+            className="tg-scheduled-drawer-backdrop"
+            onClick={(e) => {
+              e.stopPropagation();
+              setScheduledDrawerOpen(false);
+            }}
+          >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('scheduled.title', language)}
+            data-testid="scheduled-messages-drawer"
+            className="tg-scheduled-drawer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="tg-modal-header">
+              <span>
+                📅 {t('scheduled.title', language)} ({scheduledItems.length})
+              </span>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => setScheduledDrawerOpen(false)}
+                className="tg-icon-btn"
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ overflowY: 'auto', flex: '1 1 auto' }}>
+              {scheduledItems.length === 0 ? (
+                <div
+                  style={{
+                    padding: '28px 16px',
+                    textAlign: 'center',
+                    color: 'var(--tg-text-secondary)',
+                    fontSize: '13px',
+                  }}
+                >
+                  {t('scheduled.empty', language)}
+                </div>
+              ) : (
+                scheduledItems.map((item) => {
+                  const body =
+                    item.text?.trim() ||
+                    extractPlainTextFromContent(item.content) ||
+                    `Message #${item.message_id}`;
+                  const scheduledTime = new Date(item.scheduled_at_ms).toLocaleString(
+                    language === 'zh-CN' ? 'zh-CN' : 'en-US',
+                    {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      hour12: false,
+                    },
+                  );
+                  const busy = scheduledBusyId === item.message_id;
+                  return (
+                    <div
+                      key={item.message_id}
+                      data-testid="scheduled-message-item"
+                      data-message-id={String(item.message_id)}
+                      className="tg-scheduled-item-row"
+                    >
+                      <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+                        <div
+                          style={{
+                            fontSize: '13.5px',
+                            color: 'var(--tg-text-primary)',
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          {body}
+                        </div>
+                        <div
+                          style={{
+                            marginTop: '3px',
+                            fontSize: '11.5px',
+                            color: 'var(--tg-text-secondary)',
+                          }}
+                        >
+                          ⏰ {scheduledTime}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          data-testid="btn-scheduled-send-now"
+                          onClick={async () => {
+                            setScheduledBusyId(item.message_id);
+                            try {
+                              await sendScheduledMessageNow(chat.chatId, item.message_id);
+                              pushToast(t('scheduled.sendNow', language), 'success', {
+                                scope: 'stage',
+                                chatId: chat.chatId,
+                              });
+                            } catch (err) {
+                              pushToast(
+                                err instanceof Error ? err.message : String(err),
+                                'error',
+                              );
+                            } finally {
+                              setScheduledBusyId(null);
+                            }
+                          }}
+                          className="tg-btn tg-btn--primary"
+                          style={{ padding: '4px 10px', fontSize: '12px' }}
+                        >
+                          {t('scheduled.sendNow', language)}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          data-testid="btn-scheduled-cancel"
+                          onClick={async () => {
+                            setScheduledBusyId(item.message_id);
+                            try {
+                              await cancelScheduledMessage(chat.chatId, item.message_id);
+                              pushToast(t('scheduled.cancel', language), 'info', {
+                                scope: 'stage',
+                                chatId: chat.chatId,
+                              });
+                            } catch (err) {
+                              pushToast(
+                                err instanceof Error ? err.message : String(err),
+                                'error',
+                              );
+                            } finally {
+                              setScheduledBusyId(null);
+                            }
+                          }}
+                          className="tg-btn tg-btn--danger"
+                          style={{ padding: '4px 10px', fontSize: '12px' }}
+                        >
+                          {t('scheduled.cancel', language)}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>,
+        )}
     </header>
   );
 };

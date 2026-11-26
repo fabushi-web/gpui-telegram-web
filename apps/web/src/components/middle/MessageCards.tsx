@@ -334,6 +334,7 @@ const SpoilerPhotoVideoCard: React.FC<{
   mimeType: string;
   caption?: string | null;
   hasSpoiler?: boolean;
+  isOutgoing?: boolean;
   width?: number;
   height?: number;
 }> = ({
@@ -344,6 +345,7 @@ const SpoilerPhotoVideoCard: React.FC<{
   mimeType,
   caption,
   hasSpoiler,
+  isOutgoing,
 }) => {
   const openLightbox = useUiStore((s) => s.openLightbox);
   const [revealed, setRevealed] = useState<boolean>(!hasSpoiler);
@@ -458,7 +460,12 @@ const SpoilerPhotoVideoCard: React.FC<{
       </div>
 
       {caption && (
-        <RichEntities text={caption} chatId={chatId} suppressAutoPreview />
+        <RichEntities
+          text={caption}
+          chatId={chatId}
+          suppressAutoPreview
+          isOutgoing={isOutgoing}
+        />
       )}
     </div>
   );
@@ -1332,6 +1339,7 @@ const EncryptedSecretCard: React.FC<{
       <RichEntities
         text={cachedText ?? localPlaintext ?? 'Decrypting E2EE message…'}
         chatId={message.chat_id}
+        isOutgoing={Boolean(message.flags?.is_out)}
       />
     </div>
   );
@@ -1446,6 +1454,7 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
             entities={message.entities ?? c.data.entities}
             webPage={message.web_page}
             chatId={message.chat_id}
+            isOutgoing={Boolean(message.flags?.is_out)}
           />
         );
       }
@@ -1459,6 +1468,7 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
             mimeType="image/png"
             caption={c.data.caption}
             hasSpoiler={c.data.has_spoiler}
+            isOutgoing={Boolean(message.flags?.is_out)}
             width={c.data.width}
             height={c.data.height}
           />
@@ -1473,6 +1483,7 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
             mimeType="video/mp4"
             caption={c.data.caption}
             hasSpoiler={c.data.has_spoiler}
+            isOutgoing={Boolean(message.flags?.is_out)}
             width={c.data.width}
             height={c.data.height}
           />
@@ -1490,6 +1501,7 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
               mimeType={c.data.mime_type}
               caption={c.data.caption}
               hasSpoiler={c.data.has_spoiler}
+              isOutgoing={Boolean(message.flags?.is_out)}
               width={c.data.width}
               height={c.data.height}
             />
@@ -1617,6 +1629,7 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
                 text={c.data.caption}
                 chatId={message.chat_id}
                 suppressAutoPreview
+                isOutgoing={Boolean(message.flags?.is_out)}
               />
             )}
           </div>
@@ -1742,6 +1755,7 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
                 entities={c.data.entities}
                 chatId={message.chat_id}
                 suppressAutoPreview
+                isOutgoing={Boolean(message.flags?.is_out)}
               />
             )}
           </div>
@@ -1832,6 +1846,7 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
                 text={c.data.caption}
                 chatId={message.chat_id}
                 suppressAutoPreview
+                isOutgoing={Boolean(message.flags?.is_out)}
               />
             )}
           </div>
@@ -2359,6 +2374,23 @@ export const MessageCards: React.FC<MessageCardsProps> = ({
                         } else {
                           openModal('miniapp_catalog', { chatId: message.chat_id });
                         }
+                        return;
+                      }
+                      const switchInline =
+                        (btn as { switch_inline_query_current_chat?: string; switch_inline_query?: string })
+                          .switch_inline_query_current_chat ??
+                        (btn as { switch_inline_query?: string }).switch_inline_query;
+                      if (typeof switchInline === 'string' && typeof window !== 'undefined') {
+                        const botUname = chatUsername || 'FabushiBot';
+                        window.dispatchEvent(
+                          new CustomEvent('fabushi:prefill-inline-query', {
+                            detail: {
+                              chatId: message.chat_id,
+                              botUsername: botUname,
+                              query: switchInline,
+                            },
+                          }),
+                        );
                         return;
                       }
                       if (btn.url && isSafeEntityUrl(btn.url)) {

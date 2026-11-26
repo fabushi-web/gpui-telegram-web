@@ -15,15 +15,52 @@ import {
   broadcastSync,
   getClientAdapter,
   getServerAdapter,
+  indexedDbCache,
   switchClientAdapterMode,
 } from '../adapters';
-import { generateIdentityKeyPair, toPublishPreKeysRequest } from '../services/e2eeClient';
+import {
+  clearE2eeCacheForAccount,
+  generateIdentityKeyPair,
+  toPublishPreKeysRequest,
+} from '../services/e2eeClient';
 import { deriveSplitKeyV2, generateRandomSaltB64 } from '../services/splitKeyCrypto';
 
 export const MAX_STORED_ACCOUNTS = 6;
 const AUTH_STORAGE_KEY = 'gpui_tg_auth_v1';
 const ACTIVE_TOKEN_MIRROR_KEY = 'gpui_tg_active_token';
 const ACTIVE_CHAT_SESSION_KEY = 'gpui_tg_active_chat_id';
+const FRAME0_SNAPSHOT_PREFIX = 'gpui_tg_frame0_v1:';
+
+function purgeAccountClientCaches(accountId?: string | null, wipeAll = false): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      if (wipeAll || !accountId) {
+        const toRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith(FRAME0_SNAPSHOT_PREFIX)) {
+            toRemove.push(k);
+          }
+        }
+        for (const k of toRemove) {
+          localStorage.removeItem(k);
+        }
+      } else {
+        localStorage.removeItem(`${FRAME0_SNAPSHOT_PREFIX}${accountId}`);
+      }
+    }
+  } catch {
+    // Ignore storage error
+  }
+
+  if (wipeAll || !accountId) {
+    clearE2eeCacheForAccount();
+    void indexedDbCache.clearAll().catch(() => undefined);
+  } else {
+    clearE2eeCacheForAccount(accountId);
+    void indexedDbCache.clearAccountData(accountId).catch(() => undefined);
+  }
+}
 
 export interface AlipayAuthSession {
   session_id: string;
@@ -340,7 +377,10 @@ function sanitizeServerUrlOverride(raw: string | null | undefined): string | und
 }
 
 function detectInitialServerUrlOverride(hasAuthenticatedAccount: boolean): string | undefined {
-  const envDefaultServer = sanitizeServerUrlOverride(import.meta.env?.VITE_DEFAULT_SERVER_URL);
+  const envDefaultServer = sanitizeServerUrlOverride(
+    (import.meta as ImportMeta & { env?: { VITE_DEFAULT_SERVER_URL?: string } }).env
+      ?.VITE_DEFAULT_SERVER_URL,
+  );
   if (typeof window === 'undefined') {
     return envDefaultServer;
   }
@@ -426,6 +466,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     if (prevAccountId && prevAccountId !== accountId) {
       clearSavedActiveChatId();
+      purgeAccountClientCaches(prevAccountId, false);
       onAuthClearedHook?.();
     }
 
@@ -605,6 +646,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
           msg.includes('session revoked');
         if (isAuthRejected) {
           clearSavedActiveChatId();
+          purgeAccountClientCaches(active.accountId, false);
           onAuthClearedHook?.();
           const remaining = get().accounts.filter((a) => a.accountId !== active.accountId);
           set({
@@ -1083,7 +1125,12 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const target = get().accounts.find((a) => a.accountId === accountId);
       if (!target) return;
 
+      const prevAccountId = get().activeAccountId;
+      if (prevAccountId === accountId) return;
       clearSavedActiveChatId();
+      if (prevAccountId && prevAccountId !== accountId) {
+        purgeAccountClientCaches(prevAccountId, false);
+      }
       onAuthClearedHook?.();
       await getClientAdapter().disconnect().catch(() => undefined);
 
@@ -1135,6 +1182,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         await get().logout(true);
         return;
       }
+      purgeAccountClientCaches(accountId, false);
       set({ accounts: remaining });
       persistAuthEnvelope(get());
     },
@@ -1143,8 +1191,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const currentId = get().activeAccountId;
       await getServerAdapter().deleteAccount();
       clearSavedActiveChatId();
-      onAuthClearedHook?.();
       const remaining = get().accounts.filter((a) => a.accountId !== currentId);
+      purgeAccountClientCaches(currentId, remaining.length === 0);
+      onAuthClearedHook?.();
       set({
         accounts: remaining,
         activeAccountId: null,
@@ -1174,11 +1223,13 @@ export const useAuthStore = create<AuthState>((set, get) => {
         : get().accounts.filter((a) => a.accountId !== currentId);
 
       if (remaining.length > 0 && !logoutAll) {
+        purgeAccountClientCaches(currentId, false);
         set({ accounts: remaining });
         await get().switchAccount(remaining[0]!.accountId);
         return;
       }
 
+      purgeAccountClientCaches(currentId, true);
       onAuthClearedHook?.();
       set({
         accounts: [],
@@ -1274,6 +1325,7 @@ getServerAdapter().onAuthInvalidated((reason) => {
   const st = useAuthStore.getState();
   if (!st.isAuthenticated && !st.activeAccountId) return;
   clearSavedActiveChatId();
+  purgeAccountClientCaches(st.activeAccountId, st.accounts.length <= 1);
   onAuthClearedHook?.();
   const remaining = st.accounts.filter((a) => a.accountId !== st.activeAccountId);
   useAuthStore.setState({

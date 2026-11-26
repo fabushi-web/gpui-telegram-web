@@ -26,6 +26,7 @@ export type RightInspectorTab =
   | 'links'
   | 'voice'
   | 'admin'
+  | 'admin_log'
   | 'statistics';
 
 export type MobilePaneId = 'left' | 'middle' | 'right' | 'workspace';
@@ -78,6 +79,7 @@ export type ModalId =
   | 'qr_invite'
   | 'reaction_details'
   | 'passcode_setup'
+  | 'calls_history'
   | null;
 
 export interface ComposeRecipient {
@@ -87,6 +89,21 @@ export interface ComposeRecipient {
   isBot?: boolean;
   avatarShape?: string;
   avatarColor?: string;
+}
+
+export interface ComposeIsolationSnapshot {
+  chatId: number | null;
+  draftText: string;
+  replyTarget: {
+    messageId: number;
+    senderName?: string;
+    previewText: string;
+    quoteText?: string;
+  } | null;
+  editingMessage: MessageItem | null;
+  pendingAttachments: Array<{ name: string; size?: number; type?: string }>;
+  botKeyboardOpen: boolean;
+  composerPopover: 'emoji' | 'attach' | 'ai' | null;
 }
 
 export interface AppleComposeStageState {
@@ -218,6 +235,7 @@ export interface UiState {
   miniAppPipMinimized: boolean;
 
   appleComposeStage: AppleComposeStageState;
+  composeIsolationSnapshot: ComposeIsolationSnapshot | null;
 
   contextMenu: ContextMenuState | null;
   lightboxState: LightboxViewerState | null;
@@ -256,8 +274,12 @@ export interface UiState {
   minimizeMiniAppToPip: () => void;
   restoreMiniAppFromPip: () => void;
 
-  openAppleComposeStage: (carryDraft?: string) => void;
-  closeAppleComposeStage: () => void;
+  openAppleComposeStage: (
+    carryDraft?: string,
+    snapshotOverride?: ComposeIsolationSnapshot | null,
+  ) => void;
+  closeAppleComposeStage: (opts?: { committed?: boolean }) => void;
+  clearComposeIsolationSnapshot: () => void;
   addComposeRecipient: (recipient: ComposeRecipient) => void;
   removeComposeRecipient: (userId: number) => void;
   setComposePending: (pending: boolean) => void;
@@ -366,6 +388,17 @@ export function registerUiEscapeHooks(hooks: typeof externalEscapeHooks): void {
   externalEscapeHooks = { ...externalEscapeHooks, ...hooks };
 }
 
+let composeIsolationHooks: {
+  captureAndClear?: (
+    composerPopover: 'emoji' | 'attach' | 'ai' | null,
+  ) => ComposeIsolationSnapshot | null;
+  restore?: (snapshot: ComposeIsolationSnapshot) => void;
+} = {};
+
+export function registerUiComposeIsolationHooks(hooks: typeof composeIsolationHooks): void {
+  composeIsolationHooks = { ...composeIsolationHooks, ...hooks };
+}
+
 export const useUiStore = create<UiState>((set, get) => ({
   leftSidebarWidth: initialWidth,
   isLeftCollapsed: false,
@@ -392,6 +425,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     pendingCreation: false,
     carryDraft: '',
   },
+  composeIsolationSnapshot: null,
 
   contextMenu: null,
   lightboxState: null,
@@ -522,12 +556,21 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   restoreMiniAppFromPip: () => set({ miniAppModalOpen: true, miniAppPipMinimized: false }),
 
-  openAppleComposeStage: (carryDraft = '') => {
-    get().clearToastsForChat(null);
+  openAppleComposeStage: (carryDraft = '', snapshotOverride) => {
+    const prev = get();
+    const capturedSnapshot =
+      snapshotOverride !== undefined
+        ? snapshotOverride
+        : prev.appleComposeStage.isOpen
+          ? prev.composeIsolationSnapshot
+          : (composeIsolationHooks.captureAndClear?.(prev.composerPopover) ?? null);
+    prev.clearToastsForChat(null);
     set({
       activeNavDest: 'chats',
       mobilePane: 'middle',
       isBurgerOpen: false,
+      composerPopover: null,
+      composeIsolationSnapshot: capturedSnapshot,
       appleComposeStage: {
         isOpen: true,
         recipients: [],
@@ -537,7 +580,9 @@ export const useUiStore = create<UiState>((set, get) => ({
     });
   },
 
-  closeAppleComposeStage: () =>
+  closeAppleComposeStage: (opts) => {
+    const committed = Boolean(opts?.committed);
+    const snapshot = get().composeIsolationSnapshot;
     set({
       appleComposeStage: {
         isOpen: false,
@@ -545,7 +590,15 @@ export const useUiStore = create<UiState>((set, get) => ({
         pendingCreation: false,
         carryDraft: '',
       },
-    }),
+      composeIsolationSnapshot: null,
+      composerPopover: !committed && snapshot ? snapshot.composerPopover : null,
+    });
+    if (!committed && snapshot) {
+      composeIsolationHooks.restore?.(snapshot);
+    }
+  },
+
+  clearComposeIsolationSnapshot: () => set({ composeIsolationSnapshot: null }),
 
   addComposeRecipient: (recipient) =>
     set((prev) => {
@@ -1019,14 +1072,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       return true;
     }
     if (s.appleComposeStage.isOpen) {
-      set({
-        appleComposeStage: {
-          isOpen: false,
-          recipients: [],
-          pendingCreation: false,
-          carryDraft: '',
-        },
-      });
+      get().closeAppleComposeStage({ committed: false });
       return true;
     }
     if (s.miniAppModalOpen) {
@@ -1116,6 +1162,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         pendingCreation: false,
         carryDraft: '',
       },
+      composeIsolationSnapshot: null,
       contextMenu: null,
       lightboxState: null,
       mediaEditorState: null,

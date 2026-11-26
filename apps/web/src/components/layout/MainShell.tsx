@@ -59,7 +59,7 @@ export const MainShell: React.FC<MainShellProps> = ({
   const popTopEscapeLayer = useUiStore((s) => s.popTopEscapeLayer);
   const openAppleComposeStage = useUiStore((s) => s.openAppleComposeStage);
 
-  const toggleNightMode = useSettingsStore((s) => s.toggleNightMode);
+  const cycleTheme = useSettingsStore((s) => s.cycleTheme);
   const toggleLanguage = useSettingsStore((s) => s.toggleLanguage);
 
   const activeChatId = useChatStore((s) => s.activeChatId);
@@ -123,17 +123,22 @@ export const MainShell: React.FC<MainShellProps> = ({
         return;
       }
 
-      // Ctrl+B -> Toggle 64px collapsed sidebar
-      if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'b') {
+      // Ctrl/Cmd+B (outside editable) or Ctrl/Cmd+\ -> Toggle 64px collapsed sidebar
+      if (
+        mod &&
+        !ev.shiftKey &&
+        !ev.altKey &&
+        (ev.key === '\\' || (lowerKey === 'b' && !isEditableElement(ev.target)))
+      ) {
         ev.preventDefault();
         toggleLeftCollapsed();
         return;
       }
 
-      // Ctrl+D -> Toggle Night/Day theme
+      // Ctrl/Cmd+D -> Cycle 4 themes (Night -> Tinted -> Day -> Classic -> Night)
       if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'd') {
         ev.preventDefault();
-        toggleNightMode();
+        cycleTheme();
         return;
       }
 
@@ -179,7 +184,7 @@ export const MainShell: React.FC<MainShellProps> = ({
     popTopEscapeLayer,
     openAppleComposeStage,
     toggleLeftCollapsed,
-    toggleNightMode,
+    cycleTheme,
     toggleLanguage,
     openSavedMessages,
   ]);
@@ -263,7 +268,6 @@ export const MainShell: React.FC<MainShellProps> = ({
           {!hideBuiltInTopBars && (
             <>
               <RemoteTakeoverBanner />
-              <ConnectionBanner />
               <TopCallBar />
               <TopAudioBar />
             </>
@@ -276,6 +280,9 @@ export const MainShell: React.FC<MainShellProps> = ({
 
       {/* When center stage is hidden on mobile, still mount fixed overlays inside workspaceOverlaySlot */}
       {hideCenterOnMobile && workspaceOverlaySlot}
+
+      {/* Floating Connection Pill stays mounted across all mobile panes (left/middle/right/workspace) */}
+      {!hideBuiltInTopBars && <ConnectionBanner />}
 
       {/* Right Column Slide-Over Backdrop on Tier 2 & Tier 3 */}
       {showRightDrawerBackdrop && (

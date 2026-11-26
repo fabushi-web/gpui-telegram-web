@@ -89,6 +89,8 @@ export const ChatList: React.FC<ChatListProps> = ({
   const peersById = useChatStore((s) => s.peersById);
   const typingByChat = useChatStore((s) => s.typingByChat);
   const botActivityByChat = useChatStore((s) => s.botActivityByChat);
+  const isLoadingChats = useChatStore((s) => s.isLoadingChats);
+  const globalSearchQuery = useChatStore((s) => s.globalSearchQuery);
 
   const selectChat = useChatStore((s) => s.selectChat);
   const setShowArchived = useChatStore((s) => s.setShowArchived);
@@ -862,8 +864,66 @@ export const ChatList: React.FC<ChatListProps> = ({
           </div>
         )}
 
-        {/* Empty State for Custom Folder with 0 Chats */}
-        {!isCollapsed && !showArchived && activeCustomFolder && visibleChats.length === 0 ? (
+        {/* v1.6.13 Shimmering Pure-CSS Dialog Loading Skeleton (Zero chat-row elements!) */}
+        {isLoadingChats &&
+        orderedChatIds.length === 0 &&
+        !showArchived &&
+        !globalSearchQuery.trim() ? (
+          isCollapsed ? (
+            <div
+              id="rail-dialogs-loading-skeleton"
+              data-testid="rail-dialogs-loading-skeleton"
+              className="tg-rail-skeleton"
+              aria-hidden="true"
+            >
+              {[0.95, 0.78, 0.62, 0.46, 0.3].map((opacity, idx) => (
+                <div
+                  key={`rail-sk-${idx}`}
+                  className="tg-skeleton-pulse tg-rail-skeleton-avatar"
+                  style={{ opacity }}
+                />
+              ))}
+            </div>
+          ) : (
+            <div
+              id="sidebar-loading-dialogs-skeleton"
+              data-testid="sidebar-loading-dialogs-skeleton"
+              className="tg-sidebar-skeleton"
+              aria-hidden="true"
+            >
+              {[
+                { titleW: 104, previewW: 154, opacity: 0.96 },
+                { titleW: 128, previewW: 126, opacity: 0.85 },
+                { titleW: 92, previewW: 166, opacity: 0.74 },
+                { titleW: 118, previewW: 140, opacity: 0.62 },
+                { titleW: 98, previewW: 118, opacity: 0.5 },
+                { titleW: 132, previewW: 148, opacity: 0.38 },
+                { titleW: 86, previewW: 130, opacity: 0.26 },
+              ].map((row, idx) => (
+                <div
+                  key={`chat-sk-${idx}`}
+                  className="tg-sidebar-skeleton-row tg-skeleton-pulse"
+                  style={{ opacity: row.opacity }}
+                >
+                  <div className="tg-sidebar-skeleton-avatar" />
+                  <div className="tg-sidebar-skeleton-lines">
+                    <div className="tg-sidebar-skeleton-top">
+                      <span
+                        className="tg-sidebar-skeleton-bar tg-sidebar-skeleton-bar--title"
+                        style={{ width: `${row.titleW}px` }}
+                      />
+                      <span className="tg-sidebar-skeleton-bar tg-sidebar-skeleton-bar--time" />
+                    </div>
+                    <span
+                      className="tg-sidebar-skeleton-bar tg-sidebar-skeleton-bar--preview"
+                      style={{ width: `${row.previewW}px` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        ) : !isCollapsed && !showArchived && activeCustomFolder && visibleChats.length === 0 ? (
           <div
             data-testid="empty-folder-state"
             style={{

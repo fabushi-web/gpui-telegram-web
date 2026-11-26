@@ -180,7 +180,7 @@ export function MiniAppCatalogModal({
               🧩 Mini Apps Center &amp; @BotFather · 小程序与机器人中心
             </div>
             <div style={{ fontSize: '12px', fontWeight: 400, color: 'var(--tg-text-secondary)' }}>
-              Fabushi Web v1.6.11 · WebApp v8.0 + WebMCP Host · Rust/WASM 3D Globe &amp; External Mini Apps
+              Fabushi Web v1.7.0 · WebApp v8.0 + WebMCP Host · Rust/WASM 3D Globe &amp; External Mini Apps
             </div>
           </div>
           <button

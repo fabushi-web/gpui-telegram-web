@@ -91,7 +91,7 @@ export function App(): React.JSX.Element {
     if (typeof document === 'undefined') return;
     const activeChat = activeChatId !== null ? chatsById[activeChatId] : undefined;
     const titlePrefix = activeChat?.title ? `${activeChat.title} · ` : '';
-    document.title = `${titlePrefix}Fabushi Web v1.6.11`;
+    document.title = `${titlePrefix}Fabushi Web v1.7.0`;
     document.documentElement.lang = language === 'zh-CN' ? 'zh-CN' : 'en';
 
     if (!isAuthenticated || isLocked) return;
@@ -170,6 +170,47 @@ export function App(): React.JSX.Element {
         ev.preventDefault();
         const cur = useUiStore.getState().activeNavDest;
         setActiveNavDest(cur === 'hermes' ? 'chats' : 'hermes');
+        return;
+      }
+
+      // Ctrl/Cmd + [ -> Settings Back Stack Pop
+      if (mod && !ev.shiftKey && !ev.altKey && ev.key === '[') {
+        const ui = useUiStore.getState();
+        if (ui.settingsStack.length > 0) {
+          ev.preventDefault();
+          ui.popSettingsSection();
+          return;
+        }
+      }
+
+      // Ctrl/Cmd + Shift + B -> Toggle Built-in Browser Workspace (v1.6.15)
+      if (mod && ev.shiftKey && !ev.altKey && lowerKey === 'b') {
+        ev.preventDefault();
+        const cur = useUiStore.getState().activeNavDest;
+        setActiveNavDest(cur === 'browser_control' ? 'chats' : 'browser_control');
+        return;
+      }
+
+      // Ctrl/Cmd + P -> Open Create Poll Modal (v1.6.15; gates off blocking modals & suppresses Print)
+      if (mod && !ev.shiftKey && !ev.altKey && lowerKey === 'p') {
+        const ui = useUiStore.getState();
+        const hasBlockingOverlay = Boolean(
+          ui.activeModal !== null ||
+            ui.settingsStack.length > 0 ||
+            ui.lightboxState?.isOpen ||
+            (ui.activeCall.isOpen && !ui.activeCall.isMinimized),
+        );
+        if (!hasBlockingOverlay) {
+          ev.preventDefault();
+          openModal('create_poll', { chatId: useChatStore.getState().activeChatId });
+          return;
+        }
+      }
+
+      // Alt + 3 -> Open Calls History Modal (web-safe navigation shortcut)
+      if (!mod && ev.altKey && !ev.shiftKey && ev.key === '3') {
+        ev.preventDefault();
+        openModal('calls_history');
         return;
       }
 

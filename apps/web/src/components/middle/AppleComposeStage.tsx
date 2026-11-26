@@ -318,7 +318,7 @@ export const AppleComposeStage: React.FC = () => {
           await saveDraft(targetChatId, trimmedMsg);
         }
 
-        closeAppleComposeStage();
+        closeAppleComposeStage({ committed: true });
         await selectChat(targetChatId);
 
         if (trimmedMsg && sendImmediately) {
@@ -342,7 +342,7 @@ export const AppleComposeStage: React.FC = () => {
         await saveDraft(createdGroup.chatId, trimmedMsg);
       }
 
-      closeAppleComposeStage();
+      closeAppleComposeStage({ committed: true });
       await selectChat(createdGroup.chatId);
 
       if (trimmedMsg && sendImmediately) {

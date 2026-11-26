@@ -17,6 +17,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUiStore, type RightInspectorTab } from '../../store/useUiStore';
+import { coalesceAdminLogDeletes } from '../../utils/coreParityM1B';
 import { GrokBotAvatar } from '../common/GrokBotAvatar';
 
 export interface RightColumnProps {
@@ -170,12 +171,14 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const invitesByChat = useChatStore((s) => s.invitesByChat);
   const statsByChat = useChatStore((s) => s.statsByChat);
   const botActivityByChat = useChatStore((s) => s.botActivityByChat);
+  const adminLogByChat = useChatStore((s) => s.adminLogByChat);
 
   const bootstrapChats = useChatStore((s) => s.bootstrapChats);
   const updateChatSettings = useChatStore((s) => s.updateChatSettings);
   const setChatTtl = useChatStore((s) => s.setChatTtl);
   const createSecretChat = useChatStore((s) => s.createSecretChat);
   const loadChatAdminData = useChatStore((s) => s.loadChatAdminData);
+  const loadAdminLog = useChatStore((s) => s.loadAdminLog);
   const addChatMembers = useChatStore((s) => s.addChatMembers);
   const updateMemberRole = useChatStore((s) => s.updateMemberRole);
   const removeMember = useChatStore((s) => s.removeMember);
@@ -229,6 +232,8 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
   const [inviteJoinInput, setInviteJoinInput] = useState('');
   const [inviteAlert, setInviteAlert] = useState<string | null>(null);
   const [brokenImgKeys, setBrokenImgKeys] = useState<Record<string, boolean>>({});
+  const [adminLogCategory, setAdminLogCategory] = useState<'all' | 'members' | 'messages' | 'settings'>('all');
+  const [adminLogLoading, setAdminLogLoading] = useState<boolean>(false);
 
   // Clear stale peer facts immediately on activeChatId switch
   if (boundChatId !== activeChatId) {
@@ -245,25 +250,67 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
     setInviteJoinInput('');
     setInviteAlert(null);
     setBrokenImgKeys({});
+    setAdminLogCategory('all');
   }
 
-  // Scope valid tabs strictly by peerCategory
+  const memberList = useMemo<ChatMemberDto[]>(() => {
+    if (!chat || peerCategory !== 'group') return [];
+    const loaded = membersByChat[chat.chatId];
+    if (loaded && loaded.length > 0) {
+      return loaded;
+    }
+    if (currentUser) {
+      return [
+        {
+          user_id: currentUser.userId,
+          username: currentUser.username,
+          first_name: currentUser.firstName,
+          last_name: currentUser.lastName,
+          role: chat.creatorId === currentUser.userId ? 'owner' : 'member',
+          admin_rights: chat.creatorId === currentUser.userId ? 0xff : 0,
+          banned_rights: 0,
+          joined_at_ms: Date.now(),
+        },
+      ];
+    }
+    return [];
+  }, [chat, peerCategory, membersByChat, currentUser]);
+
+  const myMemberRole = useMemo(() => {
+    if (!chat || !currentUser || peerCategory !== 'group') return 'member';
+    const me = memberList.find((m) => m.user_id === currentUser.userId);
+    if (me) return me.role;
+    if (chat.creatorId === currentUser.userId) return 'owner';
+    return 'member';
+  }, [chat, currentUser, peerCategory, memberList]);
+
+  const canManageChat = Boolean(
+    chat &&
+      peerCategory === 'group' &&
+      (myMemberRole === 'owner' ||
+        myMemberRole === 'admin' ||
+        chat.creatorId === currentUser?.userId),
+  );
+
+  // Scope valid tabs strictly by peerCategory & admin permissions
   const effectiveTab: Exclude<RightInspectorTab, 'info' | 'admin'> = useMemo(() => {
     if (peerCategory === 'group') {
       if (rightTab === 'info' || rightTab === 'admin') return 'members';
+      if (rightTab === 'admin_log' && !canManageChat) return 'members';
       return rightTab;
     }
-    // Humans & Bots do NOT show Members or Channel Statistics tabs
+    // Humans & Bots do NOT show Members, Admin Log, or Channel Statistics tabs
     if (
       rightTab === 'info' ||
       rightTab === 'admin' ||
+      rightTab === 'admin_log' ||
       rightTab === 'members' ||
       rightTab === 'statistics'
     ) {
       return 'media';
     }
     return rightTab;
-  }, [peerCategory, rightTab]);
+  }, [peerCategory, rightTab, canManageChat]);
 
   // Resolve direct peer profile strictly for human 1:1 chats
   const directPeer = useMemo(() => {
@@ -519,44 +566,39 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
     return out.reverse();
   }, [activeChatId, scopedMessages, isZh]);
 
-  const memberList = useMemo<ChatMemberDto[]>(() => {
+  // Fetch live M1A Admin Log when Group/Channel admin opens #right-tab-admin-log
+  useEffect(() => {
+    if (!chat || peerCategory !== 'group' || !canManageChat || effectiveTab !== 'admin_log') {
+      return;
+    }
+    let active = true;
+    setAdminLogLoading(true);
+    void loadAdminLog(chat.chatId, { limit: 100 })
+      .catch(() => [])
+      .finally(() => {
+        if (active) setAdminLogLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [chat?.chatId, peerCategory, canManageChat, effectiveTab, loadAdminLog]);
+
+  const coalescedAdminLog = useMemo(() => {
     if (!chat || peerCategory !== 'group') return [];
-    const loaded = membersByChat[chat.chatId];
-    if (loaded && loaded.length > 0) {
-      return loaded;
-    }
-    if (currentUser) {
-      return [
-        {
-          user_id: currentUser.userId,
-          username: currentUser.username,
-          first_name: currentUser.firstName,
-          last_name: currentUser.lastName,
-          role: chat.creatorId === currentUser.userId ? 'owner' : 'member',
-          admin_rights: chat.creatorId === currentUser.userId ? 0xff : 0,
-          banned_rights: 0,
-          joined_at_ms: Date.now(),
-        },
-      ];
-    }
-    return [];
-  }, [chat, peerCategory, membersByChat, currentUser]);
-
-  const myMemberRole = useMemo(() => {
-    if (!chat || !currentUser || peerCategory !== 'group') return 'member';
-    const me = memberList.find((m) => m.user_id === currentUser.userId);
-    if (me) return me.role;
-    if (chat.creatorId === currentUser.userId) return 'owner';
-    return 'member';
-  }, [chat, currentUser, peerCategory, memberList]);
-
-  const canManageChat = Boolean(
-    chat &&
-      peerCategory === 'group' &&
-      (myMemberRole === 'owner' ||
-        myMemberRole === 'admin' ||
-        chat.creatorId === currentUser?.userId),
-  );
+    const raw = adminLogByChat[chat.chatId] ?? [];
+    const coalesced = coalesceAdminLogDeletes(raw, 5);
+    if (adminLogCategory === 'all') return coalesced;
+    return coalesced.filter((ev) => {
+      const a = ev.action.toLowerCase();
+      if (adminLogCategory === 'members') {
+        return a.includes('member') || a.includes('join') || a.includes('leave') || a.includes('ban') || a.includes('promote') || a.includes('demote') || a.includes('kick');
+      }
+      if (adminLogCategory === 'messages') {
+        return a.includes('message') || a.includes('pin') || a.includes('delete') || a.includes('edit');
+      }
+      return a.includes('chat') || a.includes('title') || a.includes('invite') || a.includes('setting') || a.includes('topic') || a.includes('info');
+    });
+  }, [adminLogByChat, adminLogCategory, chat, peerCategory]);
 
   const activeInvites = useMemo(() => {
     if (!chat || peerCategory !== 'group') return [];
@@ -1658,6 +1700,19 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                 {t('inspector.statistics', language)}
               </button>
             )}
+            {peerCategory === 'group' && canManageChat && (
+              <button
+                id="right-tab-admin-log"
+                data-testid="right-tab-admin-log"
+                type="button"
+                role="tab"
+                aria-selected={effectiveTab === 'admin_log'}
+                className={`tg-folder-tab ${effectiveTab === 'admin_log' ? 'is-active' : ''}`}
+                onClick={() => setRightTab('admin_log')}
+              >
+                {t('inspector.adminLog', language)}
+              </button>
+            )}
           </div>
 
           {/* Active Tab Panel */}
@@ -2205,6 +2260,117 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   {isZh ? '暂无会话统计数据或正在加载…' : 'Loading or no statistics available for this chat yet.'}
                 </div>
               ))}
+
+            {/* 7. Group / Channel Admin Log (#right-tab-admin-log — Group/Channel Admins ONLY) */}
+            {peerCategory === 'group' && canManageChat && effectiveTab === 'admin_log' && (
+              <div
+                data-testid="admin-log-panel"
+                style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '8px' }}
+              >
+                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                  {(
+                    [
+                      { id: 'all', label: t('adminLog.filterAll', language) },
+                      { id: 'members', label: t('adminLog.filterMembers', language) },
+                      { id: 'messages', label: t('adminLog.filterMessages', language) },
+                      { id: 'settings', label: t('adminLog.filterSettings', language) },
+                    ] as const
+                  ).map((cat) => {
+                    const active = adminLogCategory === cat.id;
+                    return (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        data-testid={`admin-log-filter-${cat.id}`}
+                        onClick={() => setAdminLogCategory(cat.id)}
+                        style={{
+                          padding: '3px 9px',
+                          borderRadius: '999px',
+                          border: active
+                            ? '1px solid var(--tg-accent)'
+                            : '1px solid var(--tg-hairline-border)',
+                          backgroundColor: active ? 'var(--tg-accent-soft)' : 'transparent',
+                          color: active ? 'var(--tg-accent)' : 'var(--tg-text-secondary)',
+                          fontSize: '11.5px',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {cat.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {adminLogLoading ? (
+                  <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--tg-text-secondary)', fontSize: '12.5px' }}>
+                    {t('common.loading', language)}
+                  </div>
+                ) : coalescedAdminLog.length === 0 ? (
+                  <div
+                    data-testid="empty-admin-log"
+                    style={{
+                      padding: '28px 14px',
+                      textAlign: 'center',
+                      color: 'var(--tg-text-secondary)',
+                      fontSize: '12.5px',
+                    }}
+                  >
+                    {t('adminLog.empty', language)}
+                  </div>
+                ) : (
+                  coalescedAdminLog.map((ev) => {
+                    const actorName =
+                      [ev.actor?.first_name, ev.actor?.last_name].filter(Boolean).join(' ') ||
+                      ev.actor?.username ||
+                      peersById[ev.actor_user_id]?.firstName ||
+                      `Admin #${ev.actor_user_id}`;
+                    const actionTitle =
+                      ev.coalescedCount > 1
+                        ? t('adminLog.deletedBatch', language, { count: ev.coalescedCount })
+                        : ev.action.replace(/_/g, ' ');
+                    const detailEntries = Object.entries(ev.details ?? {}).slice(0, 3);
+                    return (
+                      <div
+                        key={`${ev.event_id}-${ev.coalescedCount}`}
+                        data-testid="admin-log-event"
+                        className="tg-surface-card"
+                        style={{
+                          padding: '9px 11px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '4px',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '8px',
+                          }}
+                        >
+                          <strong style={{ fontSize: '12.5px', color: 'var(--tg-text-primary)' }}>
+                            {actionTitle}
+                          </strong>
+                          <span style={{ fontSize: '11px', color: 'var(--tg-text-secondary)' }}>
+                            {formatChatTimestamp(ev.created_at_ms, language)}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '11.5px', color: 'var(--tg-accent)' }}>
+                          {actorName}
+                        </div>
+                        {detailEntries.length > 0 && (
+                          <div style={{ fontSize: '11.5px', color: 'var(--tg-text-secondary)', overflowWrap: 'anywhere' }}>
+                            {detailEntries.map(([k, v]) => `${k}: ${String(v)}`).join(' · ')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </div>
         </>
       )}

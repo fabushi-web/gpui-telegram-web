@@ -3,7 +3,12 @@ import { registerAccountActivatedHook, registerAuthClearedHook, useAuthStore } f
 import { useAiWorkspaceStore } from './useAiWorkspaceStore';
 import { useChatStore } from './useChatStore';
 import { useSettingsStore, type ThemeName } from './useSettingsStore';
-import { registerUiEscapeHooks, useUiStore, type NavDestinationId } from './useUiStore';
+import {
+  registerUiComposeIsolationHooks,
+  registerUiEscapeHooks,
+  useUiStore,
+  type NavDestinationId,
+} from './useUiStore';
 
 export * from './useSettingsStore';
 export * from './useAuthStore';
@@ -27,9 +32,11 @@ registerAuthClearedHook(() => {
 });
 
 // Wire account activation to auto-bootstrap chats, realtime WS sync, and AI workspaces
-registerAccountActivatedHook(() => {
+registerAccountActivatedHook((accountId) => {
   const chatStore = useChatStore.getState();
-  chatStore.resetChatStore();
+  if (chatStore.hydratedAccountId !== accountId) {
+    chatStore.resetChatStore({ preserveFrame0: true });
+  }
   chatStore.bindRealtimeEvents();
   void chatStore.bootstrapChats();
   void useAiWorkspaceStore.getState().bootstrapWorkspaces();
@@ -43,6 +50,55 @@ useAuthStore.subscribe((state, prev) => {
     ui.setBurgerOpen(false);
     ui.closeModal();
   }
+});
+
+// Wire v1.6.14 ComposeIsolationSnapshot hooks across #apple-compose-stage open/cancel/commit
+registerUiComposeIsolationHooks({
+  captureAndClear: (composerPopover) => {
+    const cs = useChatStore.getState();
+    const cid = cs.activeChatId;
+    if (cid === null) return null;
+    const replyTarget = cs.replyTargetByChat[cid] ?? null;
+    const editingMessage = cs.editingMessageByChat[cid] ?? null;
+    const draftText = cs.draftsByChat[cid]?.text ?? '';
+    useChatStore.setState((prev) => ({
+      replyTargetByChat: { ...prev.replyTargetByChat, [cid]: null },
+      editingMessageByChat: { ...prev.editingMessageByChat, [cid]: null },
+    }));
+    return {
+      chatId: cid,
+      draftText,
+      replyTarget,
+      editingMessage,
+      pendingAttachments: [],
+      botKeyboardOpen: false,
+      composerPopover,
+    };
+  },
+  restore: (snapshot) => {
+    if (snapshot.chatId === null) return;
+    const cid = snapshot.chatId;
+    useChatStore.setState((prev) => {
+      const nextDrafts = { ...prev.draftsByChat };
+      if (snapshot.draftText) {
+        const existing = nextDrafts[cid];
+        nextDrafts[cid] = {
+          chatId: cid,
+          text: snapshot.draftText,
+          entities: existing?.entities ?? [],
+          replyToMsgId: snapshot.replyTarget?.messageId ?? existing?.replyToMsgId,
+          quoteText: snapshot.replyTarget?.quoteText ?? existing?.quoteText,
+          topicId: existing?.topicId,
+          dateMs: Date.now(),
+        };
+      }
+      return {
+        replyTargetByChat: { ...prev.replyTargetByChat, [cid]: snapshot.replyTarget },
+        editingMessageByChat: { ...prev.editingMessageByChat, [cid]: snapshot.editingMessage },
+        draftsByChat: nextDrafts,
+      };
+    });
+  },
 });
 
 // Wire 7-Layer Escape stack hooks between UI store, Chat store, and MiniApp runtime

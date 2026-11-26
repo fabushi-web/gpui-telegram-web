@@ -10,9 +10,11 @@ import {
   mapStoryDtoToDomain,
   mapUserDtoToDomain,
   parseMarkdownEntities,
+  type AdminLogEventDto,
   type AlbumMediaItem,
   type ArchiveLocalBotReplyRequest,
   type ArchiveLocalBotReplyResponse,
+  type CallRecordDto,
   type ChannelStatisticsDto,
   type ChatFolder,
   type ChatMemberDto,
@@ -22,18 +24,21 @@ import {
   type ForumTopic,
   type GifResultDto,
   type GlobalSearchResponse,
+  type InlineQueryResponse,
   type InviteLinkDto,
   type MessageContent,
   type MessageEntity,
   type MessageItem,
   type PollData,
   type ReactionDetail,
+  type ScheduledMessageDto,
   type SearchHitDto,
   type SearchTabCategory,
   type StickerItemDto,
   type StickerSetDto,
   type StoryGroup,
   type StoryItem,
+  type TranslateMessageResponse,
   type TypingAction,
   type UpdateEvent,
   type UserPrivacySettingsDto,
@@ -57,7 +62,150 @@ import {
 } from '../services/e2eeClient';
 import { webrtcManager } from '../services/webrtcManager';
 import { useAuthStore } from './useAuthStore';
+import { useSettingsStore } from './useSettingsStore';
 import { useUiStore } from './useUiStore';
+
+export const FRAME0_SNAPSHOT_PREFIX = 'gpui_tg_frame0_v1:';
+export const TOP_PREFETCH_DIALOG_LIMIT = 8;
+export const WS_RECONNECT_DEDUP_WINDOW_MS = 3000;
+
+const FRAME0_MAX_CHATS = 60;
+const FRAME0_MAX_MESSAGES = 30;
+const FRAME0_MAX_PEERS = 100;
+
+export interface Frame0Snapshot {
+  accountId: string;
+  savedAtMs: number;
+  chats: ChatSummary[];
+  activeChatId: number | null;
+  activeChatMessages: MessageItem[];
+  peers: UserProfile[];
+}
+
+function isValidFrame0Chat(value: unknown): value is ChatSummary {
+  if (!value || typeof value !== 'object') return false;
+  const c = value as Record<string, unknown>;
+  return typeof c.chatId === 'number' && Number.isFinite(c.chatId);
+}
+
+function isValidFrame0Peer(value: unknown): value is UserProfile {
+  if (!value || typeof value !== 'object') return false;
+  const u = value as Record<string, unknown>;
+  return typeof u.userId === 'number' && Number.isFinite(u.userId);
+}
+
+function isValidFrame0Message(value: unknown): value is MessageItem {
+  if (!value || typeof value !== 'object') return false;
+  const m = value as Record<string, unknown>;
+  if (typeof m.id !== 'number' || !Number.isFinite(m.id)) return false;
+  if (!m.content || typeof m.content !== 'object') return false;
+  const content = m.content as Record<string, unknown>;
+  if (typeof content.type !== 'string') return false;
+  if (!m.flags || typeof m.flags !== 'object') return false;
+  return true;
+}
+
+export function readFrame0Snapshot(accountId: string): Frame0Snapshot | null {
+  if (!accountId || typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(`${FRAME0_SNAPSHOT_PREFIX}${accountId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const rec = parsed as Record<string, unknown>;
+    if (rec.accountId !== accountId || !Array.isArray(rec.chats)) {
+      return null;
+    }
+    const chats = rec.chats.filter(isValidFrame0Chat).slice(0, FRAME0_MAX_CHATS);
+    const activeChatMessages = Array.isArray(rec.activeChatMessages)
+      ? rec.activeChatMessages.filter(isValidFrame0Message).slice(-FRAME0_MAX_MESSAGES)
+      : [];
+    const peers = Array.isArray(rec.peers)
+      ? rec.peers.filter(isValidFrame0Peer).slice(0, FRAME0_MAX_PEERS)
+      : [];
+    const activeChatId =
+      typeof rec.activeChatId === 'number' && Number.isFinite(rec.activeChatId)
+        ? rec.activeChatId
+        : null;
+    const rawSavedAt = Number(rec.savedAtMs);
+    const savedAtMs = Number.isFinite(rawSavedAt) ? rawSavedAt : 0;
+    return {
+      accountId: rec.accountId,
+      savedAtMs,
+      chats,
+      activeChatId,
+      activeChatMessages,
+      peers,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeFrame0Snapshot(
+  accountId: string,
+  snap: Omit<Frame0Snapshot, 'accountId' | 'savedAtMs'>,
+): void {
+  if (!accountId || typeof localStorage === 'undefined') return;
+  try {
+    const payload: Frame0Snapshot = {
+      accountId,
+      savedAtMs: Date.now(),
+      chats: snap.chats.slice(0, FRAME0_MAX_CHATS),
+      activeChatId: snap.activeChatId,
+      activeChatMessages: snap.activeChatMessages.slice(-FRAME0_MAX_MESSAGES),
+      peers: snap.peers.slice(0, FRAME0_MAX_PEERS),
+    };
+    localStorage.setItem(`${FRAME0_SNAPSHOT_PREFIX}${accountId}`, JSON.stringify(payload));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function clearFrame0Snapshot(accountId?: string): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    if (accountId && accountId !== 'all') {
+      localStorage.removeItem(`${FRAME0_SNAPSHOT_PREFIX}${accountId}`);
+      return;
+    }
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(FRAME0_SNAPSHOT_PREFIX)) {
+        keys.push(k);
+      }
+    }
+    for (const k of keys) {
+      localStorage.removeItem(k);
+    }
+  } catch {
+    // Ignore storage error
+  }
+}
+
+export interface RealtimeDomainEvent {
+  type: 'UserCreationChanged' | 'PublicCatalogChanged' | 'community_event';
+  payload: Record<string, unknown>;
+  receivedAtMs: number;
+}
+
+type RealtimeDomainEventListener = (ev: RealtimeDomainEvent) => void;
+const realtimeDomainEventListeners = new Set<RealtimeDomainEventListener>();
+
+export function subscribeRealtimeDomainEvent(
+  listener: RealtimeDomainEventListener,
+): () => void {
+  realtimeDomainEventListeners.add(listener);
+  return () => {
+    realtimeDomainEventListeners.delete(listener);
+  };
+}
+
+let topPrefetchYieldDelayMs = 250;
+export function setTopPrefetchDelayMsForTest(ms: number): void {
+  topPrefetchYieldDelayMs = Math.max(0, Math.floor(ms));
+}
 
 const localTabSendTimestampByChat = new Map<number, number>();
 
@@ -107,6 +255,7 @@ export interface AgentHandoffState {
 }
 
 export interface ChatState {
+  hydratedAccountId: string | null;
   chatsById: Record<number, ChatSummary>;
   orderedChatIds: number[];
   activeChatId: number | null;
@@ -154,6 +303,17 @@ export interface ChatState {
   agentWorkspaceByChat: Record<number, Record<string, unknown>>;
   lastAgentHandoffByChat: Record<number, AgentHandoffState>;
 
+  scheduledMessagesByChat: Record<number, ScheduledMessageDto[]>;
+  translatedMessagesByKey: Record<string, TranslateMessageResponse>;
+  translatingMessageKeys: Record<string, boolean>;
+  translationErrorByKey: Record<
+    string,
+    { message: string; status?: number; code?: string; needsProviderConfig?: boolean }
+  >;
+  adminLogByChat: Record<number, AdminLogEventDto[]>;
+  callsHistory: CallRecordDto[];
+  lastRealtimeDomainEvent: RealtimeDomainEvent | null;
+
   isLoadingChats: boolean;
   isLoadingMessages: boolean;
   uploadProgress: number | null;
@@ -183,6 +343,7 @@ export interface ChatState {
       scheduleAtMs?: number;
       ttlSeconds?: number;
       skipServerBotReply?: boolean;
+      clearComposerState?: boolean;
     },
   ) => Promise<MessageItem>;
   archiveLocalBotReply: (
@@ -192,7 +353,13 @@ export interface ChatState {
   sendMediaFiles: (
     chatId: number,
     files: Array<File | Blob>,
-    opts?: { caption?: string; hasSpoiler?: boolean; topicId?: number; replyToMsgId?: number },
+    opts?: {
+      caption?: string;
+      hasSpoiler?: boolean;
+      topicId?: number;
+      replyToMsgId?: number;
+      quoteText?: string;
+    },
   ) => Promise<MessageItem>;
   sendVoiceRecording: (
     chatId: number,
@@ -319,8 +486,34 @@ export interface ChatState {
   updatePrivacy: (patch: Partial<UserPrivacySettingsDto>) => Promise<UserPrivacySettingsDto>;
   toggleBlockUser: (userId: number, blocked: boolean) => Promise<void>;
 
+  loadScheduledMessages: (chatId: number) => Promise<ScheduledMessageDto[]>;
+  cancelScheduledMessage: (chatId: number, messageId: number) => Promise<void>;
+  sendScheduledMessageNow: (chatId: number, messageId: number) => Promise<MessageItem>;
+  translateMessage: (
+    chatId: number,
+    messageId: number,
+    targetLang: string,
+  ) => Promise<TranslateMessageResponse>;
+  clearMessageTranslation: (chatId: number, messageId: number) => void;
+  loadAdminLog: (
+    chatId: number,
+    opts?: { limit?: number; beforeId?: number; action?: string; actorId?: number },
+  ) => Promise<AdminLogEventDto[]>;
+  loadCallsHistory: (opts?: {
+    limit?: number;
+    filter?: 'all' | 'missed' | 'video';
+  }) => Promise<CallRecordDto[]>;
+  queryBotInline: (req: {
+    bot: string;
+    query: string;
+    chatId?: number;
+    offset?: string;
+    limit?: number;
+    queryId?: string;
+  }) => Promise<InlineQueryResponse>;
+
   bindRealtimeEvents: () => () => void;
-  resetChatStore: () => void;
+  resetChatStore: (opts?: { preserveFrame0?: boolean; targetAccountId?: string | null }) => void;
 }
 
 function sortChatIds(chatsById: Record<number, ChatSummary>): number[] {
@@ -366,15 +559,73 @@ let inChatSearchSequence = 0;
 let chatStoreAccountEpoch = 0;
 let realtimeUnbindFn: (() => void) | null = null;
 let missingChatSyncPromise: Promise<void> | null = null;
+let inFlightBootstrap: { accountId: string; epoch: number; promise: Promise<void> } | null = null;
+let lastBootstrapStartedAtMs = 0;
+let hasConnectedWsOnce = false;
+const inFlightPrefetchChatIds = new Set<number>();
+
+function hydrateInitialFrame0State(): {
+  hydratedAccountId: string | null;
+  chatsById: Record<number, ChatSummary>;
+  orderedChatIds: number[];
+  activeChatId: number | null;
+  messagesByChat: Record<number, MessageItem[]>;
+  peersById: Record<number, UserProfile>;
+} {
+  const empty = {
+    hydratedAccountId: null as string | null,
+    chatsById: {} as Record<number, ChatSummary>,
+    orderedChatIds: [] as number[],
+    activeChatId: null as number | null,
+    messagesByChat: {} as Record<number, MessageItem[]>,
+    peersById: {} as Record<number, UserProfile>,
+  };
+  const auth = useAuthStore.getState();
+  if (!auth.isAuthenticated || !auth.activeAccountId) {
+    return empty;
+  }
+  const accountId = auth.activeAccountId;
+  try {
+    const snap = readFrame0Snapshot(accountId);
+    if (!snap || snap.chats.length === 0) {
+      return empty;
+    }
+    const chatsById: Record<number, ChatSummary> = {};
+    for (const c of snap.chats) chatsById[c.chatId] = c;
+    const peersById: Record<number, UserProfile> = {};
+    for (const u of snap.peers) peersById[u.userId] = u;
+    const activeChatId =
+      snap.activeChatId !== null && chatsById[snap.activeChatId] ? snap.activeChatId : null;
+    const messagesByChat: Record<number, MessageItem[]> = {};
+    if (activeChatId !== null && snap.activeChatMessages.length > 0) {
+      messagesByChat[activeChatId] = snap.activeChatMessages.map(enrichMessageItem);
+    }
+    return {
+      hydratedAccountId: accountId,
+      chatsById,
+      orderedChatIds: sortChatIds(chatsById),
+      activeChatId,
+      messagesByChat,
+      peersById,
+    };
+  } catch {
+    clearFrame0Snapshot(accountId);
+    return empty;
+  }
+}
+
+const initialFrame0 = hydrateInitialFrame0State();
 
 export const useChatStore = create<ChatState>((set, get) => {
   const tryDecryptMessages = async (chatId: number, msgs: MessageItem[]): Promise<void> => {
+    const epoch = chatStoreAccountEpoch;
     const chat = get().chatsById[chatId];
     const me = useAuthStore.getState().currentUser;
     if (!chat?.isSecret || !me) return;
     const peerId = chat.peerUserId ?? 102;
     const updates: Record<string, string> = {};
     for (const msg of msgs) {
+      if (epoch !== chatStoreAccountEpoch) return;
       if (msg.content.type === 'Encrypted') {
         const key = `${chatId}:${msg.id}`;
         if (get().decryptedSecretTexts[key]) continue;
@@ -391,6 +642,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         }
       }
     }
+    if (epoch !== chatStoreAccountEpoch) return;
     if (Object.keys(updates).length > 0) {
       set((prev) => ({
         decryptedSecretTexts: { ...prev.decryptedSecretTexts, ...updates },
@@ -443,15 +695,100 @@ export const useChatStore = create<ChatState>((set, get) => {
     missingChatSyncPromise = run;
   };
 
+  const persistFrame0ForActiveAccount = (epoch: number): void => {
+    if (epoch !== chatStoreAccountEpoch) return;
+    const auth = useAuthStore.getState();
+    if (!auth.isAuthenticated || !auth.activeAccountId) return;
+    const st = get();
+    const orderedChats = st.orderedChatIds
+      .map((id) => st.chatsById[id])
+      .filter((c): c is ChatSummary => Boolean(c));
+    const activeMsgs =
+      st.activeChatId !== null ? (st.messagesByChat[st.activeChatId] ?? []) : [];
+    writeFrame0Snapshot(auth.activeAccountId, {
+      chats: orderedChats,
+      activeChatId: st.activeChatId,
+      activeChatMessages: activeMsgs,
+      peers: Object.values(st.peersById),
+    });
+  };
+
+  const prefetchTopDialogs = (
+    orderedIds: number[],
+    epoch: number,
+    accountId: string,
+  ): void => {
+    const adapter = getClientAdapter();
+    const stateNow = get();
+    const candidates = orderedIds
+      .filter(
+        (cid) =>
+          cid !== stateNow.activeChatId &&
+          !inFlightPrefetchChatIds.has(cid) &&
+          !(stateNow.messagesByChat[cid]?.length),
+      )
+      .slice(0, TOP_PREFETCH_DIALOG_LIMIT);
+
+    if (candidates.length === 0) return;
+    for (const cid of candidates) {
+      inFlightPrefetchChatIds.add(cid);
+    }
+
+    const run = async (): Promise<void> => {
+      if (topPrefetchYieldDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, topPrefetchYieldDelayMs));
+      }
+      if (epoch !== chatStoreAccountEpoch) {
+        return;
+      }
+
+      const CHUNK_SIZE = 3;
+      for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
+        if (epoch !== chatStoreAccountEpoch) break;
+        const chunk = candidates.slice(i, i + CHUNK_SIZE);
+        await Promise.all(
+          chunk.map(async (cid) => {
+            try {
+              if (epoch !== chatStoreAccountEpoch) return;
+              const res = await adapter.listMessages(cid, { limit: 30 });
+              if (epoch !== chatStoreAccountEpoch) return;
+              const fetched = res.messages.map(enrichMessageItem);
+              set((prev) => {
+                let merged = prev.messagesByChat[cid] ?? [];
+                for (const m of fetched) {
+                  merged = mergeMessageIntoTimeline(merged, m);
+                }
+                return {
+                  messagesByChat: { ...prev.messagesByChat, [cid]: merged },
+                  hasMoreByChat: { ...prev.hasMoreByChat, [cid]: res.hasMore },
+                };
+              });
+              void indexedDbCache.saveChatMessages(accountId, cid, fetched).catch(() => undefined);
+            } catch {
+              // Non-fatal background prefetch error
+            } finally {
+              if (epoch === chatStoreAccountEpoch) {
+                inFlightPrefetchChatIds.delete(cid);
+              }
+            }
+          }),
+        );
+      }
+    };
+
+    void run();
+  };
+
   return {
-    chatsById: {},
-    orderedChatIds: [],
-    activeChatId: null,
+    hydratedAccountId: initialFrame0.hydratedAccountId,
+    chatsById: initialFrame0.chatsById,
+    orderedChatIds: initialFrame0.orderedChatIds,
+    activeChatId: initialFrame0.activeChatId,
     activeTopicId: null,
     activeFolderId: 'all',
     showArchived: false,
 
-    messagesByChat: {},
+    messagesByChat: initialFrame0.messagesByChat,
     hasMoreByChat: {},
     pinnedByChat: {},
     topicsByChat: {},
@@ -463,7 +800,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     selectedMessageIds: [],
     isMultiSelectMode: false,
 
-    peersById: {},
+    peersById: initialFrame0.peersById,
     contacts: [],
     blockedUsers: [],
     privacySettings: null,
@@ -491,6 +828,14 @@ export const useChatStore = create<ChatState>((set, get) => {
     agentWorkspaceByChat: {},
     lastAgentHandoffByChat: {},
 
+    scheduledMessagesByChat: {},
+    translatedMessagesByKey: {},
+    translatingMessageKeys: {},
+    translationErrorByKey: {},
+    adminLogByChat: {},
+    callsHistory: [],
+    lastRealtimeDomainEvent: null,
+
     isLoadingChats: false,
     isLoadingMessages: false,
     uploadProgress: null,
@@ -501,74 +846,147 @@ export const useChatStore = create<ChatState>((set, get) => {
       const adapter = getClientAdapter();
       const accountId = useAuthStore.getState().activeAccountId ?? 'default';
       const epoch = chatStoreAccountEpoch;
-      set({ isLoadingChats: true, connectionState: adapter.getConnectionState() });
 
-      // Hydrate instant IndexedDB cache strictly scoped to current account & epoch
-      const cachedChats = await indexedDbCache.loadChats(accountId).catch(() => []);
+      // Single-flight deduplication per (accountId, epoch)
       if (
-        epoch === chatStoreAccountEpoch &&
-        useAuthStore.getState().activeAccountId === accountId &&
-        cachedChats.length > 0 &&
-        Object.keys(get().chatsById).length === 0
+        inFlightBootstrap &&
+        inFlightBootstrap.accountId === accountId &&
+        inFlightBootstrap.epoch === epoch
       ) {
-        const map: Record<number, ChatSummary> = {};
-        for (const c of cachedChats) map[c.chatId] = c;
-        set({ chatsById: map, orderedChatIds: sortChatIds(map) });
+        return inFlightBootstrap.promise;
       }
 
-      try {
-        const [{ chats, users }, folders, stories, outbox] = await Promise.all([
-          adapter.listChats(),
-          adapter.listFolders().catch(() => [] as ChatFolder[]),
-          adapter.listStories().catch(() => [] as StoryGroup[]),
-          indexedDbCache.listOutbox(accountId).catch(() => []),
-        ]);
+      lastBootstrapStartedAtMs = Date.now();
 
-        if (epoch !== chatStoreAccountEpoch) return;
-
-        // Always overwrite with authoritative server list (even when chats is empty!)
-        const chatsById: Record<number, ChatSummary> = {};
-        const draftsByChat: Record<number, DraftState> = {};
-        for (const c of chats) {
-          chatsById[c.chatId] = c;
-          if (c.draft) draftsByChat[c.chatId] = c.draft;
+      // Synchronous Frame-0 localStorage snapshot hydration BEFORE any await
+      if (Object.keys(get().chatsById).length === 0) {
+        try {
+          const snap = readFrame0Snapshot(accountId);
+          if (snap && snap.chats.length > 0) {
+            const map: Record<number, ChatSummary> = {};
+            for (const c of snap.chats) map[c.chatId] = c;
+            const peerMap: Record<number, UserProfile> = { ...get().peersById };
+            for (const u of snap.peers) peerMap[u.userId] = u;
+            const activeId =
+              snap.activeChatId !== null && map[snap.activeChatId]
+                ? snap.activeChatId
+                : get().activeChatId;
+            const hydratedMessages =
+              activeId !== null && snap.activeChatMessages.length > 0
+                ? snap.activeChatMessages.map(enrichMessageItem)
+                : null;
+            set((prev) => ({
+              hydratedAccountId: accountId,
+              chatsById: map,
+              orderedChatIds: sortChatIds(map),
+              peersById: peerMap,
+              activeChatId: activeId,
+              messagesByChat:
+                activeId !== null &&
+                hydratedMessages &&
+                hydratedMessages.length > 0 &&
+                !(prev.messagesByChat[activeId]?.length)
+                  ? {
+                      ...prev.messagesByChat,
+                      [activeId]: hydratedMessages,
+                    }
+                  : prev.messagesByChat,
+            }));
+          }
+        } catch {
+          clearFrame0Snapshot(accountId);
         }
-        const peersById: Record<number, UserProfile> = {};
-        for (const u of [...users, ...adapter.getDiscoveredPeers()]) {
-          peersById[u.userId] = u;
+      }
+
+      const promise = (async () => {
+        set({ isLoadingChats: true, connectionState: adapter.getConnectionState() });
+
+        // Hydrate IndexedDB cache strictly scoped to current account & epoch
+        const cachedChats = await indexedDbCache.loadChats(accountId).catch(() => []);
+        if (
+          epoch === chatStoreAccountEpoch &&
+          (useAuthStore.getState().activeAccountId ?? 'default') === accountId &&
+          cachedChats.length > 0 &&
+          Object.keys(get().chatsById).length === 0
+        ) {
+          const map: Record<number, ChatSummary> = {};
+          for (const c of cachedChats) map[c.chatId] = c;
+          set({
+            hydratedAccountId: accountId,
+            chatsById: map,
+            orderedChatIds: sortChatIds(map),
+          });
         }
 
-        const currentActive = get().activeChatId;
-        const validActive = currentActive !== null && chatsById[currentActive] ? currentActive : null;
+        try {
+          const [{ chats, users }, folders, stories, outbox] = await Promise.all([
+            adapter.listChats(),
+            adapter.listFolders().catch(() => [] as ChatFolder[]),
+            adapter.listStories().catch(() => [] as StoryGroup[]),
+            indexedDbCache.listOutbox(accountId).catch(() => []),
+          ]);
 
-        set({
-          chatsById,
-          orderedChatIds: sortChatIds(chatsById),
-          activeChatId: validActive,
-          peersById,
-          folders,
-          storyGroups: stories,
-          draftsByChat,
-          pendingOutboxCount: outbox.length,
-          isLoadingChats: false,
-        });
+          if (epoch !== chatStoreAccountEpoch) return;
 
-        if (validActive === null && typeof sessionStorage !== 'undefined') {
-          try {
-            const savedRaw = sessionStorage.getItem('gpui_tg_active_chat_id');
-            const savedId = savedRaw ? Number(savedRaw) : NaN;
-            if (Number.isFinite(savedId) && chatsById[savedId]) {
-              void get().selectChat(savedId);
+          // Always overwrite with authoritative server list (even when chats is empty!)
+          const chatsById: Record<number, ChatSummary> = {};
+          const draftsByChat: Record<number, DraftState> = {};
+          for (const c of chats) {
+            chatsById[c.chatId] = c;
+            if (c.draft) draftsByChat[c.chatId] = c.draft;
+          }
+          const peersById: Record<number, UserProfile> = {};
+          for (const u of [...users, ...adapter.getDiscoveredPeers()]) {
+            peersById[u.userId] = u;
+          }
+
+          const orderedChatIds = sortChatIds(chatsById);
+          const currentActive = get().activeChatId;
+          const validActive =
+            currentActive !== null && chatsById[currentActive] ? currentActive : null;
+
+          set({
+            hydratedAccountId: accountId,
+            chatsById,
+            orderedChatIds,
+            activeChatId: validActive,
+            peersById,
+            folders,
+            storyGroups: stories,
+            draftsByChat,
+            pendingOutboxCount: outbox.length,
+            isLoadingChats: false,
+          });
+
+          void indexedDbCache.saveChats(accountId, chats).catch(() => undefined);
+          persistFrame0ForActiveAccount(epoch);
+
+          if (validActive === null && typeof sessionStorage !== 'undefined') {
+            try {
+              const savedRaw = sessionStorage.getItem('gpui_tg_active_chat_id');
+              const savedId = savedRaw ? Number(savedRaw) : NaN;
+              if (Number.isFinite(savedId) && chatsById[savedId]) {
+                void get().selectChat(savedId);
+              }
+            } catch {
+              // Ignore sessionStorage restrictions
             }
-          } catch {
-            // Ignore sessionStorage restrictions
+          }
+
+          prefetchTopDialogs(orderedChatIds, epoch, accountId);
+        } catch {
+          if (epoch === chatStoreAccountEpoch) {
+            set({ isLoadingChats: false });
           }
         }
-      } catch {
-        if (epoch === chatStoreAccountEpoch) {
-          set({ isLoadingChats: false });
+      })().finally(() => {
+        if (inFlightBootstrap?.promise === promise) {
+          inFlightBootstrap = null;
         }
-      }
+      });
+
+      inFlightBootstrap = { accountId, epoch, promise };
+      return promise;
     },
 
     selectChat: async (chatId, topicId = null) => {
@@ -647,7 +1065,10 @@ export const useChatStore = create<ChatState>((set, get) => {
           isLoadingMessages: false,
         }));
 
+        void indexedDbCache.saveChatMessages(accountId, chatId, sorted).catch(() => undefined);
+        persistFrame0ForActiveAccount(epoch);
         void tryDecryptMessages(chatId, sorted);
+        void get().loadScheduledMessages(chatId).catch(() => []);
 
         const lastMsg = sorted[sorted.length - 1];
         if (lastMsg && (get().chatsById[chatId]?.unreadCount ?? 0) > 0) {
@@ -664,6 +1085,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     setShowArchived: (showArchived) => set({ showArchived }),
 
     loadOlderMessages: async (chatId) => {
+      const epoch = chatStoreAccountEpoch;
       const current = get().messagesByChat[chatId] ?? [];
       const oldestId = current[0]?.id;
       const res = await getClientAdapter().listMessages(chatId, {
@@ -671,14 +1093,17 @@ export const useChatStore = create<ChatState>((set, get) => {
         beforeId: oldestId,
         topicId: get().activeTopicId ?? undefined,
       });
-      let merged = [...current];
-      for (const m of res.messages) {
-        merged = mergeMessageIntoTimeline(merged, m);
-      }
-      set((prev) => ({
-        messagesByChat: { ...prev.messagesByChat, [chatId]: merged },
-        hasMoreByChat: { ...prev.hasMoreByChat, [chatId]: res.hasMore },
-      }));
+      if (epoch !== chatStoreAccountEpoch) return false;
+      set((prev) => {
+        let merged = [...(prev.messagesByChat[chatId] ?? [])];
+        for (const m of res.messages) {
+          merged = mergeMessageIntoTimeline(merged, m);
+        }
+        return {
+          messagesByChat: { ...prev.messagesByChat, [chatId]: merged },
+          hasMoreByChat: { ...prev.hasMoreByChat, [chatId]: res.hasMore },
+        };
+      });
       void tryDecryptMessages(chatId, res.messages);
       return res.hasMore;
     },
@@ -711,10 +1136,14 @@ export const useChatStore = create<ChatState>((set, get) => {
     clearMultiSelect: () => set({ selectedMessageIds: [], isMultiSelectMode: false }),
 
     sendText: async (chatId, rawText, opts) => {
+      const epoch = chatStoreAccountEpoch;
       markLocalTabSend(chatId);
       const adapter = getClientAdapter();
       const chat = get().chatsById[chatId];
-      const replyState = get().replyTargetByChat[chatId];
+      const clearComposerState = opts?.clearComposerState !== false;
+      const replyState = clearComposerState ? get().replyTargetByChat[chatId] : null;
+      const resolvedReplyToMsgId = opts?.replyToMsgId ?? replyState?.messageId;
+      const resolvedQuoteText = opts?.quoteText ?? replyState?.quoteText;
       const parsed = parseMarkdownEntities(rawText);
       const cleanText = opts?.entities ? rawText : parsed.text;
       const entities = opts?.entities ?? parsed.entities;
@@ -725,6 +1154,9 @@ export const useChatStore = create<ChatState>((set, get) => {
         const me = useAuthStore.getState().currentUser;
         const peerId = chat.peerUserId ?? 102;
         const bundlesRes = await adapter.getUserPreKeyBundles(peerId).catch(() => ({ devices: [] }));
+        if (epoch !== chatStoreAccountEpoch) {
+          throw new Error('Account context changed while preparing encrypted message');
+        }
         const encrypted = await encryptEnvelope({
           localUserId: me?.userId ?? 1,
           chatId,
@@ -733,6 +1165,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           ttlSeconds: opts?.ttlSeconds ?? chat.ttlSeconds,
           remoteBundles: bundlesRes.devices,
         });
+        if (epoch !== chatStoreAccountEpoch) {
+          throw new Error('Account context changed while encrypting message');
+        }
         content = { type: 'Encrypted', data: encrypted.envelope };
       }
 
@@ -741,8 +1176,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         text: chat?.isSecret ? '🔐 Encrypted Message' : cleanText,
         entities: chat?.isSecret ? [] : entities,
         content,
-        replyToMsgId: opts?.replyToMsgId ?? replyState?.messageId,
-        quoteText: opts?.quoteText ?? replyState?.quoteText,
+        replyToMsgId: resolvedReplyToMsgId,
+        quoteText: resolvedQuoteText,
         topicId: opts?.topicId ?? get().activeTopicId ?? undefined,
         clientNonce,
         silent: opts?.silent,
@@ -751,7 +1186,63 @@ export const useChatStore = create<ChatState>((set, get) => {
         skipServerBotReply: opts?.skipServerBotReply,
       });
 
-      const msg = enrichMessageItem(res.message);
+      const msg = enrichMessageItem({
+        ...res.message,
+        reply_to:
+          res.message.reply_to ??
+          (resolvedReplyToMsgId
+            ? {
+                reply_to_msg_id: resolvedReplyToMsgId,
+                quote_text: resolvedQuoteText,
+                sender_name: replyState?.senderName,
+                preview_text: replyState?.previewText,
+              }
+            : undefined),
+      });
+
+      if (epoch !== chatStoreAccountEpoch) {
+        return msg;
+      }
+
+      const isScheduled = Boolean(
+        msg.flags?.is_scheduled || (opts?.scheduleAtMs && opts.scheduleAtMs > Date.now()),
+      );
+
+      if (isScheduled) {
+        const scheduledItem: ScheduledMessageDto = {
+          message_id: msg.id,
+          chat_id: chatId,
+          sender_id: msg.sender_id,
+          topic_id: msg.topic_id,
+          text: msg.text ?? cleanText,
+          content: msg.content,
+          scheduled_at_ms: msg.scheduled_at_ms ?? opts?.scheduleAtMs ?? Date.now(),
+          created_at_ms: msg.date_ms ?? Date.now(),
+          message: msg,
+        };
+        set((prev) => {
+          const existing = (prev.scheduledMessagesByChat[chatId] ?? []).filter(
+            (item) => item.message_id !== scheduledItem.message_id,
+          );
+          const nextScheduled = [...existing, scheduledItem].sort(
+            (a, b) => a.scheduled_at_ms - b.scheduled_at_ms,
+          );
+          const nextDrafts = clearComposerState ? { ...prev.draftsByChat } : prev.draftsByChat;
+          if (clearComposerState) delete nextDrafts[chatId];
+          return {
+            scheduledMessagesByChat: {
+              ...prev.scheduledMessagesByChat,
+              [chatId]: nextScheduled,
+            },
+            draftsByChat: nextDrafts,
+            replyTargetByChat: clearComposerState
+              ? { ...prev.replyTargetByChat, [chatId]: null }
+              : prev.replyTargetByChat,
+          };
+        });
+        return msg;
+      }
+
       set((prev) => {
         const prevMsgs = prev.messagesByChat[chatId] ?? [];
         const updatedChat = prev.chatsById[chatId]
@@ -760,14 +1251,14 @@ export const useChatStore = create<ChatState>((set, get) => {
               lastMessageId: msg.id,
               lastMessageDateMs: msg.date_ms ?? Date.now(),
               lastMessagePreview: chat?.isSecret ? '🔐 Encrypted Message' : cleanText,
-              draft: null,
+              draft: clearComposerState ? null : prev.chatsById[chatId]!.draft,
             }
           : undefined;
         const nextChats = updatedChat
           ? { ...prev.chatsById, [chatId]: updatedChat }
           : prev.chatsById;
-        const nextDrafts = { ...prev.draftsByChat };
-        delete nextDrafts[chatId];
+        const nextDrafts = clearComposerState ? { ...prev.draftsByChat } : prev.draftsByChat;
+        if (clearComposerState) delete nextDrafts[chatId];
         return {
           messagesByChat: {
             ...prev.messagesByChat,
@@ -776,7 +1267,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           chatsById: nextChats,
           orderedChatIds: sortChatIds(nextChats),
           draftsByChat: nextDrafts,
-          replyTargetByChat: { ...prev.replyTargetByChat, [chatId]: null },
+          replyTargetByChat: clearComposerState
+            ? { ...prev.replyTargetByChat, [chatId]: null }
+            : prev.replyTargetByChat,
           decryptedSecretTexts: chat?.isSecret
             ? { ...prev.decryptedSecretTexts, [`${chatId}:${msg.id}`]: cleanText }
             : prev.decryptedSecretTexts,
@@ -791,9 +1284,13 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     sendMediaFiles: async (chatId, files, opts) => {
+      const epoch = chatStoreAccountEpoch;
       markLocalTabSend(chatId);
       const adapter = getClientAdapter();
       if (files.length === 0) throw new Error('No media files selected');
+      const replyState = get().replyTargetByChat[chatId];
+      const resolvedReplyToMsgId = opts?.replyToMsgId ?? replyState?.messageId;
+      const resolvedQuoteText = opts?.quoteText ?? replyState?.quoteText;
       set({ uploadProgress: 0 });
 
       try {
@@ -806,8 +1303,15 @@ export const useChatStore = create<ChatState>((set, get) => {
             const uploaded = await adapter.uploadMedia(
               f,
               { fileName, mimeType: f.type || 'image/png', width: 800, height: 600 },
-              (pct) => set({ uploadProgress: Math.round(((i + pct / 100) / slice.length) * 100) }),
+              (pct) => {
+                if (epoch === chatStoreAccountEpoch) {
+                  set({ uploadProgress: Math.round(((i + pct / 100) / slice.length) * 100) });
+                }
+              },
             );
+            if (epoch !== chatStoreAccountEpoch) {
+              throw new Error('Account context changed during media upload');
+            }
             albumItems.push({
               file_id: uploaded.file_id,
               mime_type: uploaded.mime_type,
@@ -826,10 +1330,15 @@ export const useChatStore = create<ChatState>((set, get) => {
               data: { items: albumItems, caption: opts?.caption },
             },
             topicId: opts?.topicId ?? get().activeTopicId ?? undefined,
-            replyToMsgId: opts?.replyToMsgId,
+            replyToMsgId: resolvedReplyToMsgId,
+            quoteText: resolvedQuoteText,
           });
+          if (epoch !== chatStoreAccountEpoch) {
+            return res.message;
+          }
           set((prev) => ({
             uploadProgress: null,
+            replyTargetByChat: { ...prev.replyTargetByChat, [chatId]: null },
             messagesByChat: {
               ...prev.messagesByChat,
               [chatId]: mergeMessageIntoTimeline(prev.messagesByChat[chatId] ?? [], res.message),
@@ -844,8 +1353,15 @@ export const useChatStore = create<ChatState>((set, get) => {
         const uploaded = await adapter.uploadMedia(
           f,
           { fileName, mimeType: mime, width: 800, height: 600 },
-          (pct) => set({ uploadProgress: pct }),
+          (pct) => {
+            if (epoch === chatStoreAccountEpoch) {
+              set({ uploadProgress: pct });
+            }
+          },
         );
+        if (epoch !== chatStoreAccountEpoch) {
+          throw new Error('Account context changed during media upload');
+        }
 
         let content: MessageContent;
         if (mime.startsWith('image/')) {
@@ -900,11 +1416,16 @@ export const useChatStore = create<ChatState>((set, get) => {
           text: opts?.caption ?? fileName,
           content,
           topicId: opts?.topicId ?? get().activeTopicId ?? undefined,
-          replyToMsgId: opts?.replyToMsgId,
+          replyToMsgId: resolvedReplyToMsgId,
+          quoteText: resolvedQuoteText,
         });
+        if (epoch !== chatStoreAccountEpoch) {
+          return res.message;
+        }
 
         set((prev) => ({
           uploadProgress: null,
+          replyTargetByChat: { ...prev.replyTargetByChat, [chatId]: null },
           messagesByChat: {
             ...prev.messagesByChat,
             [chatId]: mergeMessageIntoTimeline(prev.messagesByChat[chatId] ?? [], res.message),
@@ -912,7 +1433,9 @@ export const useChatStore = create<ChatState>((set, get) => {
         }));
         return res.message;
       } catch (err) {
-        set({ uploadProgress: null });
+        if (epoch === chatStoreAccountEpoch) {
+          set({ uploadProgress: null });
+        }
         throw err;
       }
     },
@@ -1709,9 +2232,259 @@ export const useChatStore = create<ChatState>((set, get) => {
       await get().loadPrivacyAndBlocked();
     },
 
+    loadScheduledMessages: async (chatId) => {
+      const adapter = getClientAdapter();
+      const epoch = chatStoreAccountEpoch;
+      const items = adapter.listScheduledMessages
+        ? await adapter.listScheduledMessages(chatId)
+        : [];
+      if (epoch !== chatStoreAccountEpoch) return [];
+      const sorted = [...items].sort((a, b) => a.scheduled_at_ms - b.scheduled_at_ms);
+      set((prev) => ({
+        scheduledMessagesByChat: {
+          ...prev.scheduledMessagesByChat,
+          [chatId]: sorted,
+        },
+      }));
+      return sorted;
+    },
+
+    cancelScheduledMessage: async (chatId, messageId) => {
+      const epoch = chatStoreAccountEpoch;
+      const adapter = getClientAdapter();
+      if (!adapter.cancelScheduledMessage) {
+        throw new Error('Scheduled message cancellation is not supported by active adapter');
+      }
+      await adapter.cancelScheduledMessage(chatId, messageId);
+      if (epoch !== chatStoreAccountEpoch) return;
+      set((prev) => ({
+        scheduledMessagesByChat: {
+          ...prev.scheduledMessagesByChat,
+          [chatId]: (prev.scheduledMessagesByChat[chatId] ?? []).filter(
+            (m) => m.message_id !== messageId,
+          ),
+        },
+      }));
+    },
+
+    sendScheduledMessageNow: async (chatId, messageId) => {
+      const epoch = chatStoreAccountEpoch;
+      const adapter = getClientAdapter();
+      if (!adapter.sendScheduledMessageNow) {
+        throw new Error('Send scheduled message now is not supported by active adapter');
+      }
+      const res = await adapter.sendScheduledMessageNow(chatId, messageId);
+      const delivered = enrichMessageItem(res.message);
+      if (epoch !== chatStoreAccountEpoch) return delivered;
+      set((prev) => {
+        const nextScheduled = (prev.scheduledMessagesByChat[chatId] ?? []).filter(
+          (m) => m.message_id !== messageId,
+        );
+        const existingChat = prev.chatsById[chatId];
+        const nextChats = existingChat
+          ? {
+              ...prev.chatsById,
+              [chatId]: {
+                ...existingChat,
+                lastMessageId: Math.max(existingChat.lastMessageId, delivered.id),
+                lastMessageDateMs: delivered.date_ms ?? Date.now(),
+                lastMessagePreview: extractPlainTextFromContent(delivered.content),
+              },
+            }
+          : prev.chatsById;
+        return {
+          scheduledMessagesByChat: {
+            ...prev.scheduledMessagesByChat,
+            [chatId]: nextScheduled,
+          },
+          messagesByChat: {
+            ...prev.messagesByChat,
+            [chatId]: mergeMessageIntoTimeline(prev.messagesByChat[chatId] ?? [], delivered),
+          },
+          chatsById: nextChats,
+          orderedChatIds: sortChatIds(nextChats),
+        };
+      });
+      return delivered;
+    },
+
+    translateMessage: async (chatId, messageId, targetLang) => {
+      const epoch = chatStoreAccountEpoch;
+      const adapter = getClientAdapter();
+      if (!adapter.translateMessage) {
+        throw new Error('Message translation is not supported by active adapter');
+      }
+      const key = `${chatId}:${messageId}`;
+      set((prev) => {
+        const nextErr = { ...prev.translationErrorByKey };
+        delete nextErr[key];
+        return {
+          translatingMessageKeys: { ...prev.translatingMessageKeys, [key]: true },
+          translationErrorByKey: nextErr,
+        };
+      });
+      try {
+        const res = await adapter.translateMessage(chatId, messageId, targetLang);
+        if (epoch !== chatStoreAccountEpoch) return res;
+        set((prev) => {
+          const nextLoading = { ...prev.translatingMessageKeys };
+          delete nextLoading[key];
+          return {
+            translatingMessageKeys: nextLoading,
+            translatedMessagesByKey: { ...prev.translatedMessagesByKey, [key]: res },
+          };
+        });
+        return res;
+      } catch (err) {
+        if (epoch !== chatStoreAccountEpoch) {
+          throw err;
+        }
+        const errObj = err as Error & {
+          status?: number;
+          code?: string;
+          details?: Record<string, unknown>;
+        };
+        const status = errObj?.status;
+        const code = errObj?.code;
+        const needsProviderConfig =
+          status === 503 ||
+          code === 'provider_not_configured' ||
+          Boolean(errObj?.details?.needs_provider_selection);
+        set((prev) => {
+          const nextLoading = { ...prev.translatingMessageKeys };
+          delete nextLoading[key];
+          return {
+            translatingMessageKeys: nextLoading,
+            translationErrorByKey: {
+              ...prev.translationErrorByKey,
+              [key]: {
+                message: errObj instanceof Error ? errObj.message : String(err),
+                status,
+                code,
+                needsProviderConfig,
+              },
+            },
+          };
+        });
+        throw err;
+      }
+    },
+
+    clearMessageTranslation: (chatId, messageId) => {
+      const key = `${chatId}:${messageId}`;
+      set((prev) => {
+        const nextTr = { ...prev.translatedMessagesByKey };
+        const nextErr = { ...prev.translationErrorByKey };
+        delete nextTr[key];
+        delete nextErr[key];
+        return {
+          translatedMessagesByKey: nextTr,
+          translationErrorByKey: nextErr,
+        };
+      });
+    },
+
+    loadAdminLog: async (chatId, opts) => {
+      const adapter = getClientAdapter();
+      if (!adapter.listAdminLog) return [];
+      const epoch = chatStoreAccountEpoch;
+      const res = await adapter.listAdminLog(chatId, opts);
+      if (epoch !== chatStoreAccountEpoch) return [];
+      set((prev) => ({
+        adminLogByChat: {
+          ...prev.adminLogByChat,
+          [chatId]: res.events,
+        },
+      }));
+      return res.events;
+    },
+
+    loadCallsHistory: async (opts) => {
+      const adapter = getClientAdapter();
+      const epoch = chatStoreAccountEpoch;
+      const calls = adapter.listCallsHistory
+        ? (await adapter.listCallsHistory(opts)).calls
+        : await adapter.listCalls();
+      if (epoch !== chatStoreAccountEpoch) return [];
+      set({ callsHistory: calls });
+      return calls;
+    },
+
+    queryBotInline: async (req) => {
+      const adapter = getClientAdapter();
+      if (!adapter.queryBotInline) {
+        return {
+          ok: true,
+          query_id: '',
+          bot_user_id: 0,
+          bot_username: req.bot.replace(/^@/, ''),
+          total: 0,
+          results: [],
+          items: [],
+        };
+      }
+      return adapter.queryBotInline(req);
+    },
+
     bindRealtimeEvents: () => {
       realtimeUnbindFn?.();
       const adapter = getClientAdapter();
+
+      const maybeDispatchWebNotification = (
+        chat: ChatSummary | undefined,
+        msg: MessageItem,
+      ): void => {
+        if (typeof Notification === 'undefined') return;
+        if (Notification.permission !== 'granted') return;
+        if (!useSettingsStore.getState().notificationsEnabled) return;
+        if (chat?.isMuted) return;
+        const cid = msg.chat_id;
+        const isDocumentHidden = typeof document === 'undefined' ? true : document.hidden;
+        if (!isDocumentHidden && get().activeChatId === cid) return;
+
+        const sender = get().peersById[msg.sender_id];
+        const title =
+          chat?.title ||
+          [sender?.firstName, sender?.lastName].filter(Boolean).join(' ') ||
+          sender?.username ||
+          `Chat #${cid}`;
+        const body = extractPlainTextFromContent(msg.content) || msg.text || 'New message';
+        try {
+          const notif = new Notification(title, {
+            body,
+            tag: `fabushi-chat-${cid}-${msg.id}`,
+          });
+          notif.onclick = () => {
+            try {
+              if (typeof window !== 'undefined') window.focus();
+            } catch {
+              // Ignore focus restriction
+            }
+            void useChatStore.getState().selectChat(cid);
+          };
+        } catch {
+          // Ignore Notification constructor errors in restricted contexts
+        }
+      };
+
+      const dispatchDomainEvent = (
+        type: RealtimeDomainEvent['type'],
+        payload: Record<string, unknown>,
+      ): void => {
+        const domainEv: RealtimeDomainEvent = {
+          type,
+          payload,
+          receivedAtMs: Date.now(),
+        };
+        set({ lastRealtimeDomainEvent: domainEv });
+        for (const listener of realtimeDomainEventListeners) {
+          try {
+            listener(domainEv);
+          } catch {
+            // Ignore domain listener error
+          }
+        }
+      };
 
       const applyEvent = (event: UpdateEvent): void => {
         switch (event.type) {
@@ -1720,7 +2493,34 @@ export const useChatStore = create<ChatState>((set, get) => {
             const msg = enrichMessageItem(event.data);
             const cid = msg.chat_id;
             const epoch = chatStoreAccountEpoch;
+            if (msg.flags?.is_scheduled) {
+              // Scheduled message stays strictly inside scheduledMessagesByChat
+              const item: ScheduledMessageDto = {
+                message_id: msg.id,
+                chat_id: cid,
+                sender_id: msg.sender_id,
+                topic_id: msg.topic_id,
+                text: msg.text ?? extractPlainTextFromContent(msg.content),
+                content: msg.content,
+                scheduled_at_ms: msg.scheduled_at_ms ?? msg.date_ms ?? Date.now(),
+                created_at_ms: msg.date_ms ?? Date.now(),
+                message: msg,
+              };
+              set((prev) => ({
+                scheduledMessagesByChat: {
+                  ...prev.scheduledMessagesByChat,
+                  [cid]: [
+                    ...(prev.scheduledMessagesByChat[cid] ?? []).filter(
+                      (s) => s.message_id !== item.message_id,
+                    ),
+                    item,
+                  ].sort((a, b) => a.scheduled_at_ms - b.scheduled_at_ms),
+                },
+              }));
+              break;
+            }
             let missingFromChatList = false;
+            const existingBefore = get().chatsById[cid];
             set((prev) => {
               const timeline = mergeMessageIntoTimeline(prev.messagesByChat[cid] ?? [], msg);
               const existingChat = prev.chatsById[cid];
@@ -1743,14 +2543,45 @@ export const useChatStore = create<ChatState>((set, get) => {
                     },
                   }
                 : prev.chatsById;
+
+              const prevScheduled = prev.scheduledMessagesByChat[cid];
+              const nextScheduledByChat =
+                prevScheduled && prevScheduled.some((s) => s.message_id === msg.id)
+                  ? {
+                      ...prev.scheduledMessagesByChat,
+                      [cid]: prevScheduled.filter((s) => s.message_id !== msg.id),
+                    }
+                  : prev.scheduledMessagesByChat;
+
+              const prevBotAct = prev.botActivityByChat[cid];
+              const nextBotActivity =
+                event.type === 'NewMessage' &&
+                isIncoming &&
+                prevBotAct?.state === 'thinking'
+                  ? {
+                      ...prev.botActivityByChat,
+                      [cid]: { ...prevBotAct, state: 'idle', updatedAtMs: Date.now() },
+                    }
+                  : prev.botActivityByChat;
+
               return {
                 messagesByChat: { ...prev.messagesByChat, [cid]: timeline },
                 chatsById: nextChats,
                 orderedChatIds: sortChatIds(nextChats),
+                scheduledMessagesByChat: nextScheduledByChat,
+                botActivityByChat: nextBotActivity,
               };
             });
+            persistFrame0ForActiveAccount(epoch);
             if (missingFromChatList) {
               syncMissingChatsFromServer(epoch);
+            }
+            if (
+              event.type === 'NewMessage' &&
+              !msg.flags?.is_out &&
+              !msg.flags?.is_scheduled
+            ) {
+              maybeDispatchWebNotification(existingBefore ?? get().chatsById[cid], msg);
             }
             void tryDecryptMessages(cid, [msg]);
             break;
@@ -1769,12 +2600,14 @@ export const useChatStore = create<ChatState>((set, get) => {
                       : rawCid.Fake;
             const delSet = new Set(event.data.message_ids);
             if (!cid) break;
+            const epoch = chatStoreAccountEpoch;
             set((prev) => ({
               messagesByChat: {
                 ...prev.messagesByChat,
                 [cid]: (prev.messagesByChat[cid] ?? []).filter((m: MessageItem) => !delSet.has(m.id)),
               },
             }));
+            persistFrame0ForActiveAccount(epoch);
             break;
           }
           case 'MessageReactions':
@@ -1986,20 +2819,64 @@ export const useChatStore = create<ChatState>((set, get) => {
             }));
             break;
           }
+          case 'UserCreationChanged': {
+            const payload =
+              'data' in event && event.data && typeof event.data === 'object'
+                ? (event.data as unknown as Record<string, unknown>)
+                : (event as unknown as Record<string, unknown>);
+            dispatchDomainEvent('UserCreationChanged', payload);
+            break;
+          }
+          case 'PublicCatalogChanged': {
+            const payload =
+              'data' in event && event.data && typeof event.data === 'object'
+                ? (event.data as unknown as Record<string, unknown>)
+                : (event as unknown as Record<string, unknown>);
+            dispatchDomainEvent('PublicCatalogChanged', payload);
+            break;
+          }
+          case 'community_event': {
+            const payload =
+              'data' in event && event.data && typeof event.data === 'object'
+                ? (event.data as unknown as Record<string, unknown>)
+                : (event as unknown as Record<string, unknown>);
+            dispatchDomainEvent('community_event', payload);
+            break;
+          }
           default:
             break;
         }
       };
 
-      set({ connectionState: adapter.getConnectionState() });
+      const initialConn = adapter.getConnectionState();
+      set({ connectionState: initialConn });
+      if (initialConn === 'connected') {
+        hasConnectedWsOnce = true;
+      }
       const unsubUpdate = adapter.onUpdate((ev) => applyEvent(ev));
       const unsubConn = adapter.onConnectionStateChange((connectionState) => {
+        const prevConn = get().connectionState;
+        const epoch = chatStoreAccountEpoch;
         const accountId = useAuthStore.getState().activeAccountId ?? 'default';
         set({ connectionState });
         void indexedDbCache
           .listOutbox(accountId)
-          .then((items) => set({ pendingOutboxCount: items.length }))
+          .then((items) => {
+            if (epoch === chatStoreAccountEpoch) {
+              set({ pendingOutboxCount: items.length });
+            }
+          })
           .catch(() => undefined);
+
+        if (prevConn !== 'connected' && connectionState === 'connected') {
+          const isReconnect = hasConnectedWsOnce;
+          hasConnectedWsOnce = true;
+          const freshBootstrapInFlight =
+            Date.now() - lastBootstrapStartedAtMs < WS_RECONNECT_DEDUP_WINDOW_MS;
+          if ((isReconnect || !freshBootstrapInFlight) && useAuthStore.getState().isAuthenticated) {
+            void get().bootstrapChats();
+          }
+        }
       });
 
       const unsubBroadcast = broadcastSync.subscribe((payload) => {
@@ -2059,13 +2936,28 @@ export const useChatStore = create<ChatState>((set, get) => {
       return cleanup;
     },
 
-    resetChatStore: () => {
+    resetChatStore: (opts) => {
+      const prevHydratedAcc = get().hydratedAccountId;
       activeSelectSequence += 1;
       globalSearchSequence += 1;
       inChatSearchSequence += 1;
       chatStoreAccountEpoch += 1;
       missingChatSyncPromise = null;
+      inFlightBootstrap = null;
+      lastBootstrapStartedAtMs = 0;
+      hasConnectedWsOnce = false;
+      inFlightPrefetchChatIds.clear();
+      if (!opts?.preserveFrame0) {
+        const accToClear =
+          opts?.targetAccountId !== undefined
+            ? opts.targetAccountId
+            : (prevHydratedAcc ?? useAuthStore.getState().activeAccountId);
+        if (accToClear) {
+          clearFrame0Snapshot(accToClear);
+        }
+      }
       set({
+        hydratedAccountId: null,
         chatsById: {},
         orderedChatIds: [],
         activeChatId: null,
@@ -2102,6 +2994,15 @@ export const useChatStore = create<ChatState>((set, get) => {
         agentFloorByChat: {},
         agentWorkspaceByChat: {},
         lastAgentHandoffByChat: {},
+        scheduledMessagesByChat: {},
+        translatedMessagesByKey: {},
+        translatingMessageKeys: {},
+        translationErrorByKey: {},
+        adminLogByChat: {},
+        callsHistory: [],
+        lastRealtimeDomainEvent: null,
+        isLoadingChats: false,
+        isLoadingMessages: false,
         pendingOutboxCount: 0,
       });
     },

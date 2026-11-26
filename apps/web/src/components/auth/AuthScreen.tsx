@@ -579,7 +579,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ className }) => {
             {t('auth.title', language)}
           </h1>
           <p style={{ margin: 0, fontSize: '13px', color: 'var(--tg-text-secondary)' }}>
-            {t('auth.subtitle', language)} · Fabushi Web v1.6.11
+            {t('auth.subtitle', language)} · Fabushi Web v1.7.0
           </p>
         </div>
 

@@ -268,6 +268,18 @@ export const BurgerMenuDrawer: React.FC<BurgerMenuDrawerProps> = ({
           </button>
 
           <button
+            id="menu-item-calls"
+            data-testid="menu-item-calls"
+            type="button"
+            role="menuitem"
+            onClick={() => openModal('calls_history')}
+            className="tg-context-menu-item"
+          >
+            <span aria-hidden="true">📞</span>
+            <span>{t('menu.callsHistory', language)}</span>
+          </button>
+
+          <button
             id={DOM_IDS.MENU_ITEM_NEW_GROUP}
             type="button"
             role="menuitem"

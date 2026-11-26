@@ -229,7 +229,7 @@ class BrowserControlAgentService {
     const snap = this.captureSnapshot();
     return {
       target_id: this.targetId,
-      title: snap.title || 'Fabushi Web v1.6.11',
+      title: snap.title || 'Fabushi Web v1.7.0',
       url: snap.url || 'http://localhost/',
       viewport: snap.viewport,
       theme: snap.theme,

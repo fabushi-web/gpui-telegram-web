@@ -9,8 +9,13 @@ import { getClientAdapter, getServerAdapter } from '../../adapters';
 import { useAiWorkspaceStore } from '../../store/useAiWorkspaceStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useChatStore } from '../../store/useChatStore';
-import { useSettingsStore } from '../../store/useSettingsStore';
+import {
+  resolveEffectiveTheme,
+  useSettingsStore,
+  type ThemeName,
+} from '../../store/useSettingsStore';
 import { registerUiEscapeHooks, useUiStore } from '../../store/useUiStore';
+import { allowsMiniAppIframeFocus } from '../../utils/coreParityM1B';
 
 export interface MiniAppModalProps {
   isOpen?: boolean;
@@ -44,7 +49,11 @@ function sanitizeSafeButtonHex(rawHex: string | undefined, fallback = '#0A84FF')
 
 function buildThemeParams(theme: string, accentColor: string): MiniAppThemeParams {
   const safeAccent = sanitizeSafeButtonHex(accentColor, '#0A84FF');
-  if (theme === 'day') {
+  const effectiveTheme =
+    theme === 'system' || theme === 'day' || theme === 'classic' || theme === 'night' || theme === 'tinted'
+      ? resolveEffectiveTheme(theme as ThemeName)
+      : 'night';
+  if (effectiveTheme === 'day' || effectiveTheme === 'classic') {
     return {
       bg_color: '#FFFFFF',
       text_color: '#111827',
@@ -56,7 +65,7 @@ function buildThemeParams(theme: string, accentColor: string): MiniAppThemeParam
       header_bg_color: '#FFFFFF',
     };
   }
-  if (theme === 'tinted') {
+  if (effectiveTheme === 'tinted') {
     return {
       bg_color: '#15191E',
       text_color: '#F3F5F8',
@@ -138,11 +147,105 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
   const [bootErrorText, setBootErrorText] = useState<string | null>(null);
   const lastStateSnapshotRef = useRef<Record<string, unknown> | null>(null);
 
+  const activeModal = useUiStore((s) => s.activeModal);
+  const settingsStack = useUiStore((s) => s.settingsStack);
+  const isBurgerOpen = useUiStore((s) => s.isBurgerOpen);
+  const lightboxState = useUiStore((s) => s.lightboxState);
+  const activeCall = useUiStore((s) => s.activeCall);
+  const modalContainerRef = useRef<HTMLDivElement | null>(null);
+
   const hasLiveMiniApp =
     isOpen !== undefined
       ? isOpen
       : miniAppModalOpen || miniAppPipMinimized || Boolean(activeMiniApp);
   const isPipMinimized = isOpen === undefined && miniAppPipMinimized && !miniAppModalOpen;
+  const hasHigherPriorityModal = Boolean(
+    activeModal !== null ||
+      settingsStack.length > 0 ||
+      isBurgerOpen ||
+      lightboxState?.isOpen ||
+      (activeCall.isOpen && !activeCall.isMinimized),
+  );
+  const [searchFocused, setSearchFocused] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (typeof document === 'undefined' || !hasLiveMiniApp) return undefined;
+    const syncSearchFocus = (): void => {
+      const id = document.activeElement?.id ?? '';
+      setSearchFocused(
+        id === DOM_IDS.GLOBAL_SEARCH_INPUT || id === DOM_IDS.IN_CHAT_SEARCH_INPUT,
+      );
+    };
+    document.addEventListener('focusin', syncSearchFocus);
+    document.addEventListener('focusout', syncSearchFocus);
+    syncSearchFocus();
+    return () => {
+      document.removeEventListener('focusin', syncSearchFocus);
+      document.removeEventListener('focusout', syncSearchFocus);
+    };
+  }, [hasLiveMiniApp]);
+
+  const canFocusMiniAppIframe = allowsMiniAppIframeFocus({
+    hasLiveMiniApp,
+    isPipMinimized,
+    isReady,
+    hasHigherPriorityModal,
+    searchFocused,
+  });
+
+  const restoreComposerFocusIfUnoccluded = useCallback(() => {
+    if (typeof document === 'undefined') return;
+    try {
+      iframeRef.current?.blur();
+    } catch {
+      // Ignore blur restriction
+    }
+    window.requestAnimationFrame(() => {
+      const ui = useUiStore.getState();
+      const blocked = Boolean(
+        ui.activeModal !== null ||
+          ui.settingsStack.length > 0 ||
+          ui.isBurgerOpen ||
+          ui.lightboxState?.isOpen,
+      );
+      if (blocked || useChatStore.getState().activeChatId === null) return;
+      const composerEl = document.getElementById(
+        DOM_IDS.MESSAGE_COMPOSER_INPUT,
+      ) as HTMLTextAreaElement | null;
+      composerEl?.focus();
+    });
+  }, []);
+
+  // Apply DOM `inert` on hidden PiP container so iframe & nested controls never steal focus
+  useEffect(() => {
+    const el = modalContainerRef.current as (HTMLDivElement & { inert?: boolean }) | null;
+    if (!el) return;
+    el.inert = isPipMinimized;
+  }, [isPipMinimized, hasLiveMiniApp]);
+
+  // v1.6.12 Focus-steal guard: if iframe steals focus while PiP/occluded, immediately blur & restore composer
+  useEffect(() => {
+    if (typeof window === 'undefined' || !hasLiveMiniApp || canFocusMiniAppIframe) {
+      return undefined;
+    }
+    const preventIframeSteal = (): void => {
+      if (iframeRef.current && document.activeElement === iframeRef.current) {
+        try {
+          iframeRef.current.blur();
+          window.focus();
+        } catch {
+          // Ignore focus restriction
+        }
+        restoreComposerFocusIfUnoccluded();
+      }
+    };
+    window.addEventListener('blur', preventIframeSteal);
+    document.addEventListener('focusin', preventIframeSteal, true);
+    return () => {
+      window.removeEventListener('blur', preventIframeSteal);
+      document.removeEventListener('focusin', preventIframeSteal, true);
+    };
+  }, [hasLiveMiniApp, canFocusMiniAppIframe, restoreComposerFocusIfUnoccluded]);
 
   const handleClose = useCallback(() => {
     setIsExpanded(false);
@@ -154,11 +257,13 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
     setMiniAppPipMinimized(false);
     closeMiniApp();
     onClose?.();
-  }, [closeMiniApp, onClose, setMiniAppPipMinimized]);
+    restoreComposerFocusIfUnoccluded();
+  }, [closeMiniApp, onClose, restoreComposerFocusIfUnoccluded, setMiniAppPipMinimized]);
 
   const handleMinimizeToPip = useCallback(() => {
     minimizeMiniAppToPip();
-  }, [minimizeMiniAppToPip]);
+    restoreComposerFocusIfUnoccluded();
+  }, [minimizeMiniAppToPip, restoreComposerFocusIfUnoccluded]);
 
   const handleRestoreFromPip = useCallback(() => {
     restoreMiniAppFromPip();
@@ -289,14 +394,23 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
     return server.onUpdate((ev) => {
       if (ev.type === 'MiniAppWebMcpCommand') {
         const cmd = ev.data;
-        setControlMode('ai_controlling');
-        setActiveTool(cmd.tool_name || cmd.operation || null);
-        if (cmd.status_message) {
-          setLiveStatusText(cmd.status_message);
-        } else {
+        if (cmd.operation === 'request_takeover') {
+          setControlMode('waiting_for_takeover');
+          setActiveTool(cmd.tool_name || cmd.operation || null);
           setLiveStatusText(
-            `AI running ${cmd.tool_name || cmd.operation} · 正在执行 ${cmd.tool_name || cmd.operation}`,
+            cmd.status_message || 'Waiting for user takeover · 等待用户接管',
           );
+          restoreMiniAppFromPip();
+        } else {
+          setControlMode('ai_controlling');
+          setActiveTool(cmd.tool_name || cmd.operation || null);
+          if (cmd.status_message) {
+            setLiveStatusText(cmd.status_message);
+          } else {
+            setLiveStatusText(
+              `AI running ${cmd.tool_name || cmd.operation} · 正在执行 ${cmd.tool_name || cmd.operation}`,
+            );
+          }
         }
         postToMiniApp('webmcp_command', cmd as unknown as Record<string, unknown>);
       } else if (ev.type === 'MiniAppControlStatus') {
@@ -308,7 +422,7 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
         }
       }
     });
-  }, [hasLiveMiniApp, postToMiniApp]);
+  }, [hasLiveMiniApp, postToMiniApp, restoreMiniAppFromPip]);
 
   // Strict origin + source validated Telegram.WebApp & WebMCP postMessage host bridge
   useEffect(() => {
@@ -590,6 +704,7 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
     <>
       {/* Persistent Modal Container: stays mounted in-place while minimized to PiP so WASM memory & JS sentinels survive 100% */}
       <div
+        ref={modalContainerRef}
         id={DOM_IDS.MINIAPP_MODAL}
         role="dialog"
         aria-modal={isPipMinimized ? undefined : true}
@@ -598,6 +713,7 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
         data-expanded={isExpanded ? 'true' : 'false'}
         data-ready={isReady ? 'true' : 'false'}
         data-pip-minimized={isPipMinimized ? 'true' : 'false'}
+        data-iframe-focusable={canFocusMiniAppIframe ? 'true' : 'false'}
         data-control-mode={controlMode}
         data-rejected-spoofs={rejectedSpoofCount}
         style={modalHiddenForPipStyle}
@@ -768,6 +884,9 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
             id={DOM_IDS.MINIAPP_IFRAME}
             title={appTitle}
             src={effectiveSrc}
+            tabIndex={canFocusMiniAppIframe ? 0 : -1}
+            aria-hidden={isPipMinimized ? true : undefined}
+            style={isPipMinimized ? { pointerEvents: 'none' } : undefined}
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
             onLoad={() => {
               const themeParams = buildThemeParams(theme, accentColor);
@@ -838,9 +957,9 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
           aria-label={`${appTitle} Picture-in-Picture · 画中画`}
           style={{
             position: 'fixed',
-            right: '20px',
+            right: '12px',
             bottom: '20px',
-            width: '320px',
+            width: 'min(320px, calc(100vw - 24px))',
             zIndex: 'var(--tg-z-modal, 850)',
             backgroundColor: 'var(--tg-bg-elevated, #1C1C1E)',
             color: 'var(--tg-text-primary, #F5F5F5)',

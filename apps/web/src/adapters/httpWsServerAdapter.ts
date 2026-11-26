@@ -8,6 +8,7 @@ import {
   mapForumTopicDtoToDomain,
   mapStoryDtoToDomain,
   mapUserDtoToDomain,
+  type AdminLogEventDto,
   type AdapterMode,
   type ArchiveLocalBotReplyRequest,
   type ArchiveLocalBotReplyResponse,
@@ -27,6 +28,7 @@ import {
   type BrowserSnapshotDto,
   type BrowserStateReportPayload,
   type BrowserTargetDescriptor,
+  type CallRecordDto,
   type CallSessionState,
   type CallSignalPayload,
   type ChangePasswordRequest,
@@ -67,6 +69,7 @@ import {
   type HermesStreamEvent,
   type HermesStudioSnapshot,
   type HermesStudioTab,
+  type InlineQueryResponse,
   type InstallAutomationAppResponse,
   type InviteLinkDto,
   type InvoiceCard,
@@ -109,6 +112,7 @@ import {
   type RecordAutomationRunResponse,
   type RemoteAssistConfigDto,
   type RemoteSessionsResponse,
+  type ScheduledMessageDto,
   type SearchHitDto,
   type SearchTabCategory,
   type SendMessagePortInput,
@@ -123,6 +127,7 @@ import {
   type TalkSessionDto,
   type TaskItemDto,
   type TelegramClientPort,
+  type TranslateMessageResponse,
   type TurnCredentialsDto,
   type TwoFactorStatusDto,
   type TypingAction,
@@ -484,9 +489,14 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         (typeof data?.message === 'string' && data.message) ||
         (typeof data?.error === 'string' && data.error) ||
         `HTTP ${res.status}`;
-      const err = new Error(errMsg) as Error & { status?: number; code?: string };
+      const err = new Error(errMsg) as Error & {
+        status?: number;
+        code?: string;
+        details?: Record<string, unknown>;
+      };
       err.status = res.status;
       if (typeof data?.error === 'string') err.code = data.error;
+      err.details = data;
       throw err;
     }
 
@@ -681,7 +691,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
           if (typeof ev.data !== 'string') return;
           try {
             const frame = JSON.parse(ev.data) as WsServerFrame;
-            void this.handleServerWsFrame(frame, epoch);
+            void this.handleServerWsFrame(frame, epoch).catch(() => undefined);
           } catch {
             // Ignore malformed frame
           }
@@ -777,52 +787,79 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
   private async handleServerWsFrame(frame: WsServerFrame, epoch: number): Promise<void> {
     if (epoch !== this.accountEpoch) return;
+    if (
+      !frame ||
+      typeof frame !== 'object' ||
+      typeof (frame as { type?: unknown }).type !== 'string'
+    ) {
+      return;
+    }
+    const isObj = (v: unknown): v is Record<string, unknown> =>
+      Boolean(v && typeof v === 'object');
+
     switch (frame.type) {
       case 'AuthOk': {
+        if (!isObj(frame.payload) || typeof frame.payload.user_id !== 'number') break;
         this.currentUserId = frame.payload.user_id;
         break;
       }
       case 'AuthError': {
+        if (!isObj(frame.payload)) break;
         this.emitAuthInvalidated(frame.payload.reason || 'auth_error');
         break;
       }
       case 'Error': {
+        if (!isObj(frame.payload)) break;
         if (frame.payload.code === 401) {
           this.emitAuthInvalidated(frame.payload.message || 'unauthorized');
         }
         break;
       }
       case 'BrowserRegistered': {
+        if (!isObj(frame.payload)) break;
         browserControlAgent.setTargetId(frame.payload.target_id);
         browserControlAgent.setControlGeneration(frame.payload.control_generation);
         break;
       }
       case 'BrowserCommand': {
+        if (!isObj(frame.payload)) break;
         await browserControlAgent.handleIncomingWsCommand(frame.payload);
         break;
       }
       case 'BrowserControlRevoked': {
+        if (!isObj(frame.payload)) break;
         browserControlAgent.setControlGeneration(frame.payload.control_generation);
         break;
       }
       case 'Ack':
       case 'SendAck': {
+        if (!isObj(frame.payload) || frame.payload.client_nonce === undefined) break;
         await indexedDbCache.removeOutbox(this.accountId, frame.payload.client_nonce);
         break;
       }
       case 'PtsUpdate':
       case 'PtsPush': {
+        if (
+          !isObj(frame.payload) ||
+          typeof frame.payload.chat_id !== 'number' ||
+          !Number.isFinite(frame.payload.chat_id)
+        ) {
+          break;
+        }
         const ptsUpd = frame.payload;
         const chatId = ptsUpd.chat_id;
+        const hasValidPts = typeof ptsUpd.pts === 'number' && Number.isFinite(ptsUpd.pts);
         const localPts = this.chatPtsMap.get(chatId);
-        if (localPts !== undefined) {
+        if (hasValidPts && localPts !== undefined) {
           const gap = detectPtsGap(ptsUpd, localPts);
           if (gap) {
             this.setConnectionState('updating');
             try {
               const diff = await this.getDifference({ chat_id: chatId, from_pts: localPts });
               if (epoch !== this.accountEpoch) return;
-              this.chatPtsMap.set(chatId, diff.current_pts);
+              if (typeof diff.current_pts === 'number' && Number.isFinite(diff.current_pts)) {
+                this.chatPtsMap.set(chatId, diff.current_pts);
+              }
               for (const m of diff.new_messages ?? []) {
                 this.emitUpdate({ type: 'NewMessage', data: enrichMessageItem(m) }, ptsUpd);
               }
@@ -839,17 +876,35 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
             return;
           }
         }
-        this.chatPtsMap.set(chatId, ptsUpd.pts);
-        void indexedDbCache.setPtsCursor(this.accountId, ptsUpd.pts, String(chatId));
-        this.emitUpdate(ptsUpd.event, ptsUpd);
+        if (hasValidPts) {
+          this.chatPtsMap.set(chatId, ptsUpd.pts);
+          void indexedDbCache.setPtsCursor(this.accountId, ptsUpd.pts, String(chatId));
+        }
+        if (isObj(ptsUpd.event) && typeof (ptsUpd.event as { type?: unknown }).type === 'string') {
+          this.emitUpdate(ptsUpd.event, ptsUpd);
+        }
         break;
       }
       case 'Update': {
-        this.emitUpdate(frame.payload);
+        if (
+          isObj(frame.payload) &&
+          typeof (frame.payload as { type?: unknown }).type === 'string'
+        ) {
+          this.emitUpdate(frame.payload);
+        }
         break;
       }
-      default:
+      default: {
+        const rawType = (frame as { type?: string }).type;
+        if (
+          rawType === 'UserCreationChanged' ||
+          rawType === 'PublicCatalogChanged' ||
+          rawType === 'community_event'
+        ) {
+          this.emitUpdate(frame as unknown as UpdateEvent);
+        }
         break;
+      }
     }
   }
 
@@ -876,13 +931,15 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
             delivery_status: 'sent',
           });
           this.emitUpdate({ type: 'NewMessage', data: enriched });
-          broadcastSync.publish({
-            kind: 'message_upsert',
-            accountId: targetAccountId,
-            chatId: item.chatId,
-            message: enriched,
-            pts: res.pts,
-          });
+          if (!enriched.flags?.is_scheduled) {
+            broadcastSync.publish({
+              kind: 'message_upsert',
+              accountId: targetAccountId,
+              chatId: item.chatId,
+              message: enriched,
+              pts: res.pts,
+            });
+          }
         } catch (err) {
           const status = (err as { status?: number } | null)?.status;
           if (typeof status === 'number' && status >= 400 && status < 500) {
@@ -974,7 +1031,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   public async loginDemo(_slot = 0): Promise<AuthResponse> {
-    throw new Error('Demo login has been removed in Fabushi Web v1.6.11');
+    throw new Error('Demo login has been removed in Fabushi Web v1.7.0');
   }
 
   public async getKdfParams(usernameOrEmail: string): Promise<KdfParamsResponse> {
@@ -1944,11 +2001,13 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
         ? { reply_to_msg_id: req.replyToMsgId, quote_text: req.quoteText }
         : undefined,
       reply_to_id: req.replyToMsgId,
+      reply_to_msg_id: req.replyToMsgId,
       quote_text: req.quoteText,
       topic_id: req.topicId,
       client_nonce: req.clientNonce,
       silent: req.silent,
       schedule_at_ms: req.scheduleAtMs,
+      scheduled_at_ms: req.scheduleAtMs,
       ttl_seconds: req.ttlSeconds,
       send_as_peer_id: req.sendAsPeerId,
       skip_server_bot_reply: req.skipServerBotReply,
@@ -1977,21 +2036,50 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       text: res.text ?? req.text ?? '',
       entities: req.entities ?? [],
       content: req.content ?? createTextContent(res.text ?? req.text ?? '', req.entities),
+      reply_to: req.replyToMsgId
+        ? { reply_to_msg_id: req.replyToMsgId, quote_text: req.quoteText }
+        : undefined,
+      scheduled_at_ms: req.scheduleAtMs ?? null,
       reactions: [],
       client_nonce: req.clientNonce,
     };
 
     const enriched = enrichMessageItem({
       ...baseMsg,
+      reply_to:
+        baseMsg.reply_to ??
+        (req.replyToMsgId
+          ? { reply_to_msg_id: req.replyToMsgId, quote_text: req.quoteText }
+          : undefined),
+      scheduled_at_ms: baseMsg.scheduled_at_ms ?? req.scheduleAtMs ?? null,
       client_nonce: req.clientNonce ?? baseMsg.client_nonce,
       delivery_status: 'sent',
     });
-    this.chatPtsMap.set(req.chatId, Number(res.pts ?? 0));
+    if (!enriched.flags?.is_scheduled) {
+      this.chatPtsMap.set(req.chatId, Number(res.pts ?? 0));
+    }
     return {
       message: enriched,
       pts: Number(res.pts ?? 0),
       duplicate: res.duplicate,
     };
+  }
+
+  public sendMessageOverWs(req: SendMessagePortInput): void {
+    const clientNonce = req.clientNonce ?? generateNumericClientNonce();
+    this.sendWsFrame({
+      type: 'SendMessage',
+      payload: {
+        chat_id: req.chatId,
+        text: req.text ?? '',
+        topic_id: req.topicId,
+        reply_to: req.replyToMsgId,
+        quote_text: req.quoteText,
+        silent: req.silent,
+        scheduled_at_ms: req.scheduleAtMs,
+        client_nonce: clientNonce,
+      },
+    });
   }
 
   public async sendMessage(
@@ -2005,13 +2093,15 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
     try {
       const sent = await this.sendMessageOverHttp(normalizedReq);
-      broadcastSync.publish({
-        kind: 'message_upsert',
-        accountId: this.accountId,
-        chatId: req.chatId,
-        message: sent.message,
-        pts: sent.pts,
-      });
+      if (!sent.message.flags?.is_scheduled) {
+        broadcastSync.publish({
+          kind: 'message_upsert',
+          accountId: this.accountId,
+          chatId: req.chatId,
+          message: sent.message,
+          pts: sent.pts,
+        });
+      }
       return sent;
     } catch (err) {
       const status = (err as { status?: number } | null)?.status;
@@ -2050,6 +2140,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       reply_to: req.replyToMsgId
         ? { reply_to_msg_id: req.replyToMsgId, quote_text: req.quoteText }
         : undefined,
+      scheduled_at_ms: req.scheduleAtMs ?? null,
       reactions: [],
       client_nonce: clientNonce,
       ttl_seconds: req.ttlSeconds,
@@ -3622,7 +3713,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   }
 
   // ==========================================================================
-  // v1.6.11 Split-Key V2 Vault, X25519 Device Sync, Fabushi Bots, Automation Apps,
+  // v1.7.0 Split-Key V2 Vault, X25519 Device Sync, Fabushi Bots, Automation Apps,
   // Coding Agents, UU-Parity Remote Assist, TURN, Official OAuth MCP & Multi-Agent
   // ==========================================================================
 
@@ -3990,5 +4081,149 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     loop_hops: number;
   }> {
     return this.requestJson('GET', `/api/v1/chats/${chatId}/floor`);
+  }
+
+  // ==========================================================================
+  // v1.7.0 M1A Core Parity Optional TelegramClientPort Methods
+  // ==========================================================================
+
+  public async queryBotInline(req: {
+    bot: string;
+    query: string;
+    chatId?: number;
+    offset?: string;
+    limit?: number;
+    queryId?: string;
+  }): Promise<InlineQueryResponse> {
+    const qs = new URLSearchParams();
+    qs.set('bot', req.bot.replace(/^@/, ''));
+    qs.set('query', req.query);
+    if (req.chatId !== undefined) qs.set('chat_id', String(req.chatId));
+    if (req.offset !== undefined && req.offset !== '') qs.set('offset', req.offset);
+    if (req.limit !== undefined) qs.set('limit', String(req.limit));
+    if (req.queryId !== undefined && req.queryId !== '') qs.set('query_id', req.queryId);
+
+    const res = await this.requestJson<InlineQueryResponse>(
+      'GET',
+      `/api/v1/bots/inline-query?${qs.toString()}`,
+    );
+    const results = res.results ?? res.items ?? [];
+    return {
+      ...res,
+      results,
+      items: res.items ?? results,
+      total: Number(res.total ?? results.length),
+    };
+  }
+
+  public async listScheduledMessages(chatId: number): Promise<ScheduledMessageDto[]> {
+    const res = await this.requestJson<{
+      chat_id?: number;
+      scheduled?: ScheduledMessageDto[];
+      messages?: MessageItem[];
+      total?: number;
+    }>('GET', `/api/v1/chats/${chatId}/scheduled`);
+    const list = res.scheduled ?? [];
+    return list.map((item) => ({
+      ...item,
+      message: item.message ? enrichMessageItem(item.message) : undefined,
+    }));
+  }
+
+  public async cancelScheduledMessage(
+    chatId: number,
+    messageId: number,
+  ): Promise<{ ok: boolean }> {
+    const res = await this.requestJson<{ ok?: boolean }>(
+      'DELETE',
+      `/api/v1/chats/${chatId}/scheduled/${messageId}`,
+    );
+    return { ok: Boolean(res.ok ?? true) };
+  }
+
+  public async sendScheduledMessageNow(
+    chatId: number,
+    messageId: number,
+  ): Promise<{ message: MessageItem; pts: number }> {
+    const res = await this.requestJson<{
+      ok?: boolean;
+      message: MessageItem;
+      pts?: number;
+    }>('POST', `/api/v1/chats/${chatId}/scheduled/${messageId}/send-now`, {});
+    const enriched = enrichMessageItem({
+      ...res.message,
+      flags: {
+        ...res.message.flags,
+        is_scheduled: false,
+      },
+      scheduled_at_ms: null,
+      delivery_status: 'sent',
+    });
+    const pts = Number(res.pts ?? 0);
+    if (pts > 0) {
+      this.chatPtsMap.set(chatId, pts);
+    }
+    broadcastSync.publish({
+      kind: 'message_upsert',
+      accountId: this.accountId,
+      chatId,
+      message: enriched,
+      pts,
+    });
+    return { message: enriched, pts };
+  }
+
+  public async translateMessage(
+    chatId: number,
+    messageId: number,
+    targetLang: string,
+  ): Promise<TranslateMessageResponse> {
+    return this.requestJson<TranslateMessageResponse>(
+      'POST',
+      `/api/v1/chats/${chatId}/messages/${messageId}/translate`,
+      { target_lang: targetLang },
+    );
+  }
+
+  public async listAdminLog(
+    chatId: number,
+    opts?: { limit?: number; beforeId?: number; action?: string; actorId?: number },
+  ): Promise<{ chat_id: number; events: AdminLogEventDto[]; total: number }> {
+    const qs = new URLSearchParams();
+    if (opts?.limit !== undefined) qs.set('limit', String(opts.limit));
+    if (opts?.beforeId !== undefined) qs.set('before_id', String(opts.beforeId));
+    if (opts?.action) qs.set('action', opts.action);
+    if (opts?.actorId !== undefined) qs.set('actor_id', String(opts.actorId));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await this.requestJson<{
+      chat_id?: number;
+      events?: AdminLogEventDto[];
+      total?: number;
+    }>('GET', `/api/v1/chats/${chatId}/admin-log${suffix}`);
+    const events = res.events ?? [];
+    return {
+      chat_id: Number(res.chat_id ?? chatId),
+      events,
+      total: Number(res.total ?? events.length),
+    };
+  }
+
+  public async listCallsHistory(opts?: {
+    limit?: number;
+    filter?: 'all' | 'missed' | 'video';
+  }): Promise<{ calls: CallRecordDto[]; total: number }> {
+    const qs = new URLSearchParams();
+    if (opts?.limit !== undefined) qs.set('limit', String(opts.limit));
+    if (opts?.filter) qs.set('filter', opts.filter);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await this.requestJson<{
+      calls?: CallRecordDto[];
+      total?: number;
+    }>('GET', `/api/v1/calls/history${suffix}`);
+    const calls = res.calls ?? [];
+    return {
+      calls,
+      total: Number(res.total ?? calls.length),
+    };
   }
 }

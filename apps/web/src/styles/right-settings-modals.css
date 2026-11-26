@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Fabushi Web v1.6.11 — Right Inspector, Settings Stack, Modals, Media,
+   Fabushi Web v1.7.0 — Right Inspector, Settings Stack, Modals, MiniApps, Media,
    Calls, Context Menus & Shared Workspace Helpers (right-settings-modals.css)
    ========================================================================== */
 
@@ -234,4 +234,38 @@
   background-color: var(--tg-info-soft);
   font-size: 12.5px;
   color: var(--tg-text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   MiniApp Host Sheet & Persistent Iframe (#miniapp-modal, .tg-miniapp-sheet)
+   Zero dark drop shadow (`--tg-shadow-lg: none` on night/tinted), z-index 260
+   -------------------------------------------------------------------------- */
+#miniapp-modal {
+  position: fixed;
+  inset: 0;
+  z-index: var(--tg-z-miniapp, 260);
+  background-color: var(--tg-bg-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.tg-miniapp-sheet {
+  width: min(520px, 96vw);
+  height: min(740px, 90dvh);
+  background-color: var(--tg-bg-surface);
+  border: 1px solid var(--tg-hairline-border);
+  border-radius: var(--tg-radius-lg);
+  box-shadow: inset 0 1px 0 var(--tg-specular-top), var(--tg-shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#miniapp-iframe {
+  flex: 1 1 auto;
+  width: 100%;
+  border: none;
+  background-color: var(--tg-bg-app);
 }
