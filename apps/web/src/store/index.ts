@@ -1,5 +1,5 @@
 import { browserControlAgent } from '../services/browserControlAgent';
-import { registerAccountActivatedHook, useAuthStore } from './useAuthStore';
+import { registerAccountActivatedHook, registerAuthClearedHook, useAuthStore } from './useAuthStore';
 import { useAiWorkspaceStore } from './useAiWorkspaceStore';
 import { useChatStore } from './useChatStore';
 import { useSettingsStore, type ThemeName } from './useSettingsStore';
@@ -11,6 +11,21 @@ export * from './useUiStore';
 export * from './useChatStore';
 export * from './useAiWorkspaceStore';
 
+// Wire complete multi-tenant cleanup on logout / account switch / deletion / session invalidation (F-03)
+registerAuthClearedHook(() => {
+  browserControlAgent.resetForAccountChange();
+  useAiWorkspaceStore.getState().resetAiWorkspaceStore();
+  useUiStore.getState().resetUiStore();
+  useChatStore.getState().resetChatStore();
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem('gpui_tg_active_chat_id');
+    }
+  } catch {
+    // Ignore storage error
+  }
+});
+
 // Wire account activation to auto-bootstrap chats, realtime WS sync, and AI workspaces
 registerAccountActivatedHook(() => {
   const chatStore = useChatStore.getState();
@@ -18,6 +33,16 @@ registerAccountActivatedHook(() => {
   chatStore.bindRealtimeEvents();
   void chatStore.bootstrapChats();
   void useAiWorkspaceStore.getState().bootstrapWorkspaces();
+});
+
+// Dismiss sensitive overlays (Settings, Burger Drawer, Modals) when locking the app
+useAuthStore.subscribe((state, prev) => {
+  if (state.isLocked && !prev.isLocked) {
+    const ui = useUiStore.getState();
+    ui.closeSettings();
+    ui.setBurgerOpen(false);
+    ui.closeModal();
+  }
 });
 
 // Wire 7-Layer Escape stack hooks between UI store, Chat store, and MiniApp runtime

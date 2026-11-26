@@ -1392,7 +1392,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ className }) => {
                       pushToast('Local passcode enabled', 'success');
                     }}
                   >
-                    {isZh ? '设置密码' : 'Set Passcode'}
+                    {isZh ? '保存密码' : 'Save Passcode'}
                   </button>
                 </div>
                 {passcodeHash && (

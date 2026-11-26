@@ -175,7 +175,7 @@ export const CreateTodoModal: React.FC<CreateTodoModalProps> = ({ onClose }) => 
                   style={{ alignSelf: 'flex-start', padding: '5px 12px', fontSize: '12.5px' }}
                   onClick={handleAddItem}
                 >
-                  + {t('todo.addItem', language)}
+                  {isZh ? '+ 更多事项' : '+ Another Item'}
                 </button>
               )}
             </div>

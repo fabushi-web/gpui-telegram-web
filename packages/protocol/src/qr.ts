@@ -48,16 +48,28 @@ export function renderQrCodeSvg(
   const { size, modules } = encodeQrMatrix(payload, opts.ecLevel ?? 'Q');
   const viewDim = size + quietZone * 2;
 
-  const rects: string[] = [];
+  const rowPaths: string[] = [];
   for (let r = 0; r < size; r += 1) {
     const row = modules[r]!;
-    for (let c = 0; c < size; c += 1) {
-      if (row[c]) {
-        rects.push(`M${c + quietZone},${r + quietZone}h1v1h-1z`);
+    let d = '';
+    let c = 0;
+    while (c < size) {
+      if (!row[c]) {
+        c += 1;
+        continue;
       }
+      const start = c;
+      while (c < size && row[c]) {
+        c += 1;
+      }
+      const runWidth = c - start;
+      d += `M${start + quietZone},${r + quietZone}h${runWidth}v1h-${runWidth}z`;
+    }
+    if (d) {
+      rowPaths.push(`<path d="${d}" fill="${foreground}"/>`);
     }
   }
 
   const safeLabel = escapeHtml(payload || 'QR Code');
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${viewDim} ${viewDim}" width="${sizePx}" height="${sizePx}" role="img" aria-label="QR Code for ${safeLabel}" shape-rendering="crispEdges"><rect width="100%" height="100%" rx="2" fill="${background}"/><path d="${rects.join('')}" fill="${foreground}"/></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${viewDim} ${viewDim}" width="${sizePx}" height="${sizePx}" role="img" aria-label="QR Code for ${safeLabel}" shape-rendering="crispEdges"><rect width="100%" height="100%" rx="2" fill="${background}"/>${rowPaths.join('')}</svg>`;
 }

@@ -96,7 +96,7 @@ export const DOM = {
   chatList: '#chat-list',
   chatRow: '[data-testid="chat-row"]',
   forumTopicList: '#forum-topic-list',
-  forumTopicItem: '#forum-topic-list [data-topic-id]',
+  forumTopicItem: '[data-topic-id]',
   btnNewChatFab: '#btn-new-chat-fab',
   navRail: '#nav-rail',
   navDestChats: '#nav-dest-chats',

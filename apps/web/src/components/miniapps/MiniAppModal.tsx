@@ -208,9 +208,39 @@ export function MiniAppModal({ isOpen, onClose }: MiniAppModalProps = {}): React
     if (effectiveApiBase && !hashParams.has('api_base')) {
       hashParams.set('api_base', effectiveApiBase);
     }
-    if (authToken && !hashParams.has('auth_token')) {
-      hashParams.set('auth_token', authToken);
+    if (typeof window !== 'undefined' && window.location.origin && window.location.origin !== 'null') {
+      if (!hashParams.has('tgWebAppHostOrigin')) {
+        hashParams.set('tgWebAppHostOrigin', window.location.origin);
+      }
     }
+
+    // STRICT SECURITY INVARIANT (F-02): Never leak the user's master session Bearer token (`auth_token`)
+    // into cross-origin or third-party MiniApp iframes. External MiniApps must authenticate strictly
+    // via bot-scoped HMAC-SHA256 `tgWebAppData`.
+    let isTrustedFirstPartyMiniApp = false;
+    if (typeof window !== 'undefined') {
+      try {
+        const resolvedUrl = new URL(beforeHash, window.location.origin);
+        const trustedBackendOrigin = effectiveApiBase
+          ? new URL(effectiveApiBase, window.location.origin).origin
+          : window.location.origin;
+        const isAllowedOrigin =
+          resolvedUrl.origin === trustedBackendOrigin ||
+          resolvedUrl.origin === window.location.origin;
+        const normalizedPath = resolvedUrl.pathname.replace(/\/+/g, '/');
+        const isFirstPartyHostedPath =
+          /(?:^|\/)miniapps\/(?:fabushi-globe|FabushiBot)(?:\/|$)/.test(normalizedPath);
+        isTrustedFirstPartyMiniApp = isAllowedOrigin && isFirstPartyHostedPath;
+      } catch {
+        isTrustedFirstPartyMiniApp = false;
+      }
+    }
+    if (isTrustedFirstPartyMiniApp && authToken && !hashParams.has('auth_token')) {
+      hashParams.set('auth_token', authToken);
+    } else if (!isTrustedFirstPartyMiniApp && hashParams.has('auth_token')) {
+      hashParams.delete('auth_token');
+    }
+
     const nextHash = hashParams.toString();
     return nextHash ? `${beforeHash}#${nextHash}` : beforeHash;
   }, [activeMiniApp?.launch_url, activeMiniApp?.init_data, serverUrl, authToken]);

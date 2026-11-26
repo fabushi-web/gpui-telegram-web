@@ -299,6 +299,10 @@
   animation: tgFadeIn var(--tg-duration-fast) ease;
 }
 
+#btn-back-to-chats {
+  display: none;
+}
+
 /* Tier 2: 926px - 1275px -> 2-column docked + Right Column Slide-Over */
 @media (max-width: 1275px) and (min-width: 926px) {
   #left-column,

@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CODING_PERMISSION_MODES,
   CODING_PROVIDER_KINDS,
   CODING_PROVIDER_META,
   DOM_IDS,
   HERMES_TOOLSET_IDS,
+  ImeSafetyFsm,
   type CodingPermissionMode,
   type CodingProviderKind,
   type HermesKanbanCardDto,
@@ -94,6 +95,7 @@ export function HermesStudioPanel({
 
   // Prompt & Session console
   const [promptInput, setPromptInput] = useState('');
+  const hermesImeFsmRef = useRef<ImeSafetyFsm>(new ImeSafetyFsm({ sendByEnter: true }));
   const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [newSessionTitle, setNewSessionTitle] = useState('');
 
@@ -370,8 +372,46 @@ export function HermesStudioPanel({
                     rows={3}
                     value={promptInput}
                     onChange={(e) => setPromptInput(e.target.value)}
+                    onCompositionStart={(e) => hermesImeFsmRef.current.onCompositionStart(e.data)}
+                    onCompositionUpdate={(e) => hermesImeFsmRef.current.onCompositionUpdate(e.data)}
+                    onCompositionEnd={(e) => {
+                      hermesImeFsmRef.current.onCompositionEnd(e.data);
+                      window.requestAnimationFrame(() => {
+                        window.requestAnimationFrame(() => {
+                          hermesImeFsmRef.current.resetCommitFence();
+                        });
+                      });
+                    }}
+                    onBlur={() => hermesImeFsmRef.current.onCompositionCancel()}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
+                      if (e.key !== 'Enter') return;
+                      const rawKeyCode = e.nativeEvent.keyCode || e.keyCode;
+                      if (e.nativeEvent.isComposing || rawKeyCode === 229) {
+                        hermesImeFsmRef.current.handleKeyDown(
+                          {
+                            key: e.key,
+                            keyCode: rawKeyCode,
+                            shiftKey: e.shiftKey,
+                            ctrlKey: e.ctrlKey,
+                            metaKey: e.metaKey,
+                            isComposing: e.nativeEvent.isComposing,
+                          },
+                          { text: promptInput, sendByEnter: true },
+                        );
+                        return;
+                      }
+                      const action = hermesImeFsmRef.current.handleKeyDown(
+                        {
+                          key: e.key,
+                          keyCode: rawKeyCode,
+                          shiftKey: e.shiftKey,
+                          ctrlKey: e.ctrlKey,
+                          metaKey: e.metaKey,
+                          isComposing: e.nativeEvent.isComposing,
+                        },
+                        { text: promptInput, sendByEnter: true },
+                      );
+                      if (action === 'SendMessage') {
                         e.preventDefault();
                         void handleSubmitPrompt();
                       }

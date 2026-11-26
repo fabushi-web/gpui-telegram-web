@@ -260,6 +260,29 @@ describe('@gpui-telegram/protocol — UTF-16 MessageEntity & Markdown Parser/Ser
     expect(roundTrip).toContain('```rust\nfn main() { println!("**literal** @nobody"); }\n```');
   });
 
+  it('preserves intra-word and member-access __ verbatim while still parsing valid __underline__ and nested **__...__**', () => {
+    const xssPayload =
+      '<img src=x onerror="window.__xss=1"><svg onload="window.__xss=2">[click](javascript:window.__xss=3) 🚀 **AstralBold**';
+    const parsed = parseMarkdownEntities(xssPayload);
+    expect(parsed.text).toBe(
+      '<img src=x onerror="window.__xss=1"><svg onload="window.__xss=2">[click](javascript:window.__xss=3) 🚀 AstralBold',
+    );
+    expect(parsed.entities.filter((e) => e.type === 'underline')).toEqual([]);
+    expect(parsed.entities.filter((e) => e.type === 'italic')).toEqual([]);
+    const bold = parsed.entities.find((e) => e.type === 'bold');
+    expect(bold).toBeDefined();
+    expect(extractEntityUtf16(parsed.text, bold!)).toBe('AstralBold');
+
+    const identParsed = parseMarkdownEntities('foo__bar__baz window.__proto__ and __under__');
+    expect(identParsed.text).toBe('foo__bar__baz window.__proto__ and under');
+    const underlines = identParsed.entities.filter((e) => e.type === 'underline');
+    expect(underlines.map((e) => extractEntityUtf16(identParsed.text, e))).toEqual(['under']);
+
+    const nestedParsed = parseMarkdownEntities('**__粗体加下划线🚀__**');
+    expect(nestedParsed.text).toBe('粗体加下划线🚀');
+    expect(nestedParsed.entities.map((e) => e.type).sort()).toEqual(['bold', 'underline']);
+  });
+
   it('enforces XSS-safe HTML escaping, blocks attribute breakouts in timestamp/custom_emoji, and tolerates malformed wire entities', () => {
     expect(isSafeEntityUrl('https://telegram.org')).toBe(true);
     expect(isSafeEntityUrl('tg://resolve?domain=BotFather')).toBe(true);

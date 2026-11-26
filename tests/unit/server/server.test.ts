@@ -187,8 +187,9 @@ describe('@gpui-telegram/server — Full-Stack Integration & Adversarial Securit
     const lockStep1 = await apiJson(baseUrl, 'POST', '/api/v1/auth/login', {
       body: { username: alice.username, password: alice.password },
     });
-    expect(lockStep1.status).toBe(403);
+    expect(lockStep1.status).toBe(200);
     expect(lockStep1.data.requires_2fa).toBe(true);
+    expect(lockStep1.data.token).toBeUndefined();
 
     for (let attempt = 1; attempt <= 4; attempt++) {
       const wrong = await apiJson(baseUrl, 'POST', '/api/v1/auth/2fa/verify', {
@@ -205,7 +206,9 @@ describe('@gpui-telegram/server — Full-Stack Integration & Adversarial Securit
     const aliceStep1 = await apiJson(baseUrl, 'POST', '/api/v1/auth/login', {
       body: { username: alice.username, password: alice.password },
     });
-    expect(aliceStep1.status).toBe(403);
+    expect(aliceStep1.status).toBe(200);
+    expect(aliceStep1.data.requires_2fa).toBe(true);
+    expect(aliceStep1.data.token).toBeUndefined();
     const ok2fa = await apiJson(baseUrl, 'POST', '/api/v1/auth/2fa/verify', {
       body: { challenge_token: aliceStep1.data.challenge_token, password: 'Alice2FA!Password' },
     });

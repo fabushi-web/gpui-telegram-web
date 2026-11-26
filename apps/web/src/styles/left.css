@@ -95,6 +95,7 @@
   position: relative;
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 6px;
   padding: 7px 10px 9px;
   font-size: 13px;

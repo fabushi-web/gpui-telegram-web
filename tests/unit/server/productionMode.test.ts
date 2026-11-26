@@ -275,7 +275,7 @@ describe('@gpui-telegram/server — Clean Production Mode (Zero Fake Data, v1.6.
       token,
       body: { message_id: 0, callback_data: 'unknown:noop' },
     });
-    expect(unknownCb.status).toBe(404);
+    expect(unknownCb.status).toBe(422);
     expect(JSON.stringify(unknownCb.data)).not.toContain('Callback "unknown:noop" received');
 
     const statsRes = await apiJson(

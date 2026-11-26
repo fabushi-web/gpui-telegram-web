@@ -110,17 +110,9 @@ export function setReactCompatibleFormValue(
   element.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
 }
 
-function escapeXml(str: string): string {
-  return str
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
-}
-
 class BrowserControlAgentService {
   private targetId = `tab_${Math.random().toString(36).slice(2, 10)}`;
-  private allowDesktopControl = true;
+  private allowDesktopControl = false;
   private isRemoteActive = false;
   private controlGeneration = 1;
   private auditLogs: LocalBrowserAuditEntry[] = [];
@@ -267,9 +259,9 @@ class BrowserControlAgentService {
     if (!rawPayload || typeof rawPayload !== 'object') return null;
     const cmd = rawPayload as BrowserCommandInput & { generation?: number };
     if (!cmd.action) return null;
-    if (typeof cmd.generation === 'number' && cmd.generation > this.controlGeneration) {
-      this.controlGeneration = cmd.generation;
-    }
+    // STRICT SECURITY INVARIANT (F-10): Never allow an inbound WS command to advance
+    // the local controlGeneration; only local emergencyTakeover(), setAllowDesktopControl(false),
+    // account change, or server BrowserControlRevoked may advance the generation fence.
     const result = await this.executeCommand(cmd, 'ws');
     this.wsReplySender?.(result);
     return result;
@@ -281,6 +273,14 @@ class BrowserControlAgentService {
       this.isRemoteActive = false;
       this.controlGeneration += 1;
     }
+    this.notify();
+  }
+
+  public resetForAccountChange(): void {
+    this.allowDesktopControl = false;
+    this.isRemoteActive = false;
+    this.controlGeneration += 1;
+    this.auditLogs = [];
     this.notify();
   }
 
@@ -490,46 +490,6 @@ class BrowserControlAgentService {
     return null;
   }
 
-  private renderViewportScreenshotDataUrl(snap: BrowserSnapshotDto): string {
-    const w = Math.max(320, Math.min(1440, snap.viewport.width || 1280));
-    const h = Math.max(240, Math.min(900, snap.viewport.height || 720));
-    const isDark = snap.theme === 'night' || snap.theme === 'tinted';
-    const bg = isDark ? '#0E1621' : '#F1F3F5';
-    const surface = isDark ? '#17212B' : '#FFFFFF';
-    const border = isDark ? '#242F3D' : '#CBD5E1';
-    const fg = isDark ? '#F5F5F5' : '#111827';
-
-    const boxesSvg = snap.elements
-      .slice(0, 48)
-      .map((el) => {
-        const rect = el.rect ?? { x: 0, y: 0, width: 60, height: 24 };
-        const rx = Math.max(0, Math.min(w - 4, rect.x));
-        const ry = Math.max(0, Math.min(h - 4, rect.y));
-        const rw = Math.max(8, Math.min(w - rx, rect.width));
-        const rh = Math.max(8, Math.min(h - ry, rect.height));
-        const safeChars = Array.from(el.text || el.id || el.ref).slice(0, 26).join('');
-        const label = escapeXml(safeChars);
-        return `<g>
-          <rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" rx="6" fill="${surface}" stroke="${border}" stroke-width="1" />
-          <text x="${rx + 6}" y="${ry + Math.min(16, rh - 3)}" fill="#3390EC" font-family="monospace" font-size="10">[${escapeXml(el.ref)}] ${label}</text>
-        </g>`;
-      })
-      .join('');
-
-    const rawSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-      <rect width="100%" height="100%" fill="${bg}" />
-      ${boxesSvg}
-      <rect x="12" y="${h - 34}" width="${Math.min(540, w - 24)}" height="24" rx="6" fill="${surface}" stroke="#3390EC" />
-      <text x="20" y="${h - 18}" fill="${fg}" font-family="sans-serif" font-size="11">Fabushi Browser Snapshot · Theme=${escapeXml(snap.theme || 'night')} · Refs=${snap.elements.length}</text>
-    </svg>`;
-
-    const wellFormedSvg = rawSvg.replace(
-      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
-      '\uFFFD',
-    );
-    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(wellFormedSvg)}`;
-  }
-
   public async executeCommand(
     cmd: BrowserCommandInput,
     source: LocalBrowserAuditEntry['source'] = 'window',
@@ -569,7 +529,7 @@ class BrowserControlAgentService {
 
     try {
       let data: Record<string, unknown> | undefined;
-      let screenshotDataUrl: string | undefined;
+      const screenshotDataUrl: string | undefined = undefined;
 
       switch (cmd.action) {
         case 'snapshot': {
@@ -698,10 +658,11 @@ class BrowserControlAgentService {
         }
 
         case 'screenshot': {
-          const snap = this.captureSnapshot();
-          screenshotDataUrl = this.renderViewportScreenshotDataUrl(snap);
-          data = { width: snap.viewport.width, height: snap.viewport.height };
-          break;
+          // ZERO FAKE DATA INVARIANT (F-10): Never synthesize fake SVG wireframe screenshots.
+          // Callers requiring real raster screenshots must use Chromium CDP (/api/v1/browser/headless/:id/screenshot).
+          throw new Error(
+            'Synthetic viewport wireframes are disabled; use real Chromium CDP /api/v1/browser/headless/:id/screenshot for raster screenshots.',
+          );
         }
 
         case 'evaluate_query': {

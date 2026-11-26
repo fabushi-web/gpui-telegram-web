@@ -415,24 +415,38 @@ function parseInlineRange(src: string, start: number, end: number, state: Inline
     // 4. Two-character paired delimiters: **, __, ~~, ||
     const twoChar = src.slice(i, i + 2);
     if (twoChar === '**' || twoChar === '__' || twoChar === '~~' || twoChar === '||') {
-      const closeIdx = findPairedDelimiter(src, twoChar, i + 2, end);
-      if (closeIdx !== -1 && closeIdx > i + 2) {
-        const kind: MessageEntityKind =
-          twoChar === '**'
-            ? 'bold'
-            : twoChar === '__'
-              ? 'underline'
-              : twoChar === '~~'
-                ? 'strikethrough'
-                : 'spoiler';
-        const offset = state.out.length;
-        parseInlineRange(src, i + 2, closeIdx, state);
-        const len = state.out.length - offset;
-        if (len > 0) {
-          state.entities.push(makeEntity(offset, len, kind));
+      let canOpen = true;
+      if (twoChar === '__') {
+        const prevChar = i > 0 ? src[i - 1] : undefined;
+        const nextChar = i + 2 < end ? src[i + 2] : undefined;
+        canOpen =
+          nextChar !== undefined &&
+          nextChar !== '_' &&
+          !/\s/.test(nextChar) &&
+          !isAsciiWordChar(prevChar) &&
+          prevChar !== '.' &&
+          prevChar !== '_';
+      }
+      if (canOpen) {
+        const closeIdx = findPairedDelimiter(src, twoChar, i + 2, end);
+        if (closeIdx !== -1 && closeIdx > i + 2) {
+          const kind: MessageEntityKind =
+            twoChar === '**'
+              ? 'bold'
+              : twoChar === '__'
+                ? 'underline'
+                : twoChar === '~~'
+                  ? 'strikethrough'
+                  : 'spoiler';
+          const offset = state.out.length;
+          parseInlineRange(src, i + 2, closeIdx, state);
+          const len = state.out.length - offset;
+          if (len > 0) {
+            state.entities.push(makeEntity(offset, len, kind));
+          }
+          i = closeIdx + 2;
+          continue;
         }
-        i = closeIdx + 2;
-        continue;
       }
     }
 
@@ -445,7 +459,7 @@ function parseInlineRange(src: string, start: number, end: number, state: Inline
         nextChar !== undefined &&
         nextChar !== oneChar &&
         !/\s/.test(nextChar) &&
-        !(oneChar === '_' && isAsciiWordChar(prevChar));
+        !(oneChar === '_' && (isAsciiWordChar(prevChar) || prevChar === '_'));
 
       if (validOpen) {
         const closeIdx = findSingleItalicClose(src, oneChar, i + 1, end);
@@ -516,6 +530,13 @@ function findPairedDelimiter(src: string, delim: string, from: number, end: numb
       }
     }
     if (src.slice(i, i + delim.length) === delim) {
+      if (delim === '__') {
+        const prev = i > from ? src[i - 1] : undefined;
+        const after = i + 2 < end ? src[i + 2] : undefined;
+        if (!prev || /\s/.test(prev) || prev === '_' || isAsciiWordChar(after)) {
+          continue;
+        }
+      }
       return i;
     }
   }

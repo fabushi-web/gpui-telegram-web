@@ -203,6 +203,7 @@ export const MiddleColumn: React.FC = () => {
         <AppleComposeStage />
       ) : !activeChat ? (
         <div
+          id={DOM_IDS.MESSAGE_LIST}
           data-testid="middle-empty-state"
           style={{
             flex: '1 1 auto',

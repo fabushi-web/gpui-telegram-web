@@ -19,6 +19,7 @@ import {
   castPollVoteAtomic,
   commitPtsEventAtomic,
   computeChatDifference,
+  computeUserGlobalDifference,
   createMessageAtomic,
   deleteMessagesAtomic,
   editMessageAtomic,
@@ -119,19 +120,42 @@ export function registerMessageAndSearchRoutes(
 
   const handleGetDifference = async (ctx: RequestContext): Promise<void> => {
     const auth = requireAuth(db, ctx);
-    let diffReq: {
-      chat_id: number;
-      pts?: number;
-      from_pts?: number;
-      limit?: number;
-      pts_total_limit?: number;
-    };
+    let chatId: number | undefined;
+    let pts: number | undefined;
+    let fromPts: number | undefined;
+    let limit: number | undefined;
+    let ptsTotalLimit: number | undefined;
+
     if (ctx.method === 'GET') {
-      diffReq = {
-        chat_id: Number(ctx.query.get('chat_id') ?? 0),
-        from_pts: Number(ctx.query.get('from_pts') ?? ctx.query.get('pts') ?? 0),
-        limit: ctx.query.get('limit') ? Number(ctx.query.get('limit')) : undefined,
+      const parseQueryNumber = (raw: string | null): number | undefined => {
+        if (raw === null || raw.trim() === '') return undefined;
+        return Number(raw);
       };
+      chatId = parseOptionalPositiveInt(
+        parseQueryNumber(ctx.query.get('chat_id')),
+        'invalid_chat_id',
+        'chat_id must be a positive integer',
+      );
+      pts = parseOptionalNonNegativeInt(
+        parseQueryNumber(ctx.query.get('pts')),
+        'invalid_pts',
+        'pts must be a non-negative integer',
+      );
+      fromPts = parseOptionalNonNegativeInt(
+        parseQueryNumber(ctx.query.get('from_pts')),
+        'invalid_pts',
+        'from_pts must be a non-negative integer',
+      );
+      limit = parseOptionalPositiveInt(
+        parseQueryNumber(ctx.query.get('limit')),
+        'invalid_limit',
+        'limit must be a positive integer',
+      );
+      ptsTotalLimit = parseOptionalPositiveInt(
+        parseQueryNumber(ctx.query.get('pts_total_limit')),
+        'invalid_limit',
+        'pts_total_limit must be a positive integer',
+      );
     } else {
       const body = await readJsonBody<{
         chat_id?: unknown;
@@ -140,36 +164,48 @@ export function registerMessageAndSearchRoutes(
         limit?: unknown;
         pts_total_limit?: unknown;
       }>(ctx.req);
-      const chatId = parseOptionalPositiveInt(
+      chatId = parseOptionalPositiveInt(
         body.chat_id,
         'invalid_chat_id',
         'chat_id must be a positive integer',
       );
-      if (chatId === undefined) {
-        throw new ApiError(400, 'invalid_chat_id', 'chat_id is required');
-      }
-      diffReq = {
-        chat_id: chatId,
-        pts: parseOptionalNonNegativeInt(body.pts, 'invalid_pts', 'pts must be a non-negative integer'),
-        from_pts: parseOptionalNonNegativeInt(
-          body.from_pts,
-          'invalid_pts',
-          'from_pts must be a non-negative integer',
-        ),
-        limit: parseOptionalPositiveInt(
-          body.limit,
-          'invalid_limit',
-          'limit must be a positive integer',
-        ),
-        pts_total_limit: parseOptionalPositiveInt(
-          body.pts_total_limit,
-          'invalid_limit',
-          'pts_total_limit must be a positive integer',
-        ),
-      };
+      pts = parseOptionalNonNegativeInt(
+        body.pts,
+        'invalid_pts',
+        'pts must be a non-negative integer',
+      );
+      fromPts = parseOptionalNonNegativeInt(
+        body.from_pts,
+        'invalid_pts',
+        'from_pts must be a non-negative integer',
+      );
+      limit = parseOptionalPositiveInt(
+        body.limit,
+        'invalid_limit',
+        'limit must be a positive integer',
+      );
+      ptsTotalLimit = parseOptionalPositiveInt(
+        body.pts_total_limit,
+        'invalid_limit',
+        'pts_total_limit must be a positive integer',
+      );
     }
 
-    const diff = computeChatDifference(db, auth.userId, diffReq);
+    const diff =
+      chatId === undefined
+        ? computeUserGlobalDifference(db, auth.userId, {
+            pts,
+            from_pts: fromPts,
+            limit,
+            pts_total_limit: ptsTotalLimit,
+          })
+        : computeChatDifference(db, auth.userId, {
+            chat_id: chatId,
+            pts,
+            from_pts: fromPts,
+            limit,
+            pts_total_limit: ptsTotalLimit,
+          });
     sendJson(ctx.res, 200, diff);
   };
   router.post('/api/v1/sync/get_difference', handleGetDifference);
@@ -1064,7 +1100,7 @@ export function registerMessageAndSearchRoutes(
     }
 
     throw new ApiError(
-      404,
+      422,
       'unknown_callback',
       'No bot or callback handler registered for this chat',
     );

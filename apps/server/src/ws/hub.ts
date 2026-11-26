@@ -234,8 +234,9 @@ export class RealtimeGatewayHub implements PtsBroadcastSink {
     const token = extractBearerToken(req, reqUrl.searchParams);
     const auth = authenticateToken(this.db, token);
 
-    // If a token was explicitly provided in query/header and is invalid, reject immediately with 401!
-    if (token && !auth) {
+    // /api/v1/ws MUST fail-closed on missing, empty, or invalid token at HTTP upgrade (401)
+    // regardless of query parameters (e.g. ?mode=derp). DERP keeps explicit-invalid-token rejection.
+    if ((isWs && !auth) || (token && !auth)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;

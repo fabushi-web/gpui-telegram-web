@@ -315,6 +315,11 @@ export interface UiState {
    * Deterministic 7-Layer Escape Stack: pops strictly ONE topmost layer per Escape press!
    */
   popTopEscapeLayer: (externalChatLayerHandler?: () => boolean) => boolean;
+
+  /**
+   * Reset all transient UI overlays, PiP MiniApp, drawers, modals, audio player, and active calls on account switch/logout.
+   */
+  resetUiStore: () => void;
 }
 
 const SIDEBAR_WIDTH_KEY = 'gpui_tg_sidebar_width_v1';
@@ -1043,12 +1048,8 @@ export const useUiStore = create<UiState>((set, get) => ({
       return true;
     }
 
-    // Layer 5: Settings Slide-Stack (pops sub-section first, then closes panel)
-    if (s.settingsStack.length > 1) {
-      set({ settingsStack: s.settingsStack.slice(0, -1) });
-      return true;
-    }
-    if (s.settingsStack.length === 1) {
+    // Layer 5: Settings Overlay (2-pane Apple System Settings: Escape closes panel cleanly)
+    if (s.settingsStack.length > 0) {
       set({ settingsStack: [] });
       return true;
     }
@@ -1089,6 +1090,46 @@ export const useUiStore = create<UiState>((set, get) => ({
     }
 
     return false;
+  },
+
+  resetUiStore: () => {
+    get().closeAudioPlayer();
+    void webrtcManager.endCurrentCall().catch(() => undefined);
+    set({
+      isRightOpen: false,
+      rightTab: 'media',
+      inChatSearchOpen: false,
+      mobilePane: 'left',
+      tabletLeftDrawerOpen: false,
+      activeNavDest: 'chats',
+      isBurgerOpen: false,
+      isAccountSwitcherOpen: false,
+      composerPopover: null,
+      settingsStack: [],
+      activeModal: null,
+      modalPayload: null,
+      miniAppModalOpen: false,
+      miniAppPipMinimized: false,
+      appleComposeStage: {
+        isOpen: false,
+        recipients: [],
+        pendingCreation: false,
+        carryDraft: '',
+      },
+      contextMenu: null,
+      lightboxState: null,
+      mediaEditorState: null,
+      instantViewState: null,
+      storiesViewerState: null,
+      activeCall: {
+        isOpen: false,
+        isMinimized: false,
+        runtime: null,
+      },
+      stageToast: null,
+      windowToast: null,
+      toasts: [],
+    });
   },
 }));
 

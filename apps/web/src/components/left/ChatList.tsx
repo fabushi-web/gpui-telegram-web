@@ -541,20 +541,20 @@ export const ChatList: React.FC<ChatListProps> = ({
               <div style={{ display: 'flex', gap: '8px' }}>
                 <input
                   type="text"
-                  value={newTopicEmoji}
-                  onChange={(e) => setNewTopicEmoji(e.target.value)}
-                  aria-label="Icon emoji"
-                  className="tg-input"
-                  style={{ width: '54px', textAlign: 'center', fontSize: '18px' }}
-                />
-                <input
-                  type="text"
                   autoFocus
                   value={newTopicTitle}
                   onChange={(e) => setNewTopicTitle(e.target.value)}
                   placeholder={isZh ? '输入新话题标题…' : 'Enter topic title…'}
                   aria-label="Topic title"
                   className="tg-input"
+                />
+                <input
+                  type="text"
+                  value={newTopicEmoji}
+                  onChange={(e) => setNewTopicEmoji(e.target.value)}
+                  aria-label="Icon emoji"
+                  className="tg-input"
+                  style={{ width: '54px', textAlign: 'center', fontSize: '18px' }}
                 />
               </div>
             </div>

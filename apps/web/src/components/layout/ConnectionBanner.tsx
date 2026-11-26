@@ -17,7 +17,9 @@ export const ConnectionBanner: React.FC<ConnectionBannerProps> = ({ className })
   const bootstrapChats = useChatStore((s) => s.bootstrapChats);
   const token = useAuthStore((s) => s.token);
 
-  const [browserOfflineEvent, setBrowserOfflineEvent] = useState<boolean>(false);
+  const [browserOfflineEvent, setBrowserOfflineEvent] = useState<boolean>(
+    () => typeof navigator !== 'undefined' && navigator.onLine === false,
+  );
   const [retrying, setRetrying] = useState<boolean>(false);
 
   useEffect(() => {

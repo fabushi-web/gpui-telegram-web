@@ -616,7 +616,7 @@
   right: 0;
   bottom: 0;
   left: var(--tg-nav-rail-width, 64px);
-  z-index: 55;
+  z-index: var(--tg-z-settings, 140);
   background: var(--tg-bg-overlay);
   display: flex;
   align-items: stretch;

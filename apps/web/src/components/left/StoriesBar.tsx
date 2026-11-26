@@ -124,11 +124,11 @@ export const StoriesBar: React.FC<StoriesBarProps> = ({ className }) => {
         className={`tg-stories-bar ${className ?? ''}`.trim()}
         style={{ minHeight: '66px' }}
       >
-        {/* + Post Story Trigger */}
+        {/* + Add Story Trigger */}
         <button
           type="button"
           data-testid="add-story-trigger"
-          aria-label={t('stories.post', language)}
+          aria-label={language === 'zh-CN' ? '发布动态' : 'Add Story'}
           onClick={() => setComposerOpen(true)}
           style={{
             display: 'flex',
@@ -166,7 +166,7 @@ export const StoriesBar: React.FC<StoriesBarProps> = ({ className }) => {
               whiteSpace: 'nowrap',
             }}
           >
-            {t('stories.post', language)}
+            {language === 'zh-CN' ? '发布' : 'Add'}
           </span>
         </button>
 
@@ -292,6 +292,16 @@ export const StoriesBar: React.FC<StoriesBarProps> = ({ className }) => {
                   (language === 'zh-CN' ? '实时预览动态卡片' : 'Live Story Preview')}
               </div>
 
+              <textarea
+                value={caption}
+                onChange={(e) => setCaption(e.target.value)}
+                placeholder={t('media.captionPlaceholder', language)}
+                aria-label="Story caption"
+                rows={3}
+                autoFocus
+                className="tg-textarea"
+              />
+
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 {STORY_GRADIENTS.map((g) => (
                   <button
@@ -329,16 +339,6 @@ export const StoriesBar: React.FC<StoriesBarProps> = ({ className }) => {
                   />
                 </label>
               </div>
-
-              <textarea
-                value={caption}
-                onChange={(e) => setCaption(e.target.value)}
-                placeholder={t('media.captionPlaceholder', language)}
-                aria-label="Story caption"
-                rows={3}
-                autoFocus
-                className="tg-textarea"
-              />
             </div>
 
             <div className="tg-modal-footer">
@@ -354,7 +354,7 @@ export const StoriesBar: React.FC<StoriesBarProps> = ({ className }) => {
                 disabled={posting || (!caption.trim() && !uploadedFileId)}
                 className="tg-btn tg-btn--primary"
               >
-                {t('stories.post', language)}
+                {language === 'zh-CN' ? '确认发布' : 'Create Story'}
               </button>
             </div>
           </form>

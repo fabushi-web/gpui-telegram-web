@@ -174,7 +174,11 @@ test.describe('Tier 1 — A02: Apple Messages macOS & Muse UI/UX Redesign & Fabu
     expect(expandedBox!.width).toBeLessThanOrEqual(430);
 
     // Pin the DM chat and verify Apple 3x3 pinned grid appears cleanly without flicker
-    const dmRow = page.locator(DOM.chatList).locator(DOM.chatRow).first();
+    const dmRow = page
+      .locator(DOM.chatList)
+      .locator(DOM.chatRow)
+      .filter({ hasText: conv.dmTitle })
+      .first();
     await openContextMenuAndClick(page, dmRow, BILINGUAL_PATTERNS.pin);
 
     const pinnedGrid = page.locator(SIDEBAR_PINNED_CHATS_GRID);
@@ -282,7 +286,7 @@ test.describe('Tier 1 — A02: Apple Messages macOS & Muse UI/UX Redesign & Fabu
     expect(toastBox!.y + toastBox!.height).toBeLessThanOrEqual(composerBox!.y + 2);
   });
 
-  test('A02-T1-06: Fabushi Web v1.6.11 branding across <title>, manifest.webmanifest, sw.js (fabushi-web-v4), /api/v1/health, /api/v1/status, and Settings About', async ({
+  test('A02-T1-06: Fabushi Web v1.6.11 branding across <title>, manifest.webmanifest, sw.js (fabushi-web-v5), /api/v1/health, /api/v1/status, and Settings About', async ({
     authPage: page,
     request,
   }) => {
@@ -314,7 +318,7 @@ test.describe('Tier 1 — A02: Apple Messages macOS & Muse UI/UX Redesign & Fabu
     const swRes = await request.get(apiUrl(API_PATHS.swJs));
     expect(swRes.status()).toBe(200);
     const swBody = await swRes.text();
-    expect(swBody).toContain('fabushi-web-v4');
+    expect(swBody).toContain('fabushi-web-v5');
 
     const settings = await openSettings(page);
     await expect(settings).toContainText(/1\.6\.11/);

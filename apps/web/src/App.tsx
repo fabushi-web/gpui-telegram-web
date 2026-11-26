@@ -95,8 +95,10 @@ export function App(): React.JSX.Element {
     document.documentElement.lang = language === 'zh-CN' ? 'zh-CN' : 'en';
 
     if (!isAuthenticated || isLocked) return;
+    if (!browserControlAgent.getState().allowDesktopControl) return;
 
     const timer = setTimeout(() => {
+      if (!browserControlAgent.getState().allowDesktopControl) return;
       const statePayload = browserControlAgent.buildStateReportPayload();
       void getClientAdapter()
         .reportBrowserState({

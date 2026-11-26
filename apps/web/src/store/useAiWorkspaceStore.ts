@@ -452,6 +452,7 @@ export interface AiWorkspaceState {
   clickMiniAppMainButton: () => void;
   clickMiniAppBackButton: () => void;
   closeMiniApp: () => void;
+  resetAiWorkspaceStore: () => void;
   bindMiniAppPostMessageBridge: () => () => void;
 
   // Hermes / Fabushi Actions
@@ -822,13 +823,31 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
   setMiniAppIframeRef: (miniAppIframeRef) => set({ miniAppIframeRef }),
 
   clickMiniAppMainButton: () => {
-    const win = get().miniAppIframeRef?.contentWindow;
-    win?.postMessage({ eventType: 'main_button_pressed' }, '*');
+    const iframe = get().miniAppIframeRef;
+    const win = iframe?.contentWindow;
+    if (!win) return;
+    let targetOrigin = window.location.origin;
+    try {
+      const src = iframe?.getAttribute('src') || get().activeMiniApp?.launch_url || '';
+      if (src) targetOrigin = new URL(src, window.location.origin).origin;
+    } catch {
+      targetOrigin = window.location.origin;
+    }
+    win.postMessage({ eventType: 'main_button_pressed' }, targetOrigin);
   },
 
   clickMiniAppBackButton: () => {
-    const win = get().miniAppIframeRef?.contentWindow;
-    win?.postMessage({ eventType: 'back_button_pressed' }, '*');
+    const iframe = get().miniAppIframeRef;
+    const win = iframe?.contentWindow;
+    if (!win) return;
+    let targetOrigin = window.location.origin;
+    try {
+      const src = iframe?.getAttribute('src') || get().activeMiniApp?.launch_url || '';
+      if (src) targetOrigin = new URL(src, window.location.origin).origin;
+    } catch {
+      targetOrigin = window.location.origin;
+    }
+    win.postMessage({ eventType: 'back_button_pressed' }, targetOrigin);
   },
 
   closeMiniApp: () => {
@@ -839,6 +858,89 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
       miniAppBackButtonVisible: false,
     });
     useUiStore.getState().setMiniAppModalOpen(false);
+    useUiStore.getState().setMiniAppPipMinimized(false);
+  },
+
+  resetAiWorkspaceStore: () => {
+    miniAppBridgeCleanup?.();
+    miniAppBridgeCleanup = null;
+    set({
+      bots: [],
+      lastCreatedBotToken: null,
+      miniApps: [],
+      activeMiniApp: null,
+      miniAppIframeRef: null,
+      miniAppMainButton: { ...DEFAULT_MAIN_BUTTON },
+      miniAppBackButtonVisible: false,
+      lastMiniAppWebData: null,
+
+      hermesStudio: null,
+      activeStudioTab: 'sessions',
+      hermesCommands: [],
+      hermesApprovals: [],
+      hermesProviderError: null,
+      streamingTurn: null,
+      lastSlashResponse: null,
+      fabushiBots: [],
+      codingHosts: [],
+      codingProbeResult: null,
+      groupWorkspaces: {},
+      groupFloors: {},
+
+      magpieConfig: null,
+      magpieMeta: null,
+      magpieSubscriptions: [],
+      magpieUsage: null,
+      maskPreview: null,
+      modelsCatalog: null,
+      modelsCatalogError: null,
+
+      tasks: [],
+
+      mcpServers: [],
+      mcpTools: [],
+      mcpApprovals: [],
+      lastMcpOutput: null,
+      oauthMcpGrants: [],
+      oauthMcpAudit: [],
+
+      talkSession: null,
+      talkProviderError: null,
+
+      computers: [],
+      computerApprovals: [],
+      tailnet: null,
+      remoteAssistInfo: null,
+      remoteSessions: [],
+      computerFrames: {},
+      lastTakeoverMs: null,
+      lastKillSwitchLatencyMs: null,
+
+      wallet: null,
+
+      pairingTicket: null,
+      browserTargets: [],
+      headlessSessions: [],
+      headlessSnapshots: {},
+      headlessScreenshots: {},
+      browserAuditLogs: [],
+      browserControlMode: { mode: 'idle' },
+      chromiumAvailable: null,
+      lastBrowserRevokeLatencyMs: null,
+      recordedBrowserTrace: [],
+      distilledManifest: null,
+      lastScriptReplayReport: null,
+      automationApps: [],
+      installedAutomationApps: [],
+      localBridgeState: browserControlAgent.getState(),
+
+      vaultEnvelope: null,
+      vaultItems: [],
+      vaultLatestRevision: 0,
+      pendingDeviceSyncs: [],
+      activeDeviceSyncRequest: null,
+      accountPasskeys: [],
+    });
   },
 
   bindMiniAppPostMessageBridge: () => {
@@ -847,7 +949,20 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
 
     const handler = async (ev: MessageEvent) => {
       const active = get().activeMiniApp;
-      if (!active || !ev.data) return;
+      const iframeEl = get().miniAppIframeRef;
+      const iframeWin = iframeEl?.contentWindow;
+      if (!active || !ev.data || !iframeWin || ev.source !== iframeWin) return;
+
+      let trustedOrigin = window.location.origin;
+      try {
+        const src = iframeEl?.getAttribute('src') || active.launch_url || '';
+        if (src) trustedOrigin = new URL(src, window.location.origin).origin;
+      } catch {
+        trustedOrigin = window.location.origin;
+      }
+      if (ev.origin !== trustedOrigin && ev.origin !== window.location.origin) {
+        return;
+      }
 
       let parsed: Record<string, unknown> | null = null;
       if (typeof ev.data === 'string') {
@@ -863,6 +978,7 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
 
       const eventType = String(parsed.eventType ?? parsed.type ?? '');
       const eventData = (parsed.eventData ?? parsed.data ?? {}) as Record<string, unknown>;
+      const replyOrigin = ev.origin && ev.origin !== 'null' ? ev.origin : trustedOrigin;
 
       switch (eventType) {
         case 'web_app_close':
@@ -929,15 +1045,15 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
               await adapter.deleteMiniAppCloudStorage(bot, short, keys);
               result = true;
             }
-            (ev.source as WindowProxy | null)?.postMessage(
+            iframeWin.postMessage(
               {
                 eventType: 'custom_method_invoked',
                 eventData: { req_id: reqId, result },
               },
-              '*',
+              replyOrigin,
             );
           } catch (err) {
-            (ev.source as WindowProxy | null)?.postMessage(
+            iframeWin.postMessage(
               {
                 eventType: 'custom_method_invoked',
                 eventData: {
@@ -945,7 +1061,7 @@ export const useAiWorkspaceStore = create<AiWorkspaceState>((set, get) => ({
                   error: err instanceof Error ? err.message : String(err),
                 },
               },
-              '*',
+              replyOrigin,
             );
           }
           break;

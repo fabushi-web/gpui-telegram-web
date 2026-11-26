@@ -157,6 +157,13 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
     }
   };
 
+  const handleCloseSearch = (): void => {
+    setQuery('');
+    setActiveHitIdx(0);
+    void searchInChat(chatId, '');
+    setInChatSearchOpen(false);
+  };
+
   return (
     <div
       id="in-chat-search-bar"
@@ -191,7 +198,7 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
           if (e.key === 'Escape') {
             e.preventDefault();
             e.stopPropagation();
-            setInChatSearchOpen(false);
+            handleCloseSearch();
           } else if (e.key === 'Enter') {
             e.preventDefault();
             stepHit(e.shiftKey ? -1 : 1);
@@ -292,7 +299,7 @@ export const InChatSearchBar: React.FC<InChatSearchBarProps> = ({
         type="button"
         data-testid="in-chat-search-close"
         aria-label="Close search"
-        onClick={() => setInChatSearchOpen(false)}
+        onClick={handleCloseSearch}
         style={searchNavBtnStyle(false)}
       >
         ✕

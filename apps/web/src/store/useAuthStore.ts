@@ -322,16 +322,48 @@ function persistAuthEnvelope(
 
 const bootAuth = loadPersistedAuth();
 
-function detectInitialServerUrlOverride(): string | undefined {
-  const envDefaultServer = (import.meta.env?.VITE_DEFAULT_SERVER_URL ?? '').trim().replace(/\/+$/, '');
+function sanitizeServerUrlOverride(raw: string | null | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+    if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback)) {
+      return parsed.origin;
+    }
+  } catch {
+    // Reject malformed URLs
+  }
+  return undefined;
+}
+
+function detectInitialServerUrlOverride(hasAuthenticatedAccount: boolean): string | undefined {
+  const envDefaultServer = sanitizeServerUrlOverride(import.meta.env?.VITE_DEFAULT_SERVER_URL);
   if (typeof window === 'undefined') {
-    return envDefaultServer || undefined;
+    return envDefaultServer;
   }
   try {
     const params = new URLSearchParams(window.location.search);
-    const qServer = params.get('server') || params.get('api');
-    if (qServer && qServer.trim()) {
-      return qServer.trim().replace(/\/+$/, '');
+    const hasQueryServer = params.has('server') || params.has('api');
+    const qServer = sanitizeServerUrlOverride(params.get('server') || params.get('api'));
+    if (hasQueryServer) {
+      // Strip ?server=/?api= from the address bar so it cannot persist or be replayed on reload
+      try {
+        params.delete('server');
+        params.delete('api');
+        const nextSearch = params.toString();
+        const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+        window.history.replaceState(window.history.state, '', nextUrl);
+      } catch {
+        // Ignore history API restriction
+      }
+      // STRICT SECURITY INVARIANT (F-01): Never override an already-authenticated account's serverUrl
+      // from URL query parameters, preventing 1-click Bearer/WS token exfiltration.
+      if (!hasAuthenticatedAccount && qServer) {
+        return qServer;
+      }
     }
     if (envDefaultServer && !bootAuth.serverUrl) {
       return envDefaultServer;
@@ -351,17 +383,19 @@ function detectInitialServerUrlOverride(): string | undefined {
   return undefined;
 }
 
-const bootServerOverride = detectInitialServerUrlOverride();
-const initialServerUrl = bootServerOverride ?? bootAuth.serverUrl;
-
 const initialActiveAccount =
   bootAuth.accounts.find((a) => a.accountId === bootAuth.activeAccountId) ??
   bootAuth.accounts[0] ??
   null;
 
+const bootServerOverride = detectInitialServerUrlOverride(Boolean(initialActiveAccount?.token));
+const initialServerUrl = initialActiveAccount?.token
+  ? initialActiveAccount.serverUrl || bootAuth.serverUrl
+  : bootServerOverride ?? bootAuth.serverUrl;
+
 if (initialActiveAccount) {
   getServerAdapter().configure({
-    serverUrl: bootServerOverride || initialActiveAccount.serverUrl || initialServerUrl,
+    serverUrl: initialActiveAccount.serverUrl || bootAuth.serverUrl,
     token: initialActiveAccount.token,
     accountId: initialActiveAccount.accountId,
     userId: initialActiveAccount.userId ?? initialActiveAccount.user.userId,
@@ -371,11 +405,16 @@ if (initialActiveAccount) {
 }
 
 let onAccountActivatedHook: ((accountId: string, user: UserProfile) => void) | null = null;
+let onAuthClearedHook: (() => void) | null = null;
 
 export function registerAccountActivatedHook(
   hook: ((accountId: string, user: UserProfile) => void) | null,
 ): void {
   onAccountActivatedHook = hook;
+}
+
+export function registerAuthClearedHook(hook: (() => void) | null): void {
+  onAuthClearedHook = hook;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => {
@@ -387,6 +426,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     if (prevAccountId && prevAccountId !== accountId) {
       clearSavedActiveChatId();
+      onAuthClearedHook?.();
     }
 
     const entry: StoredAccountSession = {
@@ -447,7 +487,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
     isAddingAccount: false,
 
     adapterMode: 'server',
-    serverUrl: bootServerOverride ?? initialActiveAccount?.serverUrl ?? initialServerUrl,
+    serverUrl: initialActiveAccount?.token
+      ? initialActiveAccount.serverUrl || bootAuth.serverUrl
+      : initialServerUrl,
     serverHealth: { status: 'unknown' },
 
     passcodeHash: bootAuth.passcodeHash,
@@ -493,12 +535,12 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     hydrateAuth: async () => {
       const loaded = loadPersistedAuth();
-      const serverOverride = detectInitialServerUrlOverride();
-      const effectiveServerUrl = serverOverride ?? loaded.serverUrl;
       const active =
         loaded.accounts.find((a) => a.accountId === loaded.activeAccountId) ??
         loaded.accounts[0] ??
         null;
+      const serverOverride = detectInitialServerUrlOverride(Boolean(active?.token));
+      const effectiveServerUrl = serverOverride ?? loaded.serverUrl;
 
       if (!active) {
         await switchClientAdapterMode('server', { serverUrl: effectiveServerUrl });
@@ -510,14 +552,16 @@ export const useAuthStore = create<AuthState>((set, get) => {
           isAuthenticated: false,
           adapterMode: 'server',
           serverUrl: effectiveServerUrl,
-          passcodeHash: loaded.passcodeHash,
+          passcodeHash: null,
           isLocked: false,
         });
         void get().probeServerHealth(effectiveServerUrl);
         return;
       }
 
-      const targetServerUrl = serverOverride || active.serverUrl || loaded.serverUrl;
+      // STRICT SECURITY INVARIANT (F-01): Always transmit the stored session token strictly
+      // to the serverUrl bound to that account, never to a URL query-param override.
+      const targetServerUrl = active.serverUrl || loaded.serverUrl;
       const adapter = await switchClientAdapterMode('server', {
         serverUrl: targetServerUrl,
         token: active.token,
@@ -561,6 +605,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
           msg.includes('session revoked');
         if (isAuthRejected) {
           clearSavedActiveChatId();
+          onAuthClearedHook?.();
           const remaining = get().accounts.filter((a) => a.accountId !== active.accountId);
           set({
             accounts: remaining,
@@ -568,6 +613,8 @@ export const useAuthStore = create<AuthState>((set, get) => {
             currentUser: null,
             token: null,
             isAuthenticated: false,
+            passcodeHash: remaining.length === 0 ? null : get().passcodeHash,
+            isLocked: false,
             error: '登录会话已失效，请重新登录。',
           });
           persistAuthEnvelope(get());
@@ -1037,6 +1084,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (!target) return;
 
       clearSavedActiveChatId();
+      onAuthClearedHook?.();
       await getClientAdapter().disconnect().catch(() => undefined);
 
       const adapter = await switchClientAdapterMode('server', {
@@ -1095,6 +1143,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       const currentId = get().activeAccountId;
       await getServerAdapter().deleteAccount();
       clearSavedActiveChatId();
+      onAuthClearedHook?.();
       const remaining = get().accounts.filter((a) => a.accountId !== currentId);
       set({
         accounts: remaining,
@@ -1103,7 +1152,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
         token: null,
         isAuthenticated: false,
         isAddingAccount: false,
+        passcodeHash: remaining.length === 0 ? null : get().passcodeHash,
         isLocked: false,
+        passcodeError: null,
         requires2fa: false,
         twoFaChallengeToken: null,
         qrSession: null,
@@ -1128,6 +1179,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         return;
       }
 
+      onAuthClearedHook?.();
       set({
         accounts: [],
         activeAccountId: null,
@@ -1135,7 +1187,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
         token: null,
         isAuthenticated: false,
         isAddingAccount: false,
+        passcodeHash: null,
         isLocked: false,
+        passcodeError: null,
         requires2fa: false,
         twoFaChallengeToken: null,
         qrSession: null,
@@ -1220,6 +1274,7 @@ getServerAdapter().onAuthInvalidated((reason) => {
   const st = useAuthStore.getState();
   if (!st.isAuthenticated && !st.activeAccountId) return;
   clearSavedActiveChatId();
+  onAuthClearedHook?.();
   const remaining = st.accounts.filter((a) => a.accountId !== st.activeAccountId);
   useAuthStore.setState({
     accounts: remaining,
@@ -1228,6 +1283,7 @@ getServerAdapter().onAuthInvalidated((reason) => {
     token: null,
     isAuthenticated: false,
     isAddingAccount: false,
+    passcodeHash: remaining.length === 0 ? null : st.passcodeHash,
     isLocked: false,
     error:
       reason === 'account_deleted'
@@ -1253,5 +1309,36 @@ if (typeof window !== 'undefined') {
 broadcastSync.subscribe((payload) => {
   if (payload.kind === 'passcode_lock') {
     useAuthStore.setState({ isLocked: payload.isLocked, passcodeError: null });
+    return;
+  }
+  if (payload.kind === 'auth_switched') {
+    const currentId = useAuthStore.getState().activeAccountId;
+    if (payload.activeAccountId === null) {
+      clearSavedActiveChatId();
+      onAuthClearedHook?.();
+      void getClientAdapter().disconnect().catch(() => undefined);
+      useAuthStore.setState({
+        accounts: loadPersistedAuth().accounts,
+        activeAccountId: null,
+        currentUser: null,
+        token: null,
+        isAuthenticated: false,
+        isAddingAccount: false,
+        passcodeHash: null,
+        isLocked: false,
+        passcodeError: null,
+      });
+      return;
+    }
+    if (payload.activeAccountId !== currentId) {
+      clearSavedActiveChatId();
+      onAuthClearedHook?.();
+      void getClientAdapter()
+        .disconnect()
+        .catch(() => undefined)
+        .finally(() => {
+          void useAuthStore.getState().hydrateAuth();
+        });
+    }
   }
 });

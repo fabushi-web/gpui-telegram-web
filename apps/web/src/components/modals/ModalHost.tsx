@@ -119,7 +119,9 @@ const CreateStoryModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           </div>
           <div className="tg-modal-footer">
             <button type="button" className="tg-btn tg-btn--secondary" onClick={onClose}>{t('common.cancel', language)}</button>
-            <button type="submit" className="tg-btn tg-btn--primary">{t('stories.post', language)}</button>
+            <button type="submit" className="tg-btn tg-btn--primary">
+              {isZh ? '确认发布' : 'Create Story'}
+            </button>
           </div>
         </form>
       </div>
@@ -169,19 +171,19 @@ const CreateTopicModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
               <input
                 type="text"
                 className="tg-input"
-                style={{ width: '56px', textAlign: 'center' }}
-                value={emoji}
-                onChange={(e) => setEmoji(e.target.value)}
-                aria-label="Topic Icon"
-              />
-              <input
-                type="text"
-                className="tg-input"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder={isZh ? '输入话题名称…' : 'Enter topic title…'}
                 aria-label="Topic Title"
                 autoFocus
+              />
+              <input
+                type="text"
+                className="tg-input"
+                style={{ width: '56px', textAlign: 'center' }}
+                value={emoji}
+                onChange={(e) => setEmoji(e.target.value)}
+                aria-label="Topic Icon"
               />
             </div>
           </div>

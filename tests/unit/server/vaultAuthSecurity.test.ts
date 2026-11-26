@@ -3573,14 +3573,56 @@ describe('@gpui-telegram/server — M2 Security, Split-Key V2, User Vault, Devic
         ws.once('open', () => {
           ws.send(rawFrame);
         });
-        ws.once('message', (data) => {
+        ws.on('message', (data) => {
+          let parsed: { type: string; payload?: { code?: number; message?: string } };
+          try {
+            parsed = JSON.parse(data.toString('utf8'));
+          } catch (err) {
+            clearTimeout(timer);
+            ws.close();
+            reject(err);
+            return;
+          }
+          if (parsed.type === 'AuthOk') {
+            return;
+          }
           clearTimeout(timer);
           ws.close();
-          try {
-            resolve(JSON.parse(data.toString('utf8')));
-          } catch (err) {
-            reject(err);
-          }
+          resolve(parsed);
+        });
+      });
+    };
+
+    const expectWsUpgradeRejected401 = (endpointUrl: string): Promise<number> => {
+      return new Promise((resolve, reject) => {
+        const ws = new WebSocket(endpointUrl);
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          ws.terminate();
+          reject(new Error(`Timed out waiting for 401 rejection on ${endpointUrl}`));
+        }, 4000);
+        ws.once('open', () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          ws.terminate();
+          reject(new Error(`Expected 401 upgrade rejection on ${endpointUrl}, but connection opened`));
+        });
+        ws.once('unexpected-response', (_req, res) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          res.resume();
+          ws.terminate();
+          resolve(res.statusCode ?? 0);
+        });
+        ws.on('error', (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
         });
       });
     };
@@ -3615,14 +3657,20 @@ describe('@gpui-telegram/server — M2 Security, Split-Key V2, User Vault, Devic
       const u1 = await registerTestUser(baseUrl, 'iter6_ws_u', { first_name: 'WsGuard' });
 
       const wsOrigin = baseUrl.replace(/^http/, 'ws');
-      const unauthEndpoints = [
-        `${wsOrigin}/api/v1/ws`,
+
+      // /api/v1/ws MUST fail-closed with 401 at HTTP upgrade when token is omitted or empty
+      expect(await expectWsUpgradeRejected401(`${wsOrigin}/api/v1/ws`)).toBe(401);
+      expect(await expectWsUpgradeRejected401(`${wsOrigin}/api/v1/ws?token=`)).toBe(401);
+      expect(await expectWsUpgradeRejected401(`${wsOrigin}/api/v1/ws?mode=derp`)).toBe(401);
+
+      const malformedFrameEndpoints = [
+        `${wsOrigin}/api/v1/ws?token=${encodeURIComponent(u1.token)}`,
         `${wsOrigin}/api/v1/tailnet/derp`,
         `${wsOrigin}/api/v1/browser/ws`,
       ];
       const malformedFrames = ['null', '12345', '[]', '{}', '{"type":123}'];
 
-      for (const ep of unauthEndpoints) {
+      for (const ep of malformedFrameEndpoints) {
         for (const frame of malformedFrames) {
           const resp = await sendRawWsExpectError(ep, frame);
           expect(resp.type, `Expected Error frame on ${ep} for ${frame}`).toBe('Error');
@@ -3691,7 +3739,7 @@ describe('@gpui-telegram/server — M2 Security, Split-Key V2, User Vault, Devic
           token: u1.token,
           body: { callback_data: protoKey },
         });
-        expect(cbRes.status, `Expected 404 for callback_data=${protoKey}`).toBe(404);
+        expect(cbRes.status, `Expected 422 for callback_data=${protoKey}`).toBe(422);
         expect(cbRes.data.error).toBe('unknown_callback');
       }
 
@@ -4043,6 +4091,99 @@ describe('@gpui-telegram/server — M2 Security, Split-Key V2, User Vault, Devic
           200,
         );
       }
+    });
+
+    it('Tier 5 Hardening: blocks cross-user WS disconnect IDOR on DELETE /auth/sessions/:id, strips unsafe TextUrl entities server-side, and purges M3 tables on DELETE /account', async () => {
+      await apiJson(baseUrl, 'POST', '/api/v1/test/reset');
+      const victim = await registerTestUser(baseUrl, 't5_victim', { first_name: 'T5Victim' });
+      const attacker = await registerTestUser(baseUrl, 't5_attacker', { first_name: 'T5Attacker' });
+
+      // 1. Cross-user WS disconnect IDOR guard on DELETE /api/v1/auth/sessions/:sessionId
+      const victimWs = await connectWsAuthenticated(wsUrl, victim.token);
+      let victimClosed = false;
+      victimWs.ws.on('close', () => {
+        victimClosed = true;
+      });
+      try {
+        const idorRes = await apiJson(
+          baseUrl,
+          'DELETE',
+          `/api/v1/auth/sessions/${encodeURIComponent(victim.session_id)}`,
+          { token: attacker.token },
+        );
+        expect(idorRes.status).toBe(200);
+        await new Promise((r) => setTimeout(r, 120));
+        expect(victimClosed).toBe(false);
+        expect(victimWs.ws.readyState).toBe(1);
+      } finally {
+        victimWs.ws.close();
+      }
+
+      // 2. Server-side TextUrl sanitization strips javascript: and data: while keeping https:
+      const dmRes = await apiJson(baseUrl, 'POST', '/api/v1/chats', {
+        token: attacker.token,
+        body: { chat_type: 1, title: 'T5 Link Sanitization', member_ids: [victim.user_id] },
+      });
+      expect([200, 201]).toContain(dmRes.status);
+      const dmChatId = Number(dmRes.data.chat_id ?? dmRes.data.id);
+
+      const sendRes = await apiJson(baseUrl, 'POST', `/api/v1/chats/${dmChatId}/messages`, {
+        token: attacker.token,
+        body: {
+          text: 'bad1 bad2 good',
+          entities: [
+            {
+              offset: 0,
+              length: 4,
+              entity_type: { type: 'TextUrl', value: { url: 'javascript:alert(1)' } },
+            },
+            {
+              offset: 5,
+              length: 4,
+              entity_type: { type: 'TextUrl', value: { url: 'data:text/html,<h1>x</h1>' } },
+            },
+            {
+              offset: 10,
+              length: 4,
+              entity_type: { type: 'TextUrl', value: { url: 'https://example.com/safe' } },
+            },
+          ],
+        },
+      });
+      expect(sendRes.status).toBe(201);
+      const persistedEntities = (sendRes.data.message?.entities ?? []) as Array<{
+        url?: string;
+        entity_type?: { type?: string; value?: { url?: string } };
+      }>;
+      expect(persistedEntities).toHaveLength(1);
+      expect(persistedEntities[0]?.url ?? persistedEntities[0]?.entity_type?.value?.url).toBe(
+        'https://example.com/safe',
+      );
+
+      // 3. DELETE /api/v1/account purges M3 tables (browser pairing tickets, remote assist, etc.)
+      const pairRes = await apiJson(baseUrl, 'POST', '/api/v1/browser/pair/create', {
+        token: victim.token,
+        body: { label: 'Victim Browser' },
+      });
+      expect([200, 201]).toContain(pairRes.status);
+      const assistRes = await apiJson(baseUrl, 'GET', '/api/v1/remote/assist/info', {
+        token: victim.token,
+      });
+      expect(assistRes.status).toBe(200);
+
+      const delRes = await apiJson(baseUrl, 'DELETE', '/api/v1/account', {
+        token: victim.token,
+      });
+      expect(delRes.status).toBe(200);
+      expect(
+        server.db.prepare(`SELECT 1 FROM browser_pairing_tickets WHERE user_id = ?`).get(victim.user_id),
+      ).toBeUndefined();
+      expect(
+        server.db.prepare(`SELECT 1 FROM browser_desktop_tokens WHERE user_id = ?`).get(victim.user_id),
+      ).toBeUndefined();
+      expect(
+        server.db.prepare(`SELECT 1 FROM remote_assist_devices WHERE user_id = ?`).get(victim.user_id),
+      ).toBeUndefined();
     });
   });
 });

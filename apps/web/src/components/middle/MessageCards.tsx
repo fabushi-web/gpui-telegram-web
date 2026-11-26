@@ -673,7 +673,8 @@ const VoiceNoteCard: React.FC<{
               <button
                 type="button"
                 data-testid="btn-voice-rate"
-                aria-label="Playback speed"
+                aria-label={`Playback speed ${audioPlayerState.rate}x`}
+                title="Playback speed"
                 onClick={(e) => {
                   e.stopPropagation();
                   cycleAudioRate();
@@ -962,7 +963,7 @@ const PollQuizCard: React.FC<{
               data-option-id={String(opt.option_id)}
               data-chosen={opt.is_chosen ? 'true' : 'false'}
               aria-pressed={opt.is_chosen}
-              disabled={poll.is_closed || (poll.is_quiz && hasVoted)}
+              data-locked={poll.is_closed || (poll.is_quiz && hasVoted) ? 'true' : undefined}
               onClick={(e) => handleOptionClick(opt.option_id, e)}
               style={{
                 width: '100%',

@@ -130,10 +130,6 @@
   flex-shrink: 0;
 }
 
-#btn-back-to-chats {
-  display: none;
-}
-
 /* Classic theme header overrides */
 :root[data-theme="classic"] #chat-header {
   min-height: 56px;

@@ -405,8 +405,43 @@ export async function registerUserViaApi(
   };
 }
 
+function deriveSplitKeyV2AuthVerifierB64(
+  password: string,
+  saltB64: string,
+  kdfParams?: { m_cost_kib?: unknown; t_cost?: unknown; p_cost?: unknown } | null,
+): string {
+  const mCost = Number(kdfParams?.m_cost_kib ?? 65536);
+  const tCost = Number(kdfParams?.t_cost ?? 3);
+  const pCost = Number(kdfParams?.p_cost ?? 1);
+  const normalizedSaltB64 = saltB64.trim().replace(/-/g, '+').replace(/_/g, '/');
+  const saltBytes = Buffer.from(normalizedSaltB64, 'base64');
+  const domainPrefix = Buffer.from(
+    `fabushi/split-key-v2|${mCost}|${tCost}|${pCost}|`,
+    'utf8',
+  );
+  const boundSalt = Buffer.concat([domainPrefix, saltBytes]);
+  const masterBits = crypto.pbkdf2Sync(
+    Buffer.from(password, 'utf8'),
+    boundSalt,
+    10_000,
+    32,
+    'sha256',
+  );
+  const verifierBits = crypto.hkdfSync(
+    'sha256',
+    masterBits,
+    saltBytes,
+    Buffer.from('fabushi/auth-verifier/v2', 'utf8'),
+    32,
+  );
+  return Buffer.from(verifierBits).toString('base64');
+}
+
 /**
  * Logs in an existing user via `POST /api/v1/auth/login`.
+ * Queries `GET /api/v1/auth/kdf-params` first so Split-Key V2 accounts (created by the
+ * real Web UI) authenticate via derived `auth_verifier_b64`, while V1 accounts retain the
+ * standard password login path.
  */
 export async function loginUserViaApi(
   request: APIRequestContext,
@@ -414,9 +449,40 @@ export async function loginUserViaApi(
   password: string,
   deviceName = 'Playwright Chromium',
 ): Promise<RegisteredUserSession> {
+  const kdfUrl = `${apiUrl(API_PATHS.authKdfParams)}?username=${encodeURIComponent(username)}`;
+  const kdfRes = await request.get(kdfUrl, {
+    timeout: 10_000,
+    failOnStatusCode: false,
+  });
+  const kdfBody =
+    kdfRes.status() === 200
+      ? ((await kdfRes.json().catch(() => null)) as {
+          auth_version?: unknown;
+          auth_salt_b64?: unknown;
+          kdf_params?: { m_cost_kib?: unknown; t_cost?: unknown; p_cost?: unknown } | null;
+        } | null)
+      : null;
+
+  const loginPayload: Record<string, unknown> =
+    kdfBody &&
+    Number(kdfBody.auth_version) === 2 &&
+    typeof kdfBody.auth_salt_b64 === 'string' &&
+    kdfBody.auth_salt_b64.trim().length > 0
+      ? {
+          username,
+          password: '',
+          auth_verifier_b64: deriveSplitKeyV2AuthVerifierB64(
+            password,
+            kdfBody.auth_salt_b64,
+            kdfBody.kdf_params,
+          ),
+          device_name: deviceName,
+        }
+      : { username, password, device_name: deviceName };
+
   const url = apiUrl(API_PATHS.authLogin);
   const response = await request.post(url, {
-    data: { username, password, device_name: deviceName },
+    data: loginPayload,
     timeout: 10_000,
     failOnStatusCode: false,
   });

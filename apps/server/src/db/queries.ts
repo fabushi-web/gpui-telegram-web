@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   extractPlainTextFromContent,
   fromWireMessageEntity,
+  isSafeEntityUrl,
   parseMarkdownEntities,
   toWireMessageEntity,
   type ChatDetailDto,
@@ -30,6 +31,25 @@ import {
   type WirePeerId,
 } from '@gpui-telegram/protocol';
 import { ApiError } from '../utils/http.js';
+
+function sanitizeWireEntities(
+  entities: Array<MessageEntity | WireMessageEntity> | undefined,
+): WireMessageEntity[] {
+  if (!Array.isArray(entities) || entities.length === 0) return [];
+  const safe: WireMessageEntity[] = [];
+  for (const raw of entities) {
+    if (!raw || typeof raw !== 'object') continue;
+    const wire = toWireMessageEntity(fromWireMessageEntity(raw));
+    if (wire.entity_type?.type === 'TextUrl') {
+      const url = wire.entity_type.value?.url;
+      if (typeof url !== 'string' || !isSafeEntityUrl(url)) {
+        continue;
+      }
+    }
+    safe.push(wire);
+  }
+  return safe;
+}
 
 export function parseOptionalPositiveInt(
   val: unknown,
@@ -1455,9 +1475,14 @@ export function createMessageAtomic(
     content = validateWireMessageContent(params.content);
     if (content.type === 'Text') {
       plainText = content.data.text;
-      wireEntities = Array.isArray(content.data.entities)
-        ? content.data.entities.map((e) => toWireMessageEntity(fromWireMessageEntity(e)))
-        : [];
+      wireEntities = sanitizeWireEntities(content.data.entities);
+      content = {
+        type: 'Text',
+        data: {
+          text: plainText,
+          entities: wireEntities,
+        },
+      };
     } else {
       plainText =
         typeof params.text === 'string' ? params.text : safeExtractPlainTextFromContent(content);
@@ -1469,11 +1494,11 @@ export function createMessageAtomic(
     }
     if (params.entities && params.entities.length > 0) {
       plainText = rawText;
-      wireEntities = params.entities.map((e) => toWireMessageEntity(fromWireMessageEntity(e)));
+      wireEntities = sanitizeWireEntities(params.entities);
     } else if (params.parseMarkdown !== false) {
       const parsed = parseMarkdownEntities(rawText);
       plainText = parsed.text;
-      wireEntities = parsed.entities.map(toWireMessageEntity);
+      wireEntities = sanitizeWireEntities(parsed.entities);
     } else {
       plainText = rawText;
     }
@@ -1794,9 +1819,11 @@ export function editMessageAtomic(
     newContent = validateWireMessageContent(params.content);
     if (newContent.type === 'Text') {
       plainText = newContent.data.text;
-      wireEntities = Array.isArray(newContent.data.entities)
-        ? newContent.data.entities.map((e) => toWireMessageEntity(fromWireMessageEntity(e)))
-        : [];
+      wireEntities = sanitizeWireEntities(newContent.data.entities);
+      newContent = {
+        type: 'Text',
+        data: { text: plainText, entities: wireEntities },
+      };
     } else {
       plainText =
         typeof params.text === 'string'
@@ -1809,11 +1836,11 @@ export function editMessageAtomic(
     }
     if (params.entities) {
       plainText = params.text;
-      wireEntities = params.entities.map((e) => toWireMessageEntity(fromWireMessageEntity(e)));
+      wireEntities = sanitizeWireEntities(params.entities);
     } else {
       const parsed = parseMarkdownEntities(params.text);
       plainText = parsed.text;
-      wireEntities = parsed.entities.map(toWireMessageEntity);
+      wireEntities = sanitizeWireEntities(parsed.entities);
     }
     newContent = {
       type: 'Text',
@@ -2242,6 +2269,127 @@ export function computeChatDifference(
     pts: lastAppliedPts,
     current_pts: currentPts,
     updates,
+    has_more: hasMore,
+    snapshot_required: false,
+  };
+}
+
+export function computeUserGlobalDifference(
+  db: DatabaseSync,
+  userId: number,
+  req: {
+    pts?: number;
+    from_pts?: number;
+    limit?: number;
+    pts_total_limit?: number;
+  },
+): SyncGetDifferenceResponse & { events: PtsUpdate[] } {
+  const maxRow = db
+    .prepare(
+      `SELECT COALESCE(MAX(pe.rowid), 0) AS max_pts
+       FROM pts_events pe
+       JOIN chat_members cm ON cm.chat_id = pe.chat_id AND cm.user_id = ? AND cm.role != 'banned'`,
+    )
+    .get(userId) as { max_pts: number } | undefined;
+
+  const currentGlobalPts = Number(maxRow?.max_pts ?? 0);
+  const rawFromPts = Number(req.from_pts ?? req.pts ?? 0);
+  const fromPts = Number.isFinite(rawFromPts) ? Math.max(0, Math.trunc(rawFromPts)) : 0;
+  const rawLimit = Number(req.limit ?? req.pts_total_limit ?? 200);
+  const maxLimit = Number.isFinite(rawLimit)
+    ? Math.min(500, Math.max(1, Math.trunc(rawLimit)))
+    : 200;
+
+  if (fromPts >= currentGlobalPts) {
+    return {
+      status: 'UpToDate',
+      chat_id: 0,
+      new_messages: [],
+      other_updates: [],
+      pts: currentGlobalPts,
+      current_pts: currentGlobalPts,
+      updates: [],
+      events: [],
+      has_more: false,
+      snapshot_required: false,
+    };
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT pe.rowid AS global_pts, pe.chat_id, pe.pts, pe.pts_count, pe.created_at_ms, pe.event_json
+       FROM pts_events pe
+       JOIN chat_members cm ON cm.chat_id = pe.chat_id AND cm.user_id = ? AND cm.role != 'banned'
+       WHERE pe.rowid > ?
+       ORDER BY pe.rowid ASC
+       LIMIT ?`,
+    )
+    .all(userId, fromPts, maxLimit) as Array<{
+    global_pts: number;
+    chat_id: number;
+    pts: number;
+    pts_count: number;
+    created_at_ms: number;
+    event_json: string;
+  }>;
+
+  const updates: PtsUpdate[] = [];
+  const newMessages: MessageItem[] = [];
+  const otherUpdates: UpdateEvent[] = [];
+
+  for (const r of rows) {
+    const rowChatId = Number(r.chat_id);
+    const event = JSON.parse(r.event_json) as UpdateEvent;
+    const ptsVal = Number(r.pts);
+    const ts = Number(r.created_at_ms);
+
+    // Re-hydrate fresh message state for NewMessage/EditMessage; NEVER leak tombstoned/deleted/cleared messages.
+    if (event.type === 'NewMessage' || event.type === 'EditMessage') {
+      const fresh = getMessageById(db, rowChatId, Number(event.data.id), userId);
+      if (!fresh) {
+        continue;
+      }
+      const refreshedEvent: UpdateEvent = { type: event.type, data: fresh };
+      updates.push({
+        chat_id: rowChatId,
+        pts: ptsVal,
+        pts_count: Number(r.pts_count),
+        event: refreshedEvent,
+        timestamp_ms: ts,
+        date: new Date(ts).toISOString(),
+      });
+      if (event.type === 'NewMessage') {
+        newMessages.push(fresh);
+      } else {
+        otherUpdates.push(refreshedEvent);
+      }
+      continue;
+    }
+
+    updates.push({
+      chat_id: rowChatId,
+      pts: ptsVal,
+      pts_count: Number(r.pts_count),
+      event,
+      timestamp_ms: ts,
+      date: new Date(ts).toISOString(),
+    });
+    otherUpdates.push(event);
+  }
+
+  const lastAppliedGlobalPts =
+    rows.length > 0 ? Number(rows[rows.length - 1]!.global_pts) : currentGlobalPts;
+  const hasMore = lastAppliedGlobalPts < currentGlobalPts;
+
+  return {
+    status: rows.length > 0 ? 'Updates' : 'UpToDate',
+    chat_id: 0,
+    new_messages: newMessages,
+    other_updates: otherUpdates,
+    pts: lastAppliedGlobalPts,
+    current_pts: currentGlobalPts,
+    updates,
+    events: updates,
     has_more: hasMore,
     snapshot_required: false,
   };

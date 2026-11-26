@@ -47,28 +47,48 @@ export const QrMatrixSvg: React.FC<QrMatrixSvgProps> = ({
   badge = 'none',
   className,
 }) => {
-  const { matrixDim, pathD, accentPathD } = useMemo(() => {
+  const { matrixDim, rowPaths } = useMemo(() => {
     const grid = buildDeterministicQrMatrix(value);
     const dim = grid.length;
-    const mainParts: string[] = [];
-    const accentParts: string[] = [];
+    const paths: Array<{ key: string; d: string; fill: string }> = [];
     for (let r = 0; r < dim; r += 1) {
       const row = grid[r]!;
-      for (let c = 0; c < dim; c += 1) {
+      let mainD = '';
+      let accentD = '';
+      let c = 0;
+      while (c < dim) {
         const cell = row[c]!;
-        if (!cell.dark) continue;
-        const cmd = `M${c + QUIET_ZONE},${r + QUIET_ZONE}h1v1h-1z`;
-        if (cell.accent && accentColor !== foreground) {
-          accentParts.push(cmd);
-        } else {
-          mainParts.push(cmd);
+        if (!cell.dark) {
+          c += 1;
+          continue;
         }
+        const isAccent = cell.accent && accentColor !== foreground;
+        const start = c;
+        while (c < dim) {
+          const next = row[c]!;
+          if (!next.dark) break;
+          const nextAccent = next.accent && accentColor !== foreground;
+          if (nextAccent !== isAccent) break;
+          c += 1;
+        }
+        const runWidth = c - start;
+        const cmd = `M${start + QUIET_ZONE},${r + QUIET_ZONE}h${runWidth}v1h-${runWidth}z`;
+        if (isAccent) {
+          accentD += cmd;
+        } else {
+          mainD += cmd;
+        }
+      }
+      if (mainD) {
+        paths.push({ key: `r${r}-m`, d: mainD, fill: foreground });
+      }
+      if (accentD) {
+        paths.push({ key: `r${r}-a`, d: accentD, fill: accentColor });
       }
     }
     return {
       matrixDim: dim,
-      pathD: mainParts.join(''),
-      accentPathD: accentParts.join(''),
+      rowPaths: paths,
     };
   }, [value, accentColor, foreground]);
 
@@ -93,13 +113,14 @@ export const QrMatrixSvg: React.FC<QrMatrixSvgProps> = ({
         width: `${size}px`,
         height: `${size}px`,
         borderRadius: '12px',
-        boxShadow: '0 4px 18px rgba(0, 0, 0, 0.16)',
+        boxShadow: 'var(--tg-shadow-md)',
         shapeRendering: 'crispEdges',
       }}
     >
       <rect x={0} y={0} width={totalView} height={totalView} fill={background} rx={1.5} />
-      <path d={pathD} fill={foreground} />
-      {accentPathD && <path d={accentPathD} fill={accentColor} />}
+      {rowPaths.map((seg) => (
+        <path key={seg.key} d={seg.d} fill={seg.fill} />
+      ))}
       {badge === 'alipay' && (
         <g shapeRendering="geometricPrecision">
           <rect

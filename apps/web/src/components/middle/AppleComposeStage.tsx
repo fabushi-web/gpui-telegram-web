@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DOM_IDS,
+  ImeSafetyFsm,
   type BotRegistryEntry,
   type ChatSummary,
   type UserProfile,
@@ -34,6 +35,7 @@ function getInitials(name: string): string {
 
 export const AppleComposeStage: React.FC = () => {
   const language = useSettingsStore((s) => s.language);
+  const sendByEnter = useSettingsStore((s) => s.sendByEnter);
   const isZh = language === 'zh-CN';
 
   const currentUser = useAuthStore((s) => s.currentUser);
@@ -76,6 +78,11 @@ export const AppleComposeStage: React.FC = () => {
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const composeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composeImeFsmRef = useRef<ImeSafetyFsm>(new ImeSafetyFsm({ sendByEnter }));
+
+  useEffect(() => {
+    composeImeFsmRef.current.setSendByEnter(sendByEnter);
+  }, [sendByEnter]);
 
   // Hydrate contacts & bots on open (strictly without touching activeChatId!)
   useEffect(() => {
@@ -307,15 +314,15 @@ export const AppleComposeStage: React.FC = () => {
           targetChatId = created.chatId;
         }
 
+        if (trimmedMsg && !sendImmediately) {
+          await saveDraft(targetChatId, trimmedMsg);
+        }
+
         closeAppleComposeStage();
         await selectChat(targetChatId);
 
-        if (trimmedMsg) {
-          if (sendImmediately) {
-            await sendText(targetChatId, trimmedMsg);
-          } else {
-            await saveDraft(targetChatId, trimmedMsg);
-          }
+        if (trimmedMsg && sendImmediately) {
+          await sendText(targetChatId, trimmedMsg);
         }
         return;
       }
@@ -331,15 +338,15 @@ export const AppleComposeStage: React.FC = () => {
         clientNonce: crypto.randomUUID(),
       });
 
+      if (trimmedMsg && !sendImmediately) {
+        await saveDraft(createdGroup.chatId, trimmedMsg);
+      }
+
       closeAppleComposeStage();
       await selectChat(createdGroup.chatId);
 
-      if (trimmedMsg) {
-        if (sendImmediately) {
-          await sendText(createdGroup.chatId, trimmedMsg);
-        } else {
-          await saveDraft(createdGroup.chatId, trimmedMsg);
-        }
+      if (trimmedMsg && sendImmediately) {
+        await sendText(createdGroup.chatId, trimmedMsg);
       }
     } catch (err) {
       setComposePending(false);
@@ -590,8 +597,52 @@ export const AppleComposeStage: React.FC = () => {
                 dir="auto"
                 value={composeText}
                 onChange={(e) => setComposeText(e.target.value)}
+                onCompositionStart={(e) => composeImeFsmRef.current.onCompositionStart(e.data)}
+                onCompositionUpdate={(e) => composeImeFsmRef.current.onCompositionUpdate(e.data)}
+                onCompositionEnd={(e) => {
+                  composeImeFsmRef.current.onCompositionEnd(e.data);
+                  window.requestAnimationFrame(() => {
+                    window.requestAnimationFrame(() => {
+                      composeImeFsmRef.current.resetCommitFence();
+                    });
+                  });
+                }}
+                onBlur={() => composeImeFsmRef.current.onCompositionCancel()}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  if (e.key !== 'Enter') return;
+                  const rawKeyCode = e.nativeEvent.keyCode || e.keyCode;
+                  if (e.nativeEvent.isComposing || rawKeyCode === 229) {
+                    composeImeFsmRef.current.handleKeyDown(
+                      {
+                        key: e.key,
+                        keyCode: rawKeyCode,
+                        shiftKey: e.shiftKey,
+                        ctrlKey: e.ctrlKey,
+                        metaKey: e.metaKey,
+                        isComposing: e.nativeEvent.isComposing,
+                      },
+                      { text: composeText, sendByEnter },
+                    );
+                    return;
+                  }
+                  const isMod = e.ctrlKey || e.metaKey;
+                  if (isMod && !composeImeFsmRef.current.isComposingOrCommitted()) {
+                    e.preventDefault();
+                    void handleCommitCompose(true);
+                    return;
+                  }
+                  const action = composeImeFsmRef.current.handleKeyDown(
+                    {
+                      key: e.key,
+                      keyCode: rawKeyCode,
+                      shiftKey: e.shiftKey,
+                      ctrlKey: e.ctrlKey,
+                      metaKey: e.metaKey,
+                      isComposing: e.nativeEvent.isComposing,
+                    },
+                    { text: composeText, sendByEnter },
+                  );
+                  if (action === 'SendMessage') {
                     e.preventDefault();
                     void handleCommitCompose(true);
                   }

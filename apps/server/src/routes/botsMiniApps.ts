@@ -23,6 +23,7 @@ import {
   ensureChatMembership,
   ensureChatReadAccess,
   ensureChatWriteAccess,
+  getChatDetailDto,
   getUserProfileDto,
   parseOptionalPositiveInt,
 } from '../db/queries.js';
@@ -277,7 +278,12 @@ function nextBotUserId(db: DatabaseSync): number {
   return Math.max(800_001, Number(row.mx) + 1);
 }
 
-function ensureCompanionDmChat(db: DatabaseSync, userId: number, botUserId: number): number {
+function ensureCompanionDmChat(
+  db: DatabaseSync,
+  userId: number,
+  botUserId: number,
+  hub?: RealtimeGatewayHub,
+): number {
   const existing = db
     .prepare(
       `SELECT c.chat_id FROM chats c
@@ -313,6 +319,17 @@ function ensureCompanionDmChat(db: DatabaseSync, userId: number, botUserId: numb
   );
   db.prepare(`INSERT INTO chat_members (chat_id, user_id, role, joined_at_ms) VALUES (?, ?, 'member', ?)`).run(chatId, userId, now);
   db.prepare(`INSERT INTO chat_members (chat_id, user_id, role, joined_at_ms) VALUES (?, ?, 'owner', ?)`).run(chatId, botUserId, now);
+
+  if (hub) {
+    const detail = getChatDetailDto(db, chatId, userId);
+    if (detail) {
+      hub.sendToUser(userId, {
+        type: 'Update',
+        payload: { type: 'ChatUpdated', data: detail },
+      });
+    }
+  }
+
   return chatId;
 }
 
@@ -407,7 +424,7 @@ function createBotRecord(
   displayName: string,
   rawUsername: string,
   description = '',
-  opts?: { avatar_shape?: string; avatar_color?: string },
+  opts?: { avatar_shape?: string; avatar_color?: string; hub?: RealtimeGatewayHub },
 ): { entry: BotRegistryEntry; botToken: string; companionChatId: number } {
   const cleanUsername = rawUsername.trim().replace(/^@/, '');
   if (!/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername) || !/bot$/i.test(cleanUsername)) {
@@ -466,7 +483,7 @@ function createBotRecord(
     VALUES (?, ?, ?, ?, ?)
   `).run(botUserId, ownerUserId, botToken, JSON.stringify(entry), now);
 
-  const companionChatId = ensureCompanionDmChat(db, ownerUserId, botUserId);
+  const companionChatId = ensureCompanionDmChat(db, ownerUserId, botUserId, opts?.hub);
 
   db.prepare(`
     INSERT OR REPLACE INTO user_bot_permissions (
@@ -708,7 +725,7 @@ export function handleBotConversationTurn(
     if (wiz?.step === 'await_bot_username') {
       const draft = JSON.parse(wiz.draft_json) as { displayName?: string };
       try {
-        const created = createBotRecord(db, senderId, draft.displayName ?? text, text);
+        const created = createBotRecord(db, senderId, draft.displayName ?? text, text, '', { hub });
         db.prepare(`DELETE FROM botfather_wizards WHERE user_id = ?`).run(senderId);
         createMessageAtomic(db, hub, {
           chatId,
@@ -1130,6 +1147,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
       {
         avatar_shape: typeof body.avatar_shape === 'string' ? body.avatar_shape : undefined,
         avatar_color: typeof body.avatar_color === 'string' ? body.avatar_color : undefined,
+        hub,
       },
     );
     sendJson(ctx.res, 201, {
@@ -1168,6 +1186,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
     const created = createBotRecord(db, auth.userId, displayName, username, prompt.slice(0, 200), {
       avatar_shape: typeof body.avatar_shape === 'string' ? body.avatar_shape : undefined,
       avatar_color: typeof body.avatar_color === 'string' ? body.avatar_color : undefined,
+      hub,
     });
 
     const appId = `app_${crypto.randomBytes(6).toString('hex')}`;
@@ -1259,7 +1278,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
       ON CONFLICT(user_id, bot_user_id) DO UPDATE SET allows_write_to_pm = 1, updated_at_ms = excluded.updated_at_ms
     `).run(auth.userId, botId, now);
 
-    const companionChatId = ensureCompanionDmChat(db, auth.userId, botId);
+    const companionChatId = ensureCompanionDmChat(db, auth.userId, botId, hub);
     sendJson(ctx.res, 200, {
       ok: true,
       allows_write_to_pm: true,
@@ -1787,7 +1806,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
             });
             return;
           }
-          resolvedChatId = ensureCompanionDmChat(db, targetId, bot.bot_user_id);
+          resolvedChatId = ensureCompanionDmChat(db, targetId, bot.bot_user_id, hub);
         }
 
         const msgRes = createMessageAtomic(db, hub, {
@@ -2372,7 +2391,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
       if (!(err instanceof ApiError && err.status === 400)) throw err;
     }
     const resolved = resolveMiniAppRow(ctx.params.botUsername!, ctx.params.shortName!);
-    const companionChatId = ensureCompanionDmChat(db, auth.userId, resolved.app.bot_user_id);
+    const companionChatId = ensureCompanionDmChat(db, auth.userId, resolved.app.bot_user_id, hub);
     const now = Date.now();
 
     db.prepare(`
@@ -2437,7 +2456,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
       ensureChatReadAccess(db, requestedChatId, auth.userId);
     }
     const companionChatId =
-      requestedChatId ?? ensureCompanionDmChat(db, auth.userId, resolved.app.bot_user_id);
+      requestedChatId ?? ensureCompanionDmChat(db, auth.userId, resolved.app.bot_user_id, hub);
     const now = Date.now();
 
     db.prepare(`
@@ -2756,7 +2775,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
       ensureChatWriteAccess(db, requestedChatId, userId);
     }
     const companionChatId =
-      requestedChatId ?? ensureCompanionDmChat(db, userId, resolved.app.bot_user_id);
+      requestedChatId ?? ensureCompanionDmChat(db, userId, resolved.app.bot_user_id, hub);
 
     const userMsg = createMessageAtomic(db, hub, {
       chatId: companionChatId,
@@ -2826,7 +2845,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
         ensureChatReadAccess(db, requestedChatId, userId);
       }
     }
-    const chatId = requestedChatId ?? ensureCompanionDmChat(db, userId, resolved.app.bot_user_id);
+    const chatId = requestedChatId ?? ensureCompanionDmChat(db, userId, resolved.app.bot_user_id, hub);
 
     if (actionType === 'send_data') {
       sendJson(ctx.res, 200, dispatchSendData(resolved, userId, body.data, requestedChatId));
@@ -2956,7 +2975,7 @@ export function registerBotsMiniAppsAndFabushiRoutes(
     state.merit_total += 18;
     saveFabushiState(db, userId, state);
 
-    const companionChatId = ensureCompanionDmChat(db, userId, 777002);
+    const companionChatId = ensureCompanionDmChat(db, userId, 777002, hub);
     createMessageAtomic(db, hub, {
       chatId: companionChatId,
       senderId: 777002,

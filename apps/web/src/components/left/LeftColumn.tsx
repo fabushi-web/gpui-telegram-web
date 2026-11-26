@@ -42,17 +42,36 @@ export const LeftColumn: React.FC<LeftColumnProps> = ({ className }) => {
     setSearchInput(globalSearchQuery);
   }, [globalSearchQuery]);
 
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+        searchDebounceRef.current = null;
+      }
+    };
+  }, []);
+
   const handleSearchChange = (val: string): void => {
     setSearchInput(val);
     if (searchDebounceRef.current) {
       clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+    if (!val.trim()) {
+      void searchGlobal('');
+      return;
     }
     searchDebounceRef.current = setTimeout(() => {
+      searchDebounceRef.current = null;
       void searchGlobal(val);
     }, 120);
   };
 
   const handleClearSearch = (): void => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
     setSearchInput('');
     setSearchFocused(false);
     void searchGlobal('');

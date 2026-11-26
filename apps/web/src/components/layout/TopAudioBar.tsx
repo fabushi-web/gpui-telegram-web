@@ -143,7 +143,8 @@ export const TopAudioBar: React.FC<TopAudioBarProps> = ({ className }) => {
         <button
           type="button"
           onClick={() => cycleAudioRate()}
-          aria-label={t('voice.speed', language)}
+          aria-label={`${t('voice.speed', language)} ${audioPlayerState.rate}x`}
+          title={t('voice.speed', language)}
           data-testid="audio-speed-btn"
           className="tg-btn tg-btn--secondary"
           style={{ padding: '4px 8px', fontSize: '12px', fontWeight: 600 }}

@@ -51,7 +51,7 @@ function storeCasBlobAndMetadata(
     waveform?: number[];
     hasSpoiler?: boolean;
   },
-): MediaDescriptor & { deduplicated: boolean; sha256: string } {
+): MediaDescriptor & { id: string; deduplicated: boolean; sha256: string } {
   const sha256 = sha256Hex(buffer);
   const shardDir = path.join(config.mediaDir, sha256.slice(0, 2));
   fs.mkdirSync(shardDir, { recursive: true });
@@ -91,6 +91,7 @@ function storeCasBlobAndMetadata(
   );
 
   return {
+    id: fileId,
     file_id: fileId,
     sha256,
     deduplicated: Boolean(existingRow || alreadyOnDisk),
@@ -372,12 +373,44 @@ export function registerMediaStoriesE2eeAndCallRoutes(
   router.post('/api/v1/media/upload', async (ctx) => {
     const auth = requireAuth(db, ctx);
     const uploaded = await readUploadedFileBody(ctx.req, ctx.query);
+    const rawWidth = ctx.query.get('width');
+    const rawHeight = ctx.query.get('height');
+    const rawDuration = ctx.query.get('duration') ?? ctx.query.get('duration_seconds');
+    const rawWaveformHeader = ctx.req.headers['x-waveform'];
+    const rawWaveform =
+      ctx.query.get('waveform') ??
+      (typeof rawWaveformHeader === 'string' ? rawWaveformHeader : null);
+
+    let durationSecs: number | undefined;
+    if (rawDuration !== null && rawDuration.trim() !== '') {
+      const parsedDuration = Number(rawDuration);
+      if (!Number.isFinite(parsedDuration) || parsedDuration < 0) {
+        throw new ApiError(400, 'invalid_duration', 'duration_seconds must be a non-negative number');
+      }
+      durationSecs = parsedDuration;
+    }
+
+    let waveform: number[] | undefined;
+    if (rawWaveform !== null && rawWaveform.trim() !== '') {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawWaveform);
+      } catch {
+        throw new ApiError(400, 'invalid_waveform', 'waveform must be a valid JSON array of finite numbers');
+      }
+      if (!Array.isArray(parsed) || !parsed.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+        throw new ApiError(400, 'invalid_waveform', 'waveform must be an array of finite numbers');
+      }
+      waveform = parsed as number[];
+    }
+
     const descriptor = storeCasBlobAndMetadata(db, config, auth.userId, uploaded.buffer, {
       fileName: uploaded.fileName,
       mimeType: uploaded.mimeType,
-      width: ctx.query.get('width') ? Number(ctx.query.get('width')) : undefined,
-      height: ctx.query.get('height') ? Number(ctx.query.get('height')) : undefined,
-      durationSecs: ctx.query.get('duration') ? Number(ctx.query.get('duration')) : undefined,
+      width: rawWidth && Number.isFinite(Number(rawWidth)) ? Number(rawWidth) : undefined,
+      height: rawHeight && Number.isFinite(Number(rawHeight)) ? Number(rawHeight) : undefined,
+      durationSecs,
+      waveform,
       hasSpoiler: ctx.query.get('spoiler') === 'true',
     });
     sendJson(ctx.res, 201, descriptor);

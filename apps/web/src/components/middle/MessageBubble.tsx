@@ -639,6 +639,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                   className={`tg-reaction-pill${chosen ? ' is-chosen' : ''}`}
                   onClick={(e) => {
                     e.stopPropagation();
+                    setHovered(false);
                     void toggleReaction(message.chat_id, message.id, r.emoji);
                   }}
                   onContextMenu={(e) => {

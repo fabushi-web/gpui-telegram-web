@@ -196,6 +196,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  private needsReconnectSync = false;
   private manualDisconnect = false;
   private flushingOutbox = false;
   private chatPtsMap = new Map<number, number>();
@@ -209,13 +210,52 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
     this.baseUrl = this.normalizeBaseUrl(initialBaseUrl);
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
+        this.reconnectAttempts = 0;
         if (this.token && !this.manualDisconnect) {
+          if (this.ws) {
+            const stale = this.ws;
+            this.ws = null;
+            stale.onopen = null;
+            stale.onmessage = null;
+            stale.onerror = null;
+            stale.onclose = null;
+            try {
+              stale.close(1000, 'Network restored');
+            } catch {
+              // Ignore
+            }
+          }
           void this.connect(this.token);
-          void this.flushOutbox();
         }
       });
       window.addEventListener('offline', () => {
-        if (this.connectionState === 'connected') {
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
+        if (this.pingTimer) {
+          clearInterval(this.pingTimer);
+          this.pingTimer = null;
+        }
+        if (this.ws) {
+          const stale = this.ws;
+          this.ws = null;
+          stale.onopen = null;
+          stale.onmessage = null;
+          stale.onerror = null;
+          stale.onclose = null;
+          try {
+            stale.close(1000, 'Browser offline');
+          } catch {
+            // Ignore
+          }
+        }
+        if (this.token && !this.manualDisconnect) {
+          this.needsReconnectSync = true;
           this.setConnectionState('reconnecting');
         }
       });
@@ -534,11 +574,30 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
     ) {
+      if (this.ws.readyState === WebSocket.OPEN && this.connectionState !== 'connected') {
+        const openEpoch = this.accountEpoch;
+        const openSocket = this.ws;
+        const pending = await indexedDbCache.listOutbox(this.accountId).catch(() => []);
+        if (pending.length > 0) {
+          this.setConnectionState('updating');
+          await this.flushOutbox();
+        }
+        if (
+          openEpoch === this.accountEpoch &&
+          this.ws === openSocket &&
+          openSocket.readyState === WebSocket.OPEN &&
+          (typeof navigator === 'undefined' || navigator.onLine !== false)
+        ) {
+          this.setConnectionState('connected');
+        }
+      }
       return;
     }
 
     const epoch = this.accountEpoch;
-    this.setConnectionState(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
+    this.setConnectionState(
+      this.reconnectAttempts > 0 || this.needsReconnectSync ? 'reconnecting' : 'connecting',
+    );
 
     browserControlAgent.setWsReplySender((result) => {
       this.sendWsFrame({ type: 'BrowserCommandResult', payload: result });
@@ -572,9 +631,9 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
             finish();
             return;
           }
-          const wasReconnect = this.reconnectAttempts > 0;
+          const wasReconnect = this.reconnectAttempts > 0 || this.needsReconnectSync;
           this.reconnectAttempts = 0;
-          this.setConnectionState('connected');
+          this.needsReconnectSync = false;
 
           if (this.pingTimer) clearInterval(this.pingTimer);
           this.pingTimer = setInterval(() => {
@@ -583,16 +642,37 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
             this.sendWsFrame({ type: 'Ping', payload: { nonce: now, client_ts: now } });
           }, 25_000);
 
-          // Register live browser tab for F17 Desktop-to-Browser control bridge
-          this.sendWsFrame({
-            type: 'BrowserRegister',
-            payload: browserControlAgent.buildRegisterPayload(),
-          });
-
-          void this.flushOutbox();
-          if (wasReconnect) {
-            void this.reconcilePtsAfterReconnect();
+          // Register live browser tab for F17 Desktop-to-Browser control bridge ONLY when explicitly opted in
+          if (browserControlAgent.getState().allowDesktopControl) {
+            this.sendWsFrame({
+              type: 'BrowserRegister',
+              payload: browserControlAgent.buildRegisterPayload(),
+            });
           }
+
+          const finalizeOpen = async (): Promise<void> => {
+            const pending = await indexedDbCache.listOutbox(this.accountId).catch(() => []);
+            const shouldSync = pending.length > 0 || (wasReconnect && this.chatPtsMap.size > 0);
+            if (shouldSync) {
+              this.setConnectionState('updating');
+              if (pending.length > 0) {
+                await this.flushOutbox();
+              }
+              if (wasReconnect && this.chatPtsMap.size > 0) {
+                await this.reconcilePtsAfterReconnect();
+              }
+            }
+            if (
+              epoch === this.accountEpoch &&
+              this.ws === socket &&
+              socket.readyState === WebSocket.OPEN &&
+              (typeof navigator === 'undefined' || navigator.onLine !== false)
+            ) {
+              this.setConnectionState('connected');
+            }
+          };
+
+          void finalizeOpen();
           finish();
         };
 
@@ -614,13 +694,15 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
 
         socket.onclose = (closeEv: CloseEvent) => {
           clearTimeout(openTimeout);
+          if (this.ws !== socket) {
+            finish();
+            return;
+          }
           if (this.pingTimer) {
             clearInterval(this.pingTimer);
             this.pingTimer = null;
           }
-          if (this.ws === socket) {
-            this.ws = null;
-          }
+          this.ws = null;
           if (epoch !== this.accountEpoch) {
             finish();
             return;
@@ -631,6 +713,7 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
             return;
           }
           if (!this.manualDisconnect && this.token) {
+            this.needsReconnectSync = true;
             this.scheduleReconnect(epoch);
           } else {
             this.setConnectionState('disconnected');
@@ -647,7 +730,13 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   private scheduleReconnect(epoch = this.accountEpoch): void {
     if (this.manualDisconnect || !this.token || epoch !== this.accountEpoch) return;
     this.setConnectionState('reconnecting');
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return;
+    }
     const delayMs = Math.min(8_000, 350 * Math.pow(1.8, this.reconnectAttempts));
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
@@ -2324,6 +2413,34 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   ): Promise<MediaDescriptor> {
     const bytes =
       data instanceof Uint8Array ? data : new Uint8Array(await data.arrayBuffer());
+
+    if (bytes.byteLength <= CHUNK_PART_BYTES) {
+      const params = new URLSearchParams();
+      if (meta.fileName) params.set('filename', meta.fileName);
+      if (meta.width !== undefined) params.set('width', String(meta.width));
+      if (meta.height !== undefined) params.set('height', String(meta.height));
+      if (meta.durationSecs !== undefined) params.set('duration', String(meta.durationSecs));
+      if (meta.waveform && meta.waveform.length > 0) {
+        params.set('waveform', JSON.stringify(meta.waveform));
+      }
+      const queryStr = params.toString();
+      const uploadPath = queryStr ? `/api/v1/media/upload?${queryStr}` : '/api/v1/media/upload';
+      const descriptor = await this.requestJson<MediaDescriptor>(
+        'POST',
+        uploadPath,
+        bytes,
+        {
+          'Content-Type': meta.mimeType || 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(meta.fileName || 'upload.bin'),
+        },
+      );
+      onProgress?.(100);
+      return {
+        ...descriptor,
+        url: descriptor.url ? this.resolveHttpUrl(descriptor.url) : this.getMediaStreamUrl(descriptor.file_id),
+      };
+    }
+
     const expectedSha256 = await computeSha256Hex(bytes);
 
     const init = await this.requestJson<{
@@ -3404,7 +3521,21 @@ export class HttpWsServerAdapter implements TelegramClientPort, BrowserControlCl
   public async registerBrowserTarget(
     payload: BrowserRegisterPayload,
   ): Promise<BrowserTargetDescriptor> {
-    return this.requestJson('POST', '/api/v1/browser/targets/register', payload);
+    const registered = await this.requestJson<BrowserTargetDescriptor>(
+      'POST',
+      '/api/v1/browser/targets/register',
+      payload,
+    );
+    if (
+      browserControlAgent.getState().allowDesktopControl &&
+      this.ws?.readyState === WebSocket.OPEN
+    ) {
+      this.sendWsFrame({
+        type: 'BrowserRegister',
+        payload,
+      });
+    }
+    return registered;
   }
 
   public async reportBrowserState(

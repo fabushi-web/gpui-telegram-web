@@ -400,6 +400,20 @@ export async function readComposerText(input: Locator): Promise<string> {
   });
 }
 
+function expectedRenderedLines(raw: string): string[] {
+  const stripped = raw
+    .replace(/```[^\n]*\n?/g, '\n')
+    .replace(/\*\*|~~|\|\||`/g, '')
+    .replace(/(^|[\s(])__([^\s_](?:[^\n]*?[^\s_])?)__(?=[\s).,!?:;]|$)/g, '$1$2')
+    .replace(/(^|[\s(])_([^\s_][^_\n]*?)_(?=[\s).,!?:;]|$)/g, '$1$2')
+    .replace(/(^|[\s(])\*([^\s*][^*\n]*?)\*(?=[\s).,!?:;]|$)/g, '$1$2');
+  const lines = stripped
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return lines.length > 0 ? lines : [raw];
+}
+
 /**
  * Fills `#message-composer-input`, sends via `#btn-send-message` (or `Enter` fallback),
  * awaits a newly appended `[data-testid="message-bubble"]` containing `text` in `#message-list`,
@@ -412,9 +426,10 @@ export async function sendTextMessage(page: Page, text: string): Promise<Locator
   await expect(composer).toBeEditable();
   await expect(messageList).toBeVisible();
 
-  const matchingBubbles = messageList
-    .locator(DOM.messageBubble)
-    .filter({ hasText: text });
+  let matchingBubbles = messageList.locator(DOM.messageBubble);
+  for (const expectedLine of expectedRenderedLines(text)) {
+    matchingBubbles = matchingBubbles.filter({ hasText: expectedLine });
+  }
 
   const countBefore = await matchingBubbles.count();
   const lastIdBefore =

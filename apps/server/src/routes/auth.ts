@@ -592,13 +592,13 @@ export function registerAuthAndUserRoutes(
           readOptionalTrimmedString(
             body.username,
             'invalid_username',
-            'Username must be 3–32 alphanumeric/underscore characters',
+            'Username must be 5–32 alphanumeric/underscore characters',
           ).replace(/^@/, '') || `u_${newUserId}`;
-        if (!/^[A-Za-z0-9_]{3,32}$/.test(username)) {
+        if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) {
           throw new ApiError(
             400,
             'invalid_username',
-            'Username must be 3–32 alphanumeric/underscore characters',
+            'Username must be 5–32 alphanumeric/underscore characters',
           );
         }
         db.prepare(`
@@ -1021,18 +1021,18 @@ export function registerAuthAndUserRoutes(
       throw new ApiError(
         400,
         'invalid_username',
-        'Username must be 3–32 alphanumeric/underscore characters',
+        'Username must be 5–32 alphanumeric/underscore characters',
       );
     }
     const username = body.username.trim().replace(/^@/, '');
     const firstName =
       typeof body.first_name === 'string' ? body.first_name.trim() : username;
 
-    if (!/^[A-Za-z0-9_]{3,32}$/.test(username)) {
+    if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) {
       throw new ApiError(
         400,
         'invalid_username',
-        'Username must be 3–32 alphanumeric/underscore characters',
+        'Username must be 5–32 alphanumeric/underscore characters',
       );
     }
 
@@ -1177,14 +1177,13 @@ export function registerAuthAndUserRoutes(
         db.prepare(
           `INSERT INTO twofa_challenges (challenge_token, user_id, device_name, expires_at_ms) VALUES (?, ?, ?, ?)`,
         ).run(chTok, userId, deviceName, Date.now() + 300_000);
-        sendJson(ctx.res, 403, {
-          error: '2fa_required',
-          message: 'Cloud Two-Step Verification password required',
-          two_fa_required: true,
+        sendJson(ctx.res, 200, {
           requires_2fa: true,
+          two_fa_required: true,
           challenge_token: chTok,
           hint: twoFa.hint ?? '',
           password_hint: twoFa.hint ?? '',
+          user_id: userId,
         });
         return;
       }
@@ -1394,13 +1393,13 @@ export function registerAuthAndUserRoutes(
         readOptionalTrimmedString(
           body.username,
           'invalid_username',
-          'Username must be 3–32 alphanumeric/underscore characters',
+          'Username must be 5–32 alphanumeric/underscore characters',
         ).replace(/^@/, '') || `${localPart}_${newUserId}`;
-      if (!/^[A-Za-z0-9_]{3,32}$/.test(desiredUsername)) {
+      if (!/^[A-Za-z0-9_]{5,32}$/.test(desiredUsername)) {
         throw new ApiError(
           400,
           'invalid_username',
-          'Username must be 3–32 alphanumeric/underscore characters',
+          'Username must be 5–32 alphanumeric/underscore characters',
         );
       }
       const dupU = db
@@ -1512,7 +1511,7 @@ export function registerAuthAndUserRoutes(
     const username = readOptionalTrimmedString(
       body.username,
       'invalid_username',
-      'Username must be 3–32 alphanumeric/underscore characters',
+      'Username must be 5–32 alphanumeric/underscore characters',
     ).replace(/^@/, '');
     const emailCodeHash =
       readOptionalTrimmedString(
@@ -1533,11 +1532,11 @@ export function registerAuthAndUserRoutes(
     if (!code) {
       throw new ApiError(400, 'missing_fields', 'Email verification code is required');
     }
-    if (!/^[A-Za-z0-9_]{3,32}$/.test(username)) {
+    if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) {
       throw new ApiError(
         400,
         'invalid_username',
-        'Username must be 3–32 alphanumeric/underscore characters',
+        'Username must be 5–32 alphanumeric/underscore characters',
       );
     }
 
@@ -2553,12 +2552,15 @@ export function registerAuthAndUserRoutes(
   router.delete('/api/v1/auth/passkey/:credId', handleDeletePasskey);
 
   // 9. Sessions, Me, Logout & Complete Account Deletion
-  router.get('/api/v1/auth/me', (ctx) => {
+  const handleGetMe = (ctx: RequestContext): void => {
     const auth = requireAuth(db, ctx);
     const user = getUserProfileDto(db, auth.userId);
     if (!user) throw new ApiError(404, 'user_not_found', 'User not found');
     sendJson(ctx.res, 200, user);
-  });
+  };
+  router.get('/api/v1/auth/me', handleGetMe);
+  router.get('/api/v1/me', handleGetMe);
+  router.get('/api/v1/account/me', handleGetMe);
 
   router.post('/api/v1/auth/logout', (ctx) => {
     const auth = requireAuth(db, ctx);
@@ -2614,11 +2616,12 @@ export function registerAuthAndUserRoutes(
   router.delete('/api/v1/auth/sessions/:sessionId', (ctx) => {
     const auth = requireAuth(db, ctx);
     const targetId = ctx.params.sessionId!;
-    db.prepare(`UPDATE auth_sessions SET revoked = 1 WHERE session_id = ? AND user_id = ?`).run(
-      targetId,
-      auth.userId,
-    );
-    hub.disconnectSession(targetId);
+    const result = db
+      .prepare(`UPDATE auth_sessions SET revoked = 1 WHERE session_id = ? AND user_id = ?`)
+      .run(targetId, auth.userId);
+    if (Number(result.changes ?? 0) > 0) {
+      hub.disconnectSession(targetId);
+    }
     sendJson(ctx.res, 200, { ok: true });
   });
 
@@ -2679,7 +2682,7 @@ export function registerAuthAndUserRoutes(
       }
       db.prepare(`DELETE FROM bots_registry WHERE owner_user_id = ?`).run(uid);
 
-      // Delete all user-owned private records & secrets across SQLite
+      // Delete all user-owned private records & secrets across SQLite (Core + M2 + M3 tables)
       db.prepare(`DELETE FROM auth_sessions WHERE user_id = ?`).run(uid);
       db.prepare(`DELETE FROM twofa_challenges WHERE user_id = ?`).run(uid);
       db.prepare(`DELETE FROM twofa_secrets WHERE user_id = ?`).run(uid);
@@ -2691,6 +2694,22 @@ export function registerAuthAndUserRoutes(
       db.prepare(`DELETE FROM vault_device_sync_requests WHERE user_id = ?`).run(uid);
       db.prepare(`DELETE FROM chat_create_nonces WHERE creator_user_id = ?`).run(uid);
       db.prepare(`DELETE FROM archive_bot_dedup WHERE caller_user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM user_provider_vaults WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM user_bot_permissions WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM mcp_oauth_codes WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM mcp_oauth_tokens WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM mcp_tool_audit_log WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM remote_assist_devices WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM remote_sessions WHERE owner_user_id = ? OR controller_user_id = ?`).run(uid, uid);
+      db.prepare(`DELETE FROM bot_computer_profiles WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM payment_orders WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM browser_control_generations WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM browser_pairing_tickets WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM browser_desktop_tokens WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM browser_audit_logs WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM user_automation_apps WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM automation_app_runs WHERE user_id = ?`).run(uid);
+      db.prepare(`DELETE FROM automation_apps WHERE author_user_id = ?`).run(uid);
       db.prepare(`DELETE FROM user_contacts WHERE owner_user_id = ? OR contact_user_id = ?`).run(uid, uid);
       db.prepare(`DELETE FROM user_blocks WHERE owner_user_id = ? OR blocked_user_id = ?`).run(uid, uid);
       db.prepare(`DELETE FROM user_chat_settings WHERE user_id = ?`).run(uid);
@@ -2779,15 +2798,15 @@ export function registerAuthAndUserRoutes(
         throw new ApiError(
           400,
           'invalid_username',
-          'Username must be 3–32 alphanumeric/underscore characters',
+          'Username must be 5–32 alphanumeric/underscore characters',
         );
       }
       const cleanU = body.username.trim().replace(/^@/, '');
-      if (!cleanU || !/^[A-Za-z0-9_]{3,32}$/.test(cleanU)) {
+      if (!cleanU || !/^[A-Za-z0-9_]{5,32}$/.test(cleanU)) {
         throw new ApiError(
           400,
           'invalid_username',
-          'Username must be 3–32 alphanumeric/underscore characters',
+          'Username must be 5–32 alphanumeric/underscore characters',
         );
       }
       const dup = db

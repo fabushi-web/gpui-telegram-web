@@ -69,7 +69,38 @@
     }
   }
 
+  function parseAllowedOrigin(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    try {
+      var parsed = new URL(rawUrl);
+      var host = (parsed.hostname || '').toLowerCase();
+      var isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+      if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback)) {
+        return parsed.origin;
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  function resolveParentHostOrigin() {
+    if (window.parent && window.parent !== window) {
+      var fromReferrer = parseAllowedOrigin(document.referrer);
+      if (fromReferrer) return fromReferrer;
+      var fromHash = parseAllowedOrigin(hashParams.get('tgWebAppHostOrigin') || searchParams.get('tgWebAppHostOrigin'));
+      if (fromHash) return fromHash;
+    }
+    if (window.location && window.location.origin && window.location.origin !== 'null') {
+      return window.location.origin;
+    }
+    return '';
+  }
+
+  var trustedHostOrigin = resolveParentHostOrigin();
+
   function resolveTargetOrigin() {
+    if (trustedHostOrigin) {
+      return trustedHostOrigin;
+    }
     if (window.location && window.location.origin && window.location.origin !== 'null') {
       return window.location.origin;
     }
@@ -563,7 +594,11 @@
   }
 
   window.addEventListener('message', function (ev) {
-    if (window.location.origin !== 'null' && ev.origin && ev.origin !== window.location.origin) {
+    if (window.parent && window.parent !== window && ev.source !== window.parent) {
+      return;
+    }
+    var allowedOrigin = trustedHostOrigin || (window.location.origin !== 'null' ? window.location.origin : '');
+    if (allowedOrigin && ev.origin && ev.origin !== allowedOrigin && ev.origin !== window.location.origin) {
       return;
     }
     try {

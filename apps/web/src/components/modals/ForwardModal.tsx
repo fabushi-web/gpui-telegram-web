@@ -301,7 +301,7 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({ onClose }) => {
             disabled={!selectedTargetId || isSubmitting || messageIds.length === 0}
             onClick={() => void executeForward()}
           >
-            {t('message.forward', language)}
+            {isZh ? '确认转发' : 'Send Forward'}
           </button>
         </div>
       </div>

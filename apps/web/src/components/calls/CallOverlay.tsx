@@ -18,6 +18,7 @@ export interface CallOverlayProps {
 interface CompletedCallSnapshot {
   callId: string;
   chatId: number | null;
+  openedOnChatId: number | null;
   peerName: string;
   durationSec: number;
   isVideo: boolean;
@@ -200,6 +201,7 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
       ? {
           callId: liveRuntime.callId,
           chatId: resolvedChatId,
+          openedOnChatId: activeChatId ?? null,
           peerName: peerDisplayName,
           durationSec: Math.max(1, elapsedSec),
           isVideo: Boolean(liveRuntime.isVideo || liveRuntime.isVideoEnabled),
@@ -214,6 +216,13 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
       setRatingModal(snap);
     }
   };
+
+  // Auto-dismiss non-blocking post-call rating card if user switches to a different chat
+  useEffect(() => {
+    if (ratingModal && activeChatId !== ratingModal.openedOnChatId) {
+      setRatingModal(null);
+    }
+  }, [activeChatId, ratingModal]);
 
   const handleSubmitRating = async () => {
     if (!ratingModal) return;
@@ -592,22 +601,31 @@ export const CallOverlay: React.FC<CallOverlayProps> = ({ className }) => {
         </div>
       )}
 
-      {/* Post-Call 1–5 Star Quality Rating Dialog */}
+      {/* Post-Call 1–5 Star Quality Rating Non-Blocking Floating Card */}
       {ratingModal && (
         <div
-          className="tg-modal-overlay"
-          onClick={(ev) => {
-            if (ev.target === ev.currentTarget) void handleDismissRating();
+          style={{
+            position: 'fixed',
+            inset: 0,
+            pointerEvents: 'none',
+            display: 'flex',
+            alignItems: 'flex-end',
+            justifyContent: 'flex-end',
+            padding: '20px',
+            zIndex: 180,
           }}
         >
           <div
             id="call-rating-modal"
             data-testid="call-rating-dialog"
             role="dialog"
-            aria-modal="true"
+            aria-modal="false"
             aria-label={isZh ? '通话质量评价' : 'Rate Call Quality'}
             className="tg-modal-card"
-            style={{ width: 'min(380px, 92vw)' }}
+            style={{
+              width: 'min(360px, 92vw)',
+              pointerEvents: 'auto',
+            }}
           >
             <div className="tg-modal-header">
               <span>⭐ {isZh ? '评价本次通话质量' : 'Rate Call Quality'}</span>

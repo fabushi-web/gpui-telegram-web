@@ -210,7 +210,7 @@ export const CreatePollModal: React.FC<CreatePollModalProps> = ({ onClose }) => 
                   style={{ alignSelf: 'flex-start', padding: '5px 12px', fontSize: '12.5px' }}
                   onClick={handleAddOption}
                 >
-                  + {t('poll.addOption', language)}
+                  {isZh ? '+ 更多选项' : '+ Another Option'}
                 </button>
               )}
             </div>

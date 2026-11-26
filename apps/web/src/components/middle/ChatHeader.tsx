@@ -285,6 +285,7 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
         data-inspector-open={String(isRightOpen)}
         role="button"
         tabIndex={0}
+        aria-label={isZh ? '查看会话详情' : 'Open chat info'}
         onClick={() => {
           toggleRightSidebar(true, 'info');
           if (window.innerWidth <= 925) {

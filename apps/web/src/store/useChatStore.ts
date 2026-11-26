@@ -361,8 +361,11 @@ function mergeMessageIntoTimeline(existing: MessageItem[], incoming: MessageItem
 }
 
 let activeSelectSequence = 0;
+let globalSearchSequence = 0;
+let inChatSearchSequence = 0;
 let chatStoreAccountEpoch = 0;
 let realtimeUnbindFn: (() => void) | null = null;
+let missingChatSyncPromise: Promise<void> | null = null;
 
 export const useChatStore = create<ChatState>((set, get) => {
   const tryDecryptMessages = async (chatId: number, msgs: MessageItem[]): Promise<void> => {
@@ -393,6 +396,51 @@ export const useChatStore = create<ChatState>((set, get) => {
         decryptedSecretTexts: { ...prev.decryptedSecretTexts, ...updates },
       }));
     }
+  };
+
+  const syncMissingChatsFromServer = (epoch: number): void => {
+    if (missingChatSyncPromise) return;
+    const adapter = getClientAdapter();
+    const run = adapter
+      .listChats()
+      .then(({ chats, users }) => {
+        if (epoch !== chatStoreAccountEpoch) return;
+        set((prev) => {
+          const nextChats: Record<number, ChatSummary> = { ...prev.chatsById };
+          for (const c of chats) {
+            const existing = nextChats[c.chatId];
+            if (existing && existing.lastMessageId > c.lastMessageId) {
+              nextChats[c.chatId] = {
+                ...c,
+                lastMessageId: existing.lastMessageId,
+                lastMessageDateMs: existing.lastMessageDateMs,
+                lastMessagePreview: existing.lastMessagePreview,
+                unreadCount: Math.max(c.unreadCount, existing.unreadCount),
+              };
+            } else {
+              nextChats[c.chatId] = c;
+            }
+          }
+          const nextPeers: Record<number, UserProfile> = { ...prev.peersById };
+          for (const u of [...users, ...adapter.getDiscoveredPeers()]) {
+            nextPeers[u.userId] = u;
+          }
+          return {
+            chatsById: nextChats,
+            orderedChatIds: sortChatIds(nextChats),
+            peersById: nextPeers,
+          };
+        });
+      })
+      .catch(() => {
+        // Ignore transient background refresh errors; next WS/pts sync will retry
+      })
+      .finally(() => {
+        if (missingChatSyncPromise === run) {
+          missingChatSyncPromise = null;
+        }
+      });
+    missingChatSyncPromise = run;
   };
 
   return {
@@ -1225,7 +1273,17 @@ export const useChatStore = create<ChatState>((set, get) => {
         const nextDrafts = { ...prev.draftsByChat };
         if (draft) nextDrafts[chatId] = draft;
         else delete nextDrafts[chatId];
-        return { draftsByChat: nextDrafts };
+        const existingChat = prev.chatsById[chatId];
+        const nextChats = existingChat
+          ? {
+              ...prev.chatsById,
+              [chatId]: {
+                ...existingChat,
+                draft: draft ?? undefined,
+              },
+            }
+          : prev.chatsById;
+        return { draftsByChat: nextDrafts, chatsById: nextChats };
       });
       await getClientAdapter().saveDraft(chatId, draft).catch(() => undefined);
     },
@@ -1563,6 +1621,8 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     searchGlobal: async (query, tab) => {
+      const seq = ++globalSearchSequence;
+      const epoch = chatStoreAccountEpoch;
       const activeTab = tab ?? get().globalSearchTab;
       set({ globalSearchQuery: query, globalSearchTab: activeTab });
       if (!query.trim()) {
@@ -1570,11 +1630,16 @@ export const useChatStore = create<ChatState>((set, get) => {
         return null;
       }
       const res = await getClientAdapter().searchGlobal(query, { tab: activeTab });
+      if (seq !== globalSearchSequence || epoch !== chatStoreAccountEpoch) {
+        return null;
+      }
       set({ globalSearchResults: res });
       return res;
     },
 
     searchInChat: async (chatId, query) => {
+      const seq = ++inChatSearchSequence;
+      const epoch = chatStoreAccountEpoch;
       set({ inChatSearchQuery: query });
       if (!query.trim()) {
         set({ inChatSearchHits: [] });
@@ -1583,6 +1648,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       const hits = await getClientAdapter().searchMessages(chatId, query, {
         topicId: get().activeTopicId ?? undefined,
       });
+      if (
+        seq !== inChatSearchSequence ||
+        epoch !== chatStoreAccountEpoch ||
+        get().activeChatId !== chatId
+      ) {
+        return [];
+      }
       set({ inChatSearchHits: hits });
       return hits;
     },
@@ -1647,9 +1719,14 @@ export const useChatStore = create<ChatState>((set, get) => {
           case 'EditMessage': {
             const msg = enrichMessageItem(event.data);
             const cid = msg.chat_id;
+            const epoch = chatStoreAccountEpoch;
+            let missingFromChatList = false;
             set((prev) => {
               const timeline = mergeMessageIntoTimeline(prev.messagesByChat[cid] ?? [], msg);
               const existingChat = prev.chatsById[cid];
+              if (!existingChat) {
+                missingFromChatList = true;
+              }
               const isIncoming = !msg.flags?.is_out;
               const nextChats = existingChat
                 ? {
@@ -1672,6 +1749,9 @@ export const useChatStore = create<ChatState>((set, get) => {
                 orderedChatIds: sortChatIds(nextChats),
               };
             });
+            if (missingFromChatList) {
+              syncMissingChatsFromServer(epoch);
+            }
             void tryDecryptMessages(cid, [msg]);
             break;
           }
@@ -1981,7 +2061,10 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     resetChatStore: () => {
       activeSelectSequence += 1;
+      globalSearchSequence += 1;
+      inChatSearchSequence += 1;
       chatStoreAccountEpoch += 1;
+      missingChatSyncPromise = null;
       set({
         chatsById: {},
         orderedChatIds: [],

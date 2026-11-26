@@ -109,20 +109,25 @@ function getInitials(title: string): string {
 
 function extractUrlsFromMessage(msg: MessageItem): string[] {
   const urls = new Set<string>();
+  const addSafe = (candidate: string | undefined | null) => {
+    if (typeof candidate === 'string' && candidate.trim() && isSafeEntityUrl(candidate.trim())) {
+      urls.add(candidate.trim());
+    }
+  };
   if (msg.web_page?.url) {
-    urls.add(msg.web_page.url);
+    addSafe(msg.web_page.url);
   }
   const rawText = msg.text ?? '';
   if (msg.entities) {
     for (const ent of msg.entities) {
       if (ent.type === 'text_url' && typeof ent.url === 'string') {
-        urls.add(ent.url);
+        addSafe(ent.url);
       } else if (ent.entity_type?.type === 'TextUrl' && ent.entity_type.value?.url) {
-        urls.add(ent.entity_type.value.url);
+        addSafe(ent.entity_type.value.url);
       } else if (ent.type === 'url' || ent.entity_type?.type === 'Url') {
-        const slice = rawText.slice(ent.offset, ent.offset + ent.length);
+        const slice = rawText.slice(ent.offset, ent.offset + ent.length).trim();
         if (slice) {
-          urls.add(slice.startsWith('http') ? slice : `https://${slice}`);
+          addSafe(slice.startsWith('http') ? slice : `https://${slice}`);
         }
       }
     }
@@ -130,7 +135,7 @@ function extractUrlsFromMessage(msg: MessageItem): string[] {
   const matches = rawText.match(/https?:\/\/[^\s<>"')]+/gi);
   if (matches) {
     for (const m of matches) {
-      urls.add(m.replace(/[.,;!?]+$/, ''));
+      addSafe(m.replace(/[.,;!?]+$/, ''));
     }
   }
   return Array.from(urls);
@@ -1118,20 +1123,30 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                   <span>{directPeer.phone}</span>
                 </div>
               )}
-              {(botMeta?.about || botMeta?.description || chat.about || directPeer?.bio) && (
-                <div
-                  style={{
-                    padding: '8px 10px',
-                    borderRadius: '8px',
-                    background: 'var(--tg-bg-elevated)',
-                    color: 'var(--tg-text-primary)',
-                    fontSize: '12.5px',
-                    lineHeight: 1.45,
-                  }}
-                >
-                  {botMeta?.about || botMeta?.description || chat.about || directPeer?.bio}
-                </div>
-              )}
+              {(() => {
+                const profileBio =
+                  peerCategory === 'bot'
+                    ? (botMeta?.description ||
+                        (botMeta?.about && botMeta.about !== chat.title ? botMeta.about : '') ||
+                        chat.about ||
+                        '')
+                    : (chat.about || directPeer?.bio || '');
+                if (!profileBio) return null;
+                return (
+                  <div
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: '8px',
+                      background: 'var(--tg-bg-elevated)',
+                      color: 'var(--tg-text-primary)',
+                      fontSize: '12.5px',
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    {profileBio}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* BOT-ONLY INSPECTOR SECTIONS (Commands, Mini App, Coding Agent Config, Privacy Policy) */}
@@ -2037,7 +2052,7 @@ export const RightColumn: React.FC<RightColumnProps> = ({ className }) => {
                         style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}
                       >
                         <a
-                          href={item.url}
+                          href={isSafeEntityUrl(item.url) ? item.url : undefined}
                           target="_blank"
                           rel="noopener noreferrer"
                           style={{

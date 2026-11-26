@@ -207,13 +207,11 @@ test.describe('Tier 1 — A10: Unified /api/v1/fabushi/* Runtime, Grok Bot UX & 
     request,
   }) => {
     const { page, user } = authSession;
-    const peerA = await registerUserViaApi(request, { firstName: 'Nora' });
-    const peerB = await registerUserViaApi(request, { firstName: 'Owen' });
-    // Ensure both real peers are discoverable contacts/chats
-    await createRealConversationFixture(request, user.token, {
-      peerUsername: peerA.username,
-      peerFirstName: peerA.firstName,
+    const convA = await createRealConversationFixture(request, user.token, {
+      peerFirstName: 'Nora',
     });
+    const peerA = convA.peer;
+    const peerB = await registerUserViaApi(request, { firstName: 'Owen' });
     const contactRes = await request.post(apiUrl(API_PATHS.contacts), {
       headers: authHeaders(user.token),
       data: { username: peerB.username },

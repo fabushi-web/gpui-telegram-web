@@ -76,7 +76,6 @@ export const BurgerMenuDrawer: React.FC<BurgerMenuDrawerProps> = ({
       >
         {/* Multi-Account Switcher Header (#menu-account-switcher) */}
         <div
-          id={DOM_IDS.MENU_ACCOUNT_SWITCHER}
           style={{
             padding: '14px 14px 10px',
             borderBottom: '1px solid var(--tg-border)',
@@ -86,41 +85,46 @@ export const BurgerMenuDrawer: React.FC<BurgerMenuDrawerProps> = ({
             gap: '8px',
           }}
         >
-          {currentUser && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <div
-                className="tg-avatar"
-                data-avatar="true"
-                data-color-index={String(currentUser.colorIndex)}
-              >
-                {getInitials(currentUser.firstName, currentUser.lastName, currentUser.username)}
-              </div>
-              <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+          <div
+            id={DOM_IDS.MENU_ACCOUNT_SWITCHER}
+            style={{ display: 'flex', alignItems: 'center', gap: '10px', minHeight: '36px' }}
+          >
+            {currentUser && (
+              <>
                 <div
-                  style={{
-                    fontSize: '14.5px',
-                    fontWeight: 700,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
+                  className="tg-avatar"
+                  data-avatar="true"
+                  data-color-index={String(currentUser.colorIndex)}
                 >
-                  {currentUser.firstName} {currentUser.lastName ?? ''}
+                  {getInitials(currentUser.firstName, currentUser.lastName, currentUser.username)}
                 </div>
-                <div
-                  style={{
-                    fontSize: '12px',
-                    color: 'var(--tg-text-secondary)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {currentUser.username ? `@${currentUser.username}` : `ID #${currentUser.userId}`}
+                <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+                  <div
+                    style={{
+                      fontSize: '14.5px',
+                      fontWeight: 700,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {currentUser.firstName} {currentUser.lastName ?? ''}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '12px',
+                      color: 'var(--tg-text-secondary)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {currentUser.username ? `@${currentUser.username}` : `ID #${currentUser.userId}`}
+                  </div>
                 </div>
-              </div>
-            </div>
-          )}
+              </>
+            )}
+          </div>
 
           {/* Stored Accounts List (up to 6 accounts) */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
@@ -349,12 +353,15 @@ export const BurgerMenuDrawer: React.FC<BurgerMenuDrawerProps> = ({
             }}
           />
 
-          {/* In-Place Night Mode & Language Toggles */}
+          {/* Night Mode & Language Toggles */}
           <button
             id={DOM_IDS.MENU_TOGGLE_NIGHT_MODE}
             type="button"
             role="menuitem"
-            onClick={toggleNightMode}
+            onClick={() => {
+              toggleNightMode();
+              setBurgerOpen(false);
+            }}
             className="tg-context-menu-item"
             style={{ justifyContent: 'space-between' }}
           >

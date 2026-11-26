@@ -141,15 +141,15 @@ function validateChatUsername(raw: unknown): string {
     throw new ApiError(
       400,
       'invalid_username',
-      'Username must be 3–32 alphanumeric/underscore characters',
+      'Username must be 5–32 alphanumeric/underscore characters',
     );
   }
   const clean = raw.trim().replace(/^@/, '');
-  if (!/^[A-Za-z0-9_]{3,32}$/.test(clean)) {
+  if (!/^[A-Za-z0-9_]{5,32}$/.test(clean)) {
     throw new ApiError(
       400,
       'invalid_username',
-      'Username must be 3–32 alphanumeric/underscore characters',
+      'Username must be 5–32 alphanumeric/underscore characters',
     );
   }
   return clean;

@@ -208,6 +208,7 @@ export interface SyncGetDifferenceResponse {
   pts: number;
   current_pts: number;
   updates: PtsUpdate[];
+  events?: PtsUpdate[];
   has_more: boolean;
   snapshot_required: boolean;
 }

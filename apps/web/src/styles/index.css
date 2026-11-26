@@ -1,9 +1,9 @@
 /* Barrel stylesheet importing the modular Fabushi Web v1.6.11 design system */
 @import "./reset.css";
 @import "./tokens.css";
-@import "./layout.css";
 @import "./auth.css";
 @import "./left.css";
 @import "./middle.css";
 @import "./right-settings-modals.css";
+@import "./layout.css";
 @import "./ai-miniapps.css";

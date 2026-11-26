@@ -319,8 +319,12 @@ export const LightboxViewer: React.FC = () => {
             data-testid="lightbox-zoom-out"
             aria-label="Zoom Out"
             title="Zoom Out (-)"
-            onClick={() => zoomLightbox(-0.5)}
-            disabled={lightboxState.zoom <= 1}
+            onClick={() => {
+              if (lightboxState.zoom > 1) {
+                zoomLightbox(-0.5);
+              }
+            }}
+            data-clamped={lightboxState.zoom <= 1 ? 'true' : undefined}
             style={toolbarBtnStyle(lightboxState.zoom <= 1)}
           >
             −
@@ -331,8 +335,12 @@ export const LightboxViewer: React.FC = () => {
             data-testid="lightbox-zoom-in"
             aria-label="Zoom In"
             title="Zoom In (+)"
-            onClick={() => zoomLightbox(0.5)}
-            disabled={lightboxState.zoom >= 4}
+            onClick={() => {
+              if (lightboxState.zoom < 4) {
+                zoomLightbox(0.5);
+              }
+            }}
+            data-clamped={lightboxState.zoom >= 4 ? 'true' : undefined}
             style={toolbarBtnStyle(lightboxState.zoom >= 4)}
           >
             ＋

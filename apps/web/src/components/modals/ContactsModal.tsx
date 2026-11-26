@@ -25,6 +25,7 @@ export const ContactsModal: React.FC<ContactsModalProps> = ({ onClose }) => {
 
   const isZh = language === 'zh-CN';
   const [searchQuery, setSearchQuery] = useState('');
+  const [showAddForm, setShowAddForm] = useState(false);
   const [firstName, setFirstName] = useState('');
   const [phoneOrUsername, setPhoneOrUsername] = useState('');
   const [lastName, setLastName] = useState('');
@@ -75,19 +76,19 @@ export const ContactsModal: React.FC<ContactsModalProps> = ({ onClose }) => {
     const rawHandle = phoneOrUsername.trim();
     const rawLast = lastName.trim();
 
-    if (!rawFirst && !rawHandle) {
+    if (!rawHandle) {
       setAlertError(
-        isZh ? '请输入联系人姓名与手机号/@用户名' : 'Please enter a name and phone or @username.',
+        isZh ? '请输入手机号或 @用户名' : 'Please enter a phone number or @username.',
       );
       return;
     }
 
-    let resolvedFirst = rawFirst || rawHandle.replace(/^@/, '');
-    let resolvedLast = rawLast;
-    if (!resolvedLast && resolvedFirst.includes(' ')) {
+    let resolvedFirst: string | undefined = rawFirst || undefined;
+    let resolvedLast: string | undefined = rawLast || undefined;
+    if (resolvedFirst && !resolvedLast && resolvedFirst.includes(' ')) {
       const parts = resolvedFirst.split(/\s+/);
       resolvedFirst = parts[0] ?? resolvedFirst;
-      resolvedLast = parts.slice(1).join(' ');
+      resolvedLast = parts.slice(1).join(' ') || undefined;
     }
 
     const isPhone = /^[+\d][\d\s()-]{3,}$/.test(rawHandle);
@@ -95,13 +96,14 @@ export const ContactsModal: React.FC<ContactsModalProps> = ({ onClose }) => {
     try {
       const added = await addContact({
         firstName: resolvedFirst,
-        lastName: resolvedLast || undefined,
+        lastName: resolvedLast,
         phone: isPhone ? rawHandle : undefined,
-        username: !isPhone && rawHandle ? rawHandle.replace(/^@+/, '') : undefined,
+        username: !isPhone ? rawHandle.replace(/^@+/, '') : undefined,
       });
       setFirstName('');
       setPhoneOrUsername('');
       setLastName('');
+      setShowAddForm(false);
       await ensureAndSelectDirectChat(added, false);
       pushToast(
         isZh ? `已添加联系人 ${added.firstName}` : `Added ${added.firstName} to contacts`,
@@ -163,18 +165,6 @@ export const ContactsModal: React.FC<ContactsModalProps> = ({ onClose }) => {
         </div>
 
         <div className="tg-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-          {/* Search Contacts */}
-          <div className="tg-search-pill">
-            <span>🔍</span>
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={isZh ? '搜索联系人…' : 'Search contacts…'}
-              aria-label={isZh ? '搜索联系人' : 'Search contacts'}
-            />
-          </div>
-
           {alertError && (
             <div
               role="alert"
@@ -190,54 +180,88 @@ export const ContactsModal: React.FC<ContactsModalProps> = ({ onClose }) => {
             </div>
           )}
 
-          {/* Add New Contact Form (First Name at nth(0), Phone/@username at nth(1)) */}
-          <form
-            onSubmit={handleAddContact}
-            className="tg-surface-card"
-            style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }}
-          >
-            <div style={{ fontSize: '12.5px', fontWeight: 600 }}>
-              + {isZh ? '添加新联系人' : 'Add Contact'}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-              <input
-                type="text"
-                name="firstName"
-                className="tg-input"
-                value={firstName}
-                onChange={(e) => setFirstName(e.target.value)}
-                placeholder={isZh ? '名字 (First Name)' : 'First Name'}
-                aria-label="First Name"
-              />
-              <input
-                type="tel"
-                name="phone"
-                className="tg-input"
-                value={phoneOrUsername}
-                onChange={(e) => setPhoneOrUsername(e.target.value)}
-                placeholder={isZh ? '手机号或 @用户名' : 'Phone or @username'}
-                aria-label="Phone or Username"
-              />
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <input
-                type="text"
-                name="lastName"
-                className="tg-input"
-                value={lastName}
-                onChange={(e) => setLastName(e.target.value)}
-                placeholder={isZh ? '姓氏 (可选)' : 'Last Name (optional)'}
-                aria-label="Last Name"
-              />
+          {!showAddForm ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {/* Search Contacts */}
+              <div className="tg-search-pill" style={{ flex: '1 1 auto' }}>
+                <span>🔍</span>
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder={isZh ? '搜索联系人…' : 'Search contacts…'}
+                  aria-label={isZh ? '搜索联系人' : 'Search contacts'}
+                />
+              </div>
               <button
-                type="submit"
+                type="button"
                 className="tg-btn tg-btn--primary"
                 style={{ flexShrink: 0 }}
+                onClick={() => {
+                  setShowAddForm(true);
+                  setAlertError(null);
+                }}
               >
-                {isZh ? '添加联系人' : 'Add Contact'}
+                + {isZh ? '添加联系人' : 'Add Contact'}
               </button>
             </div>
-          </form>
+          ) : (
+            /* Add New Contact Form (@username/phone first, optional First/Last Name) */
+            <form
+              onSubmit={handleAddContact}
+              className="tg-surface-card"
+              style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }}
+            >
+              <div style={{ fontSize: '12.5px', fontWeight: 600 }}>
+                + {isZh ? '添加新联系人' : 'Add Contact'}
+              </div>
+              <input
+                type="text"
+                name="phoneOrUsername"
+                className="tg-input"
+                autoFocus
+                value={phoneOrUsername}
+                onChange={(e) => setPhoneOrUsername(e.target.value)}
+                placeholder={isZh ? '输入 @用户名 或手机号' : '@username or phone number'}
+                aria-label="Username or Phone"
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                <input
+                  type="text"
+                  name="firstName"
+                  className="tg-input"
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  placeholder={isZh ? '名字 (可选)' : 'First Name (optional)'}
+                  aria-label="First Name (optional)"
+                />
+                <input
+                  type="text"
+                  name="lastName"
+                  className="tg-input"
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  placeholder={isZh ? '姓氏 (可选)' : 'Last Name (optional)'}
+                  aria-label="Last Name (optional)"
+                />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="tg-btn tg-btn--secondary"
+                  onClick={() => {
+                    setShowAddForm(false);
+                    setAlertError(null);
+                  }}
+                >
+                  {t('common.cancel', language)}
+                </button>
+                <button type="submit" className="tg-btn tg-btn--primary">
+                  {isZh ? '保存联系人' : 'Save Contact'}
+                </button>
+              </div>
+            </form>
+          )}
 
           {/* Contact List */}
           <div

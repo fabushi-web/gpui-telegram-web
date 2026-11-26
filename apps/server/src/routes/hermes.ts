@@ -3488,18 +3488,20 @@ export function registerHermesStudioRoutes(
         color: typeof body.avatar_color === 'string' ? body.avatar_color : undefined,
       });
 
+      const cleanDescription = typeof body.description === 'string' ? body.description.trim() : '';
+      const cleanAbout =
+        typeof body.title === 'string' && body.title.trim()
+          ? body.title.trim()
+          : cleanDescription;
       botToken = `${botUserId}:AA${crypto.randomBytes(18).toString('base64url')}`;
       entry = {
         bot_user_id: botUserId,
         owner_user_id: auth.userId,
         username,
         display_name: displayName,
-        description: typeof body.description === 'string' ? body.description.trim() : '',
-        about: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : displayName,
-        ai_persona:
-          typeof body.description === 'string' && body.description.trim()
-            ? body.description.trim()
-            : `You are ${displayName}, an AI assistant bot.`,
+        description: cleanDescription,
+        about: cleanAbout,
+        ai_persona: cleanDescription || `You are ${displayName}, an AI assistant bot.`,
         commands,
         is_official: false,
         is_inline: true,
@@ -3643,6 +3645,8 @@ export function registerHermesStudioRoutes(
 
     const entry = JSON.parse(row.bot_json) as BotRegistryEntry;
 
+    const previousDisplayName = entry.display_name;
+    const previousDescription = entry.description;
     if (patch.display_name !== undefined && patch.display_name !== null && typeof patch.display_name !== 'string') {
       throw new ApiError(400, 'invalid_display_name', 'display_name must be a string');
     }
@@ -3654,7 +3658,14 @@ export function registerHermesStudioRoutes(
       entry.display_name = dn;
     }
     if (typeof patch.description === 'string') {
-      entry.description = patch.description.trim();
+      const nextDescription = patch.description.trim();
+      entry.description = nextDescription;
+      if (
+        typeof patch.title !== 'string' &&
+        (!entry.about || entry.about === previousDescription || entry.about === previousDisplayName)
+      ) {
+        entry.about = nextDescription;
+      }
     }
     if (typeof patch.title === 'string') {
       entry.about = patch.title.trim();
@@ -3693,6 +3704,11 @@ export function registerHermesStudioRoutes(
     db.prepare(`UPDATE users SET first_name = ?, bio = ? WHERE user_id = ?`).run(
       entry.display_name,
       entry.description,
+      row.bot_user_id,
+    );
+    db.prepare(`UPDATE chats SET title = ?, about = ? WHERE kind = 'bot' AND peer_user_id = ?`).run(
+      entry.display_name,
+      entry.description || entry.about || null,
       row.bot_user_id,
     );
 
